@@ -1678,6 +1678,14 @@ mod tests {
     use super::super::geometry::{ImportedRect, OverlapPolicy};
     use super::*;
 
+    #[test]
+    fn session_clock_keeps_waiting_decoder_live_through_output_gap_longer_than_five_seconds() {
+        super::super::decoder::assert_session_clock_gap_with_driver(
+            |clock, stop| SessionClockDriver::start(clock, stop).unwrap(),
+            |driver| driver.stop().unwrap(),
+        );
+    }
+
     // A stop can wait for a reader entering Registry publication, while an
     // attach already holding Registry needs the worker collection. try_lock
     // observes both edges without ever creating a hanging test thread.

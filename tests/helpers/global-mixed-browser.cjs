@@ -45,7 +45,10 @@ function scenarioTargets(name, scenario) {
 }
 function installPlaybackObservation() {
     window.__mixedObserved = [];
+    window.__mixedObservedDiagnostics = [];
     window.__mixedPlaying = null;
+    const mediaIds = new WeakMap();
+    let nextMediaId = 1;
     document.addEventListener(
         "playing",
         (event) => {
@@ -56,6 +59,51 @@ function installPlaybackObservation() {
                 url: event.target.currentSrc,
             });
             const owner = window.__ottCoreBackendPeek?.()?.current?.();
+            let mediaId = mediaIds.get(event.target);
+            if (mediaId === undefined) {
+                mediaId = nextMediaId++;
+                mediaIds.set(event.target, mediaId);
+            }
+            const fixturePath = (raw) => {
+                if (!raw) return "";
+                try {
+                    const url = new URL(raw, document.baseURI);
+                    return url.origin === location.origin
+                        ? url.pathname
+                        : `[non-fixture:${url.protocol}]`;
+                } catch {
+                    return "[non-url]";
+                }
+            };
+            let generation = null;
+            try {
+                const snapshot = window.__ottClassicPlayback?.snapshot?.();
+                if (
+                    typeof snapshot?.generation === "number" ||
+                    typeof snapshot?.generation === "string"
+                )
+                    generation = snapshot.generation;
+            } catch {
+                // Diagnostics must not change or interrupt the playback observer.
+            }
+            const diagnostics = window.__mixedObservedDiagnostics;
+            if (diagnostics.length === 64) diagnostics.shift();
+            diagnostics.push({
+                assignedSrc: fixturePath(event.target.getAttribute("src")),
+                currentSrc: fixturePath(event.target.currentSrc),
+                currentTime: Number.isFinite(event.target.currentTime)
+                    ? Number(event.target.currentTime.toFixed(3))
+                    : null,
+                ended: event.target.ended,
+                generation,
+                isCurrentVideo: event.target === window.video,
+                isCurrentOwnerMedia:
+                    owner?.diagnosticMedia?.()?.media === event.target,
+                mediaId,
+                paused: event.target.paused,
+                provider: typeof provider === "string" ? provider : "[unknown]",
+                readyState: event.target.readyState,
+            });
             if (owner?.diagnosticMedia?.()?.media !== event.target) return;
             window.__mixedPlaying = {
                 generation: window.__ottClassicPlayback.snapshot().generation,

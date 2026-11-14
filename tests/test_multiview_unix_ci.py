@@ -985,6 +985,11 @@ class BoundaryContracts(unittest.TestCase):
 
 
 class CoreRequiredContracts(unittest.TestCase):
+    def test_clock_gap_inventory_uses_real_session_driver_test_context(self):
+        suffix = '::tests::session_clock_keeps_waiting_decoder_live_through_output_gap_longer_than_five_seconds'
+        self.assertIn('multiview::persistent' + suffix, ci.CORE_REQUIRED_CLOCK_RETIREMENT_TESTS)
+        self.assertNotIn('multiview::decoder' + suffix, ci.CORE_REQUIRED_CLOCK_RETIREMENT_TESTS)
+
     def test_each_frozen_authority_regression_is_mandatory_and_cannot_be_ignored(self):
         self.assertEqual(ci.CORE_REQUIRED_TESTS, frozenset(CORE_REQUIRED_NAMES))
         self.assertEqual(len(CORE_REQUIRED_NAMES), 3)
@@ -1413,8 +1418,29 @@ class ParsingTests(unittest.TestCase):
     def test_pinned_guard_and_exact_existing_fixture_inventory(self):
         self.assertEqual(hashlib.sha256(REFERENCE.read_bytes()).hexdigest(), ci.GUARD_SHA256)
         self.assertEqual(tuple(name for name, _ in ci.TESTS), EXPECTED_TESTS)
-        self.assertEqual(len(ci.BROKER_TESTS), 55)
-        self.assertEqual(hashlib.sha256("\n".join(sorted(ci.BROKER_TESTS)).encode("utf8")).hexdigest(),
+        self.assertEqual(len(ci.BROKER_TESTS - ci.BROKER_PRODUCTION_TESTS), 55)
+        self.assertEqual(hashlib.sha256("\n".join(sorted(ci.BROKER_TESTS - ci.BROKER_PRODUCTION_TESTS)).encode("utf8")).hexdigest(),
+                         "6e92eb3d53b6de4ae38ec7bdfdef92883e87f4a2e887efe2c4539b20a1fc4f9f")
+
+    def test_exact_mandatory_production_broker_inventory(self):
+        self.assertEqual(len(ci.BROKER_TESTS), 68)
+        self.assertEqual(len(ci.BROKER_PRODUCTION_TESTS), 13)
+        self.assertEqual(ci.BROKER_PRODUCTION_TESTS, frozenset({
+            'broker::production_tests::busy_host_state_refuses_renew_without_waiting_or_mutating_lease',
+            'broker::production_tests::busy_monotonic_deadline_refuses_renew_without_waiting_or_mutating_lease',
+            'broker::production_tests::credential_expiring_between_admission_and_commit_cannot_renew',
+            'broker::production_tests::expired_monotonic_owner_lease_rejects_renew_even_if_wall_clock_moves_back',
+            'broker::production_tests::expired_soft_lease_cannot_be_resurrected_by_registry_renewal',
+            'broker::production_tests::media_checks_and_reporting_never_renew_and_held_body_loses_authority',
+            'broker::production_tests::monotonic_expiry_revokes_body_even_when_test_wall_clock_moves_back',
+            'broker::production_tests::ordinary_constructor_remains_zero_capacity',
+            'broker::production_tests::production_opt_in_preserves_fixture_limit_and_shutdown_is_terminal',
+            'broker::production_tests::production_rejects_unknown_adapters_and_overlong_custody',
+            'broker::production_tests::renew_keeps_signed_path_and_hard_ceiling_but_advances_only_live_deadline',
+            'broker::production_tests::revoked_output_and_credential_cannot_extend_lease',
+            'broker::production_tests::stale_binding_or_credential_revision_cannot_renew',
+        }))
+        self.assertEqual(hashlib.sha256("\n".join(sorted(ci.BROKER_TESTS - ci.BROKER_PRODUCTION_TESTS)).encode("utf8")).hexdigest(),
                          "6e92eb3d53b6de4ae38ec7bdfdef92883e87f4a2e887efe2c4539b20a1fc4f9f")
 
     def test_fd_must_be_in_input_section(self):

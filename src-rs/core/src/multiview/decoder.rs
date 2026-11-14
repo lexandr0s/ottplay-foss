@@ -4217,6 +4217,15 @@ impl Drop for Decoder {
     }
 }
 
+/// Real-driver test observer; literal decoder fixtures need no Session module.
+#[cfg(test)]
+pub(super) fn assert_session_clock_gap_with_driver<D>(
+    start_driver: impl FnOnce(Arc<PresentationClock>, Arc<AtomicBool>) -> D,
+    stop_driver: impl FnOnce(&mut D),
+) {
+    tests::assert_session_clock_gap_with_driver(start_driver, stop_driver);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5980,8 +5989,10 @@ mod tests {
             Ok(())
         );
     }
-    #[test]
-    fn session_clock_keeps_waiting_decoder_live_through_output_gap_longer_than_five_seconds() {
+    pub(super) fn assert_session_clock_gap_with_driver<D>(
+        start_driver: impl FnOnce(Arc<PresentationClock>, Arc<AtomicBool>) -> D,
+        stop_driver: impl FnOnce(&mut D),
+    ) {
         fn waiting_source(master: Arc<PresentationClock>, base: Instant) -> SourceClock {
             let clock = SourceClock::with_presentation(false, Some(master));
             clock.state.lock().unwrap().origin = Some(ClockOrigin {
@@ -6006,9 +6017,7 @@ mod tests {
 
         let master = Arc::new(PresentationClock::new());
         let stop = Arc::new(AtomicBool::new(false));
-        let mut driver =
-            super::super::persistent::SessionClockDriver::start(master.clone(), stop.clone())
-                .unwrap();
+        let mut driver = start_driver(master.clone(), stop.clone());
         let source = waiting_source(master.clone(), master.current().unwrap().unwrap());
         let gap = Instant::now();
         // There is no encoder, audio callback or synthetic output tick in this
@@ -6027,7 +6036,7 @@ mod tests {
         }
         assert!(gap.elapsed() > Duration::from_secs(6));
         assert!(!source.fault.load(Ordering::Acquire));
-        driver.stop().unwrap();
+        stop_driver(&mut driver);
         assert!(stop.load(Ordering::Acquire));
     }
     #[test]

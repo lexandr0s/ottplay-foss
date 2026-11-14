@@ -3,6 +3,8 @@
 import json
 import os
 import runpy
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -222,6 +224,66 @@ class AlpineTools(unittest.TestCase):
         self.process.stderr.close.assert_called_once()
         self.assertEqual(self.popen.call_args.kwargs["env"], {"PATH": "/usr/bin:/bin"})
         self.assertTrue(self.popen.call_args.kwargs["start_new_session"])
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("awk"),
+                         "actual AWK execution is a Unix-only contract")
+    def test_actual_awk_accepts_only_bare_or_documented_perstream_option_tokens(self):
+        for suffix in ("", "[:<stream_spec>]", "[:stream_specifier]"):
+            raw = "\n".join(name + suffix + " descriptive help" for name in
+                            ("-stats_enc_pre", "-stats_enc_pre_fmt")) + "\n"
+            result = subprocess.run([shutil.which("awk"), M["STATS_OPTIONS_AWK"]],
+                                    input=raw, text=True, capture_output=True, timeout=2, check=False)
+            self.assertEqual(result.returncode, 0, suffix)
+        for raw in (
+            "-stats_enc_pre\n", "-stats_enc_pre_fmt[:<stream_spec>]\n",
+            "-stats_enc_pre_extra\n-stats_enc_pre_fmt\n",
+            "prefix-stats_enc_pre\n-stats_enc_pre_fmt\n",
+            "-stats_enc_pre[:<stream_spec>]junk\n-stats_enc_pre_fmt\n",
+            "-stats_enc_pre[:unknown]\n-stats_enc_pre_fmt\n",
+            "-stats_enc_pre\n-stats_enc_pre_fmt_extra\n",
+        ):
+            result = subprocess.run([shutil.which("awk"), M["STATS_OPTIONS_AWK"]],
+                                    input=raw, text=True, capture_output=True, timeout=2, check=False)
+            self.assertNotEqual(result.returncode, 0, raw)
+        self.assertIn("awk '" + M["STATS_OPTIONS_AWK"] + "' help", M["SMOKE"])
+
+    def test_failure_retains_allowlisted_progress_redacted_tails_and_cleans_group(self):
+        raw = (b"ASSERT ffmpeg-fd\nASSERT ffprobe-fd\nASSERT unknown\n"
+               b"ASSERT ffmpeg-fd\nAuthorization=private\nhttps://u:p@example.test/token\n")
+        with self.assertRaises(M["SmokeError"]) as raised:
+            self.bounded_fake(out=raw, err=b"secret=hidden\nAuthorization: Bearer bearer-private", code=1)
+        failure = raised.exception
+        self.assertEqual(failure.diagnostics["completedAssertions"], ["ffmpeg-fd", "ffprobe-fd"])
+        self.assertIn("ASSERT ffprobe-fd", failure.diagnostics["stdoutTail"])
+        for secret in ("private", "hidden", "https://", "u:p", "Bearer"):
+            self.assertNotIn(secret, str(failure))
+        self.assertNotIn("\n", str(failure))
+        self.kill.assert_called_once_with(123, 9)
+        self.process.wait.assert_any_call(timeout=2)
+        self.process.stdout.close.assert_called_once()
+        self.process.stderr.close.assert_called_once()
+
+    def test_failed_tool_receipt_retains_progress_but_never_passes(self):
+        fake = DockerFake()
+        def runner(*args, **kwargs):
+            if kwargs["label"] == "tools":
+                diagnostics = M["failure_diagnostics"]({
+                    "stdout": b"ASSERT ffmpeg-fd\nASSERT ffprobe-fd\n", "stderr": b""})
+                raise M["SmokeError"]("tools: exit 1", diagnostics=diagnostics)
+            return fake(*args, **kwargs)
+        result = self.execute(runner)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["failureDiagnostics"]["completedAssertions"], ["ffmpeg-fd", "ffprobe-fd"])
+        self.assertFalse(fake.container or fake.image)
+        self.assertEqual(result["cleanupErrors"], [])
+
+    def test_progress_tail_is_bounded_and_redacts_before_truncation(self):
+        diagnostics = M["failure_diagnostics"]({
+            "stdout": b"token=" + b"private" * 1000, "stderr": b"x" * 9000})
+        self.assertNotIn("private", diagnostics["stdoutTail"])
+        self.assertLessEqual(len(diagnostics["stdoutTail"]), 4096)
+        self.assertLessEqual(len(diagnostics["stderrTail"]), 4096)
+        self.assertEqual(diagnostics["completedAssertions"], [])
 
     def test_bounded_output_limit_still_kills_and_reaps(self):
         with self.assertRaisesRegex(M["SmokeError"], "output limit"):

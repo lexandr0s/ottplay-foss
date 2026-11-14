@@ -95,14 +95,29 @@ BROKER_TESTS = frozenset({
     'strict_json_limits_and_unqualified_control_never_report_accepted_play',
     'unchanged_output_survives_focus_cas_but_new_publication_requires_fresh_binding',
     'unpolled_media_connections_end_on_current_authority_without_fake_reaping',
+    'broker::production_tests::busy_host_state_refuses_renew_without_waiting_or_mutating_lease',
+    'broker::production_tests::busy_monotonic_deadline_refuses_renew_without_waiting_or_mutating_lease',
+    'broker::production_tests::credential_expiring_between_admission_and_commit_cannot_renew',
+    'broker::production_tests::expired_monotonic_owner_lease_rejects_renew_even_if_wall_clock_moves_back',
+    'broker::production_tests::expired_soft_lease_cannot_be_resurrected_by_registry_renewal',
+    'broker::production_tests::media_checks_and_reporting_never_renew_and_held_body_loses_authority',
+    'broker::production_tests::monotonic_expiry_revokes_body_even_when_test_wall_clock_moves_back',
+    'broker::production_tests::ordinary_constructor_remains_zero_capacity',
+    'broker::production_tests::production_opt_in_preserves_fixture_limit_and_shutdown_is_terminal',
+    'broker::production_tests::production_rejects_unknown_adapters_and_overlong_custody',
+    'broker::production_tests::renew_keeps_signed_path_and_hard_ceiling_but_advances_only_live_deadline',
+    'broker::production_tests::revoked_output_and_credential_cannot_extend_lease',
+    'broker::production_tests::stale_binding_or_credential_revision_cannot_renew',
 })
+BROKER_PRODUCTION_TESTS = frozenset(name for name in BROKER_TESTS
+                                    if name.startswith('broker::production_tests::'))
 CORE_REQUIRED_TESTS = frozenset({
     'multiview::broker::registry::try_authority_tests::try_session_authority_returns_busy_without_callback_then_recovers',
     'multiview::broker::registry::try_authority_tests::try_session_authority_maps_poison_to_unavailable_without_callback',
     'multiview::broker::registry::try_authority_tests::try_session_authority_preserves_authorization_and_output_block',
 })
 CORE_REQUIRED_CLOCK_RETIREMENT_TESTS = frozenset({
-    'multiview::decoder::tests::session_clock_keeps_waiting_decoder_live_through_output_gap_longer_than_five_seconds',
+    'multiview::persistent::tests::session_clock_keeps_waiting_decoder_live_through_output_gap_longer_than_five_seconds',
     'multiview::decoder::tests::confirmed_decoder_retirement_retains_pending_reader_and_sticky_join_failure',
     'multiview::decoder::tests::failed_stream_startup_returns_partial_decoder_without_dropping_its_reader',
     'multiview::encoder::runtime::transport_tests::session_constructor_returns_same_capacity_before_and_after_ticket_transfer',

@@ -21,6 +21,9 @@ ASSERTIONS = {
     "fd-probe", "fd-decode", "canonical-mkfifo-argv0", "files-removed",
 }
 LIMIT = 4 * 1024 * 1024
+# Only the two documented per-stream spellings may qualify an exact option.
+STATS_OPTIONS_AWK = r'''{name=$1; sub(/\[:(<stream_spec>|stream_specifier)\]$/, "", name)}
+name=="-stats_enc_pre"{a=1} name=="-stats_enc_pre_fmt"{b=1} END{exit(!(a&&b))}'''
 SMOKE = r'''#!/bin/sh
 set -eu
 umask 077
@@ -34,7 +37,7 @@ for tool in ffmpeg ffprobe; do
 done
 /usr/bin/ffmpeg -hide_banner -h full > help 2>/dev/null
 test "$(wc -c < help)" -le 4194304
-awk '$1=="-stats_enc_pre"{a=1} $1=="-stats_enc_pre_fmt"{b=1} END{exit(!(a&&b))}' help
+awk '@@STATS_OPTIONS_AWK@@' help
 printf 'ASSERT stream-stats\n'
 resolved=$(readlink -f /usr/bin/mkfifo)
 test "$resolved" = /bin/busybox
@@ -69,11 +72,13 @@ sha256sum /usr/bin/ffmpeg /usr/bin/ffprobe /bin/busybox
 rm audio.fifo progress.fifo sample.ts probe video.rgb audio.pcm help ffmpeg.protocols ffprobe.protocols
 test -z "$(ls -A /work)"
 printf 'ASSERT files-removed\n'
-'''
+'''.replace("@@STATS_OPTIONS_AWK@@", STATS_OPTIONS_AWK)
 
 
 class SmokeError(Exception):
-    pass
+    def __init__(self, message, *, diagnostics=None):
+        super().__init__(message)
+        self.diagnostics = diagnostics
 
 
 OPERATION_ERRORS = (SmokeError, OSError, ValueError, KeyError, TypeError,
@@ -112,10 +117,22 @@ def clean_environment(home):
 
 
 def safe_tail(raw):
-    text = raw[-4096:].decode("utf-8", "replace")
+    text = raw.decode("utf-8", "replace")
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
     text = re.sub(r"https?://[^\s]+", "[url]", text)
+    text = re.sub(r"(?i)(authorization\s*[:=]\s*)[^\r\n]+", r"\1[redacted]", text)
     text = re.sub(r"(?i)(token|authorization|password|secret)(\s*[:=]\s*)[^\s]+", r"\1\2[redacted]", text)
-    return text
+    return text[-4096:]
+
+
+def failure_diagnostics(buffers):
+    # Progress is evidence only, never a substitute for parse_output + exit/cleanup.
+    completed = []
+    for line in buffers["stdout"].decode("ascii", "replace").splitlines():
+        if line.startswith("ASSERT ") and line[7:] in ASSERTIONS and line[7:] not in completed:
+            completed.append(line[7:])
+    return {"stdoutTail": safe_tail(buffers["stdout"]),
+            "stderrTail": safe_tail(buffers["stderr"]), "completedAssertions": completed}
 
 
 def bounded(argv, *, env, timeout, label, limit=LIMIT):
@@ -146,9 +163,14 @@ def bounded(argv, *, env, timeout, label, limit=LIMIT):
                 buffers[key.data].extend(part)
         code = process.wait(timeout=max(0.01, timeout - (time.monotonic() - started)))
         if code != 0:
-            detail = json.dumps(safe_tail(buffers["stderr"]), ensure_ascii=True)
-            raise SmokeError(f"{label}: exit {code}; stderr={detail}")
+            raise SmokeError(f"{label}: exit {code}")
         return bytes(buffers["stdout"])
+    except OPERATION_ERRORS as caught:
+        diagnostics = failure_diagnostics(buffers)
+        detail = json.dumps(diagnostics, ensure_ascii=True, separators=(",", ":"))
+        cause = json.dumps(safe_tail(str(caught).encode()), ensure_ascii=True)
+        raise SmokeError(f"{label}: {cause}; diagnostics={detail}",
+                         diagnostics=diagnostics) from caught
     finally:
         selector.close()
         if process is not None:
@@ -253,6 +275,8 @@ def run_smoke(repo, work, *, runner=bounded):
     except OPERATION_ERRORS as caught:
         error = caught
         evidence["error"] = str(caught)
+        if isinstance(caught, SmokeError) and caught.diagnostics is not None:
+            evidence["failureDiagnostics"] = caught.diagnostics
     finally:
         # Reconcile by the random label even if build/create timed out after
         # the daemon accepted it. Never prune shared images or containers.
