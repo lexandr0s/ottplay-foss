@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 // A release-bound Samsung TV package. Signing stays on the user's computer.
+const {
+    validateBuiltHomeIntegration,
+} = require("./home-integration-assets.cjs");
 const assert = require("node:assert/strict");
 const { execFileSync } = require("node:child_process");
 const { createHash } = require("node:crypto");
@@ -209,6 +212,9 @@ print(json.dumps(result))
                     identity.source,
                 ]
             ).toString("utf8")
+        );
+        validateBuiltHomeIntegration(
+            path.join(fs.realpathSync(destination), "dist/home")
         );
         const files = collectFiles(destination);
         const classic = JSON.parse(

@@ -13,8 +13,37 @@ export function installHomeIntegrationRuntime(w: any): any {
                 w.__ottStandby.blocked())
         );
     }
+    function packageBase(): string | null {
+        if (w.location.protocol !== "file:" || !w.__ottPkgBase) return "";
+        try {
+            var marker = w.__OTTPLAY_TIZEN_PACKAGE__,
+                tizen = w.tizen;
+            var href = String(w.location.href).split(/[?#]/)[0];
+            var base = href.substring(0, href.lastIndexOf("/"));
+            if (
+                !marker ||
+                marker.schema !== 1 ||
+                !tizen ||
+                !tizen.application ||
+                typeof tizen.application.getCurrentApplication !== "function" ||
+                href.indexOf("file:///") !== 0 ||
+                base.length <= 7 ||
+                base !== w.__ottPkgBase ||
+                typeof w.packagedTizenAssetBase !== "function" ||
+                base !== w.packagedTizenAssetBase()
+            )
+                return null;
+            return base;
+        } catch (_) {
+            return null;
+        }
+    }
     function open(): boolean {
         if (blocked()) return false;
+        var base = packageBase();
+        if (base === null) return false;
+        var homePath =
+            (base ? base.substring(7) : "") + "/dist/home/index.html";
         if (current) {
             if (current.active()) {
                 current.focus();
@@ -129,7 +158,7 @@ export function installHomeIntegrationRuntime(w: any): any {
         frame.style.border = "0";
         frame.setAttribute("referrerpolicy", "no-referrer");
         // Fixed packaged asset only: no URL, HA token or bridge key in the host adapter.
-        frame.src = "/dist/home/index.html";
+        frame.src = base + "/dist/home/index.html";
         frame.onload = function (): void {
             if (!owns()) return;
             try {
@@ -138,7 +167,7 @@ export function installHomeIntegrationRuntime(w: any): any {
                     !child ||
                     child.location.protocol !== w.location.protocol ||
                     child.location.host !== w.location.host ||
-                    child.location.pathname !== "/dist/home/index.html"
+                    child.location.pathname !== homePath
                 ) {
                     teardown(true);
                     return;

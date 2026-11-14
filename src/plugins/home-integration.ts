@@ -29,6 +29,24 @@ export function installHomeIntegration(w: any): any {
             typeof owner.own !== "function"
         )
             return false;
+        var base = "";
+        if (w.location.protocol === "file:" && w.__ottPkgBase) {
+            try {
+                base = w.__ottPkgBase;
+                if (
+                    base.indexOf("file:///") !== 0 ||
+                    typeof w.packagedTizenAssetBase !== "function" ||
+                    base !== w.packagedTizenAssetBase() ||
+                    base !==
+                        String(w.location.href)
+                            .split(/[?#]/)[0]
+                            .replace(/\/[^/]*$/, "")
+                )
+                    return false;
+            } catch (_) {
+                return false;
+            }
+        }
         if (pending) return true;
         if (w.__ottHomeHostInstall) return w.__ottHomeHostInstall(w).open();
         var script = d.createElement("script"),
@@ -61,7 +79,7 @@ export function installHomeIntegration(w: any): any {
         pending = cancel;
         release = owner.own(cancel);
         if (!live) return false;
-        script.src = "/dist/home/host.js";
+        script.src = base + "/dist/home/host.js";
         script.onload = function (): void {
             var allowed = valid();
             cancel();

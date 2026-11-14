@@ -284,9 +284,80 @@ function stageHomeIntegration(sourceRoot, targetRoot, compiler) {
     }
     return manifest;
 }
+// Copy an already-built public payload without loading a TypeScript compiler.
+// Read and validate the complete fixed inventory before creating any destination.
+function readBuiltHomeIntegration(source) {
+    const parents = directory(source, false);
+    const names = [...OUTPUT_FILES, "assets.json"];
+    if (
+        JSON.stringify(fs.readdirSync(source).sort()) !==
+        JSON.stringify([...names].sort())
+    )
+        invalid();
+    const payloads = new Map(
+        names.map((name) => {
+            const file = path.join(source, name),
+                stat = fs.lstatSync(file);
+            if (
+                !stat.isFile() ||
+                stat.isSymbolicLink() ||
+                stat.nlink !== 1 ||
+                !stat.size ||
+                stat.size > LIMIT
+            )
+                invalid();
+            return [name, readPublicFile(file, stat, parents)];
+        })
+    );
+    const manifest = JSON.parse(payloads.get("assets.json").toString("utf8"));
+    if (
+        Object.keys(manifest).sort().join(",") !== "files,version" ||
+        manifest.version !== 1 ||
+        !Array.isArray(manifest.files) ||
+        manifest.files.length !== OUTPUT_FILES.length
+    )
+        invalid();
+    const seen = new Set();
+    for (const item of manifest.files) {
+        if (
+            !item ||
+            Object.keys(item).sort().join(",") !== "bytes,name,sha256" ||
+            !OUTPUT_FILES.includes(item.name) ||
+            seen.has(item.name)
+        )
+            invalid();
+        seen.add(item.name);
+        const body = payloads.get(item.name);
+        if (
+            item.bytes !== body.length ||
+            item.sha256 !==
+                crypto.createHash("sha256").update(body).digest("hex")
+        )
+            invalid();
+    }
+    return { manifest, payloads };
+}
+function validateBuiltHomeIntegration(source) {
+    return readBuiltHomeIntegration(source).manifest;
+}
+function copyBuiltHomeIntegration(source, destination) {
+    const { manifest, payloads } = readBuiltHomeIntegration(source);
+    const outputParents = directory(destination, true);
+    if (fs.readdirSync(destination).length) invalid();
+    for (const [name, body] of payloads)
+        writePublicFile(
+            path.join(destination, name),
+            body,
+            null,
+            outputParents
+        );
+    return manifest;
+}
 module.exports = {
     FILES,
     OUTPUT_FILES,
+    copyBuiltHomeIntegration,
     generateHostScript,
     stageHomeIntegration,
+    validateBuiltHomeIntegration,
 };

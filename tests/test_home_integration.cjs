@@ -29,6 +29,38 @@ function addRuntime(source) {
         file
     );
 }
+const bootstrapSource = fs.readFileSync(
+    path.join(process.env.OTT_HOME_TEST_REPO || root, "index.html"),
+    "utf8"
+);
+const bootstrap = bootstrapSource.slice(
+    bootstrapSource.indexOf("function packagedTizenAssetBase()"),
+    bootstrapSource.indexOf(
+        "var host =",
+        bootstrapSource.indexOf("function packagedTizenAssetBase()")
+    )
+);
+function bootPackage(w) {
+    assert.ok(
+        bootstrap.includes("window.__ottPkgBase = packagedTizenAssetBase()")
+    );
+    vm.runInNewContext(
+        bootstrap + ";window.packagedTizenAssetBase=packagedTizenAssetBase;",
+        { window: w }
+    );
+}
+function packaged(f) {
+    f.w.location = {
+        protocol: "file:",
+        host: "",
+        href: "file:///opt/apps/test/res/wgt/index.html?x#y",
+        pathname: "/opt/apps/test/res/wgt/index.html",
+    };
+    f.w.__OTTPLAY_TIZEN_PACKAGE__ = { schema: 1 };
+    f.w.tizen = { application: { getCurrentApplication() {} } };
+    bootPackage(f.w);
+    return f;
+}
 const HOST = generateHostScript(root, ts).toString("utf8");
 acorn.parse(HOST, { ecmaVersion: 5 });
 function load() {
@@ -101,9 +133,12 @@ function fixture(options = {}) {
         if (tag === "iframe")
             node.contentWindow = {
                 location: {
-                    protocol: "https:",
-                    host: "player.example",
-                    pathname: "/dist/home/index.html",
+                    protocol: w.location.protocol,
+                    host: w.location.host,
+                    pathname:
+                        (w.location.protocol === "file:" && w.__ottPkgBase
+                            ? w.__ottPkgBase.substring(7)
+                            : "") + "/dist/home/index.html",
                 },
                 document: {
                     createEvent: () => ({
@@ -136,7 +171,11 @@ function fixture(options = {}) {
     };
     const w = {
         document: d,
-        location: { protocol: "https:", host: "player.example" },
+        location: {
+            protocol: "https:",
+            host: "player.example",
+            href: "https://player.example/index.html",
+        },
         aboutKeyHandler: previous,
         keys: { RETURN: 8, EXIT: 81, ENTER: 13, DOWN: 40, RIGHT: 39 },
         saveListPanelState() {
@@ -670,4 +709,98 @@ test("generated ES5 host only installs a factory; fixed runtime source admission
             assert.throws(() => stageHomeIntegration(a.source, a.target));
             assert.equal(fs.existsSync(a.target), false);
         });
+});
+
+test("validated Tizen file package uses only its actual boot base", () => {
+    const f = packaged(fixture({ deferScript: true }));
+    const home = load().installHomeIntegration(f.w);
+    assert.equal(home.open(), true);
+    assert.equal(
+        f.scripts[0].src,
+        "file:///opt/apps/test/res/wgt/dist/home/host.js"
+    );
+    f.complete();
+    const frame = f.frame();
+    assert.equal(
+        frame.src,
+        "file:///opt/apps/test/res/wgt/dist/home/index.html"
+    );
+    frame.onload();
+    assert.equal(typeof frame.contentWindow.OTTHomeHost.close, "function");
+    home.close();
+});
+test("file package rejects misplaced or external bases even with spoofed boot globals", () => {
+    for (const base of [
+        "https://evil.example",
+        "file:///opt/apps/test/res/wgt/other",
+    ]) {
+        const f = packaged(fixture());
+        f.w.__ottPkgBase = f.w.__host = base;
+        f.w.packagedTizenAssetBase = () => base;
+        assert.equal(load().showHomeIntegration(f.w), false);
+        assert.equal(f.scripts.length, 0);
+        vm.runInNewContext(HOST, { window: f.w });
+        assert.equal(f.w.__ottHomeHostInstall(f.w).open(), false);
+    }
+    for (const invalidate of [
+        (w) => delete w.__OTTPLAY_TIZEN_PACKAGE__,
+        (w) => delete w.tizen,
+    ]) {
+        const f = packaged(fixture());
+        invalidate(f.w);
+        assert.equal(load().showHomeIntegration(f.w), false);
+        assert.equal(f.scripts.length, 0);
+        vm.runInNewContext(HOST, { window: f.w });
+        assert.equal(f.w.__ottHomeHostInstall(f.w).open(), false);
+    }
+});
+test("file frame admission rejects root path and foreign frame locations", () => {
+    for (const location of [
+        { pathname: "/dist/home/index.html" },
+        { pathname: "/opt/apps/test/res/wgt/dist/home/other.html" },
+        { protocol: "https:", host: "evil.example" },
+        { host: "foreign" },
+    ]) {
+        const f = packaged(fixture());
+        load().showHomeIntegration(f.w);
+        const frame = f.frame();
+        Object.assign(frame.contentWindow.location, location);
+        frame.onload();
+        assert.equal(f.counts().restored, 1);
+        assert.equal(frame.contentWindow.OTTHomeHost, null);
+    }
+});
+test("non-file clients ignore package globals and keep fixed root assets", () => {
+    for (const protocol of ["https:", "http:", "tauri:", "capacitor:"]) {
+        const f = fixture();
+        f.w.location.protocol = protocol;
+        f.w.__ottPkgBase = f.w.__host = "https://evil.example";
+        assert.equal(load().showHomeIntegration(f.w), true);
+        assert.equal(f.scripts[0].src, "/dist/home/host.js");
+        assert.equal(f.frame().src, "/dist/home/index.html");
+        f.frame().onload();
+        assert.equal(
+            typeof f.frame().contentWindow.OTTHomeHost.close,
+            "function"
+        );
+    }
+});
+
+test("encoded package directory remains exact in script and frame admission", () => {
+    const f = packaged(fixture());
+    f.w.location.href =
+        "file:///opt/apps/test%20package/res/wgt/index.html?x#y";
+    f.w.location.pathname = "/opt/apps/test%20package/res/wgt/index.html";
+    bootPackage(f.w);
+    assert.equal(load().showHomeIntegration(f.w), true);
+    assert.equal(
+        f.scripts[0].src,
+        "file:///opt/apps/test%20package/res/wgt/dist/home/host.js"
+    );
+    assert.equal(
+        f.frame().src,
+        "file:///opt/apps/test%20package/res/wgt/dist/home/index.html"
+    );
+    f.frame().onload();
+    assert.equal(typeof f.frame().contentWindow.OTTHomeHost.close, "function");
 });
