@@ -343,7 +343,15 @@ impl LiveBackend {
         if !cfg!(unix) {
             return Err(BoundaryError::UnsupportedPlatform);
         }
-        if config.input_adapters != ["http-mpegts-v1"] {
+        if config.input_adapters.is_empty()
+            || config.input_adapters.len() > 2
+            || config
+                .input_adapters
+                .iter()
+                .any(|adapter| !matches!(adapter.as_str(), "http-mpegts-v1" | "http-hls-ts-v1"))
+            || config.input_adapters.len() == 2
+                && config.input_adapters[0] == config.input_adapters[1]
+        {
             return Err(BoundaryError::Configuration);
         }
         config.media.idle_timeout = Duration::from_secs(90);
@@ -2026,6 +2034,40 @@ mod tests {
             Arc::new(Registry::new("fixture-server".into(), "fixture-epoch".into()).unwrap());
         let sources = Arc::new(SourceService::new(registry.clone()));
         LiveBackend::new(config, sources, registry)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_adapter_set_is_unique_explicit_and_keeps_other_guards() {
+        for (adapters, accepted) in [
+            (vec!["http-mpegts-v1"], true),
+            (vec!["http-hls-ts-v1"], true),
+            (vec!["http-mpegts-v1", "http-hls-ts-v1"], true),
+            (vec![], false),
+            (vec!["http-hls-ts-v1", "http-hls-ts-v1"], false),
+            (vec!["http-fmp4-v1"], false),
+            (vec!["http-mpegts-v1", "auto"], false),
+        ] {
+            let registry =
+                Arc::new(Registry::new("fixture-server".into(), "fixture-epoch".into()).unwrap());
+            let sources = Arc::new(SourceService::new(registry.clone()));
+            let mut candidate = config();
+            candidate.input_adapters = adapters.into_iter().map(str::to_owned).collect();
+            assert_eq!(
+                LiveBackend::new_production(candidate, sources, registry).is_ok(),
+                accepted
+            );
+        }
+        let registry =
+            Arc::new(Registry::new("fixture-server".into(), "fixture-epoch".into()).unwrap());
+        let sources = Arc::new(SourceService::new(registry.clone()));
+        let mut candidate = config();
+        candidate.input_adapters = vec!["http-hls-ts-v1".into()];
+        candidate.profile.max_inputs = 10;
+        assert!(matches!(
+            LiveBackend::new_production(candidate, sources, registry),
+            Err(BoundaryError::Configuration)
+        ));
     }
 
     fn binding() -> Binding {

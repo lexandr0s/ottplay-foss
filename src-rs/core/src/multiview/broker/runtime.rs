@@ -282,6 +282,52 @@ impl AuthorizedSource {
         self.guard.check()?;
         Ok(stream)
     }
+    pub(super) async fn open_input(
+        self: &Arc<Self>,
+        limits: super::stream_transport::StreamLimits,
+    ) -> Result<super::stream_transport::InputStream, RuntimeError> {
+        use super::{resolvers::InputKind, stream_hls::HlsTsStream, stream_transport::InputStream};
+        self.guard.check()?;
+        let prepared = self.prepared.as_ref().ok_or(RuntimeError::Unavailable)?;
+        match prepared.input_kind() {
+            InputKind::DirectMpegTs => self.open_mpeg_ts(limits).await.map(InputStream::Direct),
+            InputKind::HlsTs => {
+                let permit = prepared
+                    .reserve_hls_reader()
+                    .map_err(RuntimeError::Network)?;
+                let cancel = self.guard.cancellation.child_token();
+                let stream = HlsTsStream::open(self.clone(), permit, cancel, limits)
+                    .await
+                    .map_err(RuntimeError::Network)?;
+                self.guard.check()?;
+                Ok(InputStream::HlsTs(stream))
+            }
+        }
+    }
+    pub(super) fn hls_selection(
+        &self,
+    ) -> Result<Option<super::resolvers::HlsSelection>, RuntimeError> {
+        self.guard.check()?;
+        self.prepared
+            .as_ref()
+            .ok_or(RuntimeError::Unavailable)?
+            .hls_selection()
+            .map_err(RuntimeError::Network)
+    }
+    pub(super) fn pin_hls_selection(
+        &self,
+        selection: super::resolvers::HlsSelection,
+    ) -> Result<super::resolvers::HlsSelection, RuntimeError> {
+        self.guard.check()?;
+        let selected = self
+            .prepared
+            .as_ref()
+            .ok_or(RuntimeError::Unavailable)?
+            .pin_hls_selection(selection)
+            .map_err(RuntimeError::Network)?;
+        self.guard.check()?;
+        Ok(selected)
+    }
     pub fn reservation(&self) -> &Reservation {
         &self.guard.reservation
     }

@@ -7,7 +7,7 @@ use super::{
     network::Error as NetworkError,
     registry::Reservation,
     runtime::{AuthorizedSource, RuntimeError},
-    stream_transport::{MpegTsStream, StreamLimits},
+    stream_transport::{InputStream, StreamLimits},
 };
 use std::{
     fs::File,
@@ -246,7 +246,7 @@ impl StreamFactory {
             }
             let limits = StreamLimits::new(tokio::time::Instant::from_std(self.hard_end));
             let stream = source
-                .open_mpeg_ts(limits)
+                .open_input(limits)
                 .await
                 .map_err(StreamError::Source)?;
             source.check_authority().map_err(StreamError::Source)?;
@@ -348,7 +348,7 @@ impl Drop for StreamFactory {
 #[cfg(unix)]
 async fn pump(
     source: Arc<AuthorizedSource>,
-    mut stream: MpegTsStream,
+    mut stream: InputStream,
     mut writer: tokio::net::UnixStream,
     phase: StreamPhase,
     hard_end: Instant,
@@ -408,3 +408,7 @@ async fn pump(
 #[cfg(all(test, unix))]
 #[path = "stream_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "stream_hls_factory_tests.rs"]
+mod hls_factory_tests;

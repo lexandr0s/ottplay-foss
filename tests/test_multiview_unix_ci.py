@@ -26,6 +26,7 @@ EXPECTED_TESTS = (
     'streamed_session_two_owner_continuity',
 )
 EXPECTED_PRODUCTION_TEST = 'normal_server_private_http_mpegts_renew_replace_and_cleanup'
+EXPECTED_HLS_PRODUCTION_TEST = 'normal_server_private_http_hls_renew_replace_and_cleanup'
 
 
 def load(name, path):
@@ -36,6 +37,7 @@ def load(name, path):
 
 
 ci = load('multiview_ci_offline_under_test', HELPER)
+batch = load('multiview_hls_batch_under_test', ROOT / 'scripts/ci-multiview-hls-probe-batch.py')
 guard = load('multiview_ci_reviewed_guard', REFERENCE)
 
 
@@ -77,7 +79,7 @@ CORE_REQUIRED_NAMES = (
 )
 CORE_CLOCK_RETIREMENT_NAMES = tuple(sorted(ci.CORE_REQUIRED_CLOCK_RETIREMENT_TESTS))
 CORE_NAMES = ('multiview::frames::synthetic_contract', 'multiview::encoder::synthetic_stop_contract',
-              *CORE_REQUIRED_NAMES, *CORE_CLOCK_RETIREMENT_NAMES)
+              *CORE_REQUIRED_NAMES, *CORE_CLOCK_RETIREMENT_NAMES, *sorted(ci.CORE_REQUIRED_HLS_TESTS))
 CORE_IGNORED = tuple(ci.CORE_IGNORED_TESTS)
 SERVER_NAMES = ('geometry_and_fixture_success_do_not_grant_production_admission',
                 'worker_rejects_ungranted_files_modified_plans_and_pre_cancelled_work')
@@ -269,6 +271,33 @@ class FakeMedia:
                 "cleanup_must_run_unconditionally": True}
 
 
+def synthetic_hls_batch(args, all_rows, corrupt=False):
+    """Explicit synthetic command result, never a process/media qualification."""
+    plan_path=Path(args[args.index('--plan')+1]); receipt_path=Path(args[args.index('--receipt')+1])
+    raw=plan_path.read_bytes();plan=json.loads(raw)
+    assert len(plan['rows'])==153
+    assert len({row['input'] for row in plan['rows']})==153
+    assert len({row['output'] for row in plan['rows']})==153
+    rows=[]
+    for row in plan['rows']:
+        source=Path(row['input'])
+        if source.name.startswith('source-'):
+            packets=all_rows[0]+all_rows[1]
+        else:
+            index=int(source.stem.split('-')[-1])
+            packets=json.loads(json.dumps(all_rows[0][index*120:(index+1)*120]+all_rows[1][index:index+1]))
+            if corrupt is True and index==1:packets[1]['pts']+=1
+        output=Path(row['output']);assert not output.exists()
+        output.write_text(json.dumps({'streams':[{'index':0,'codec_name':'h264','time_base':'1/90000'},
+            {'index':1,'codec_name':'aac','time_base':'1/90000'}],'packets':packets}))
+        rows.append(dict(row,output_sha256=hashlib.sha256(output.read_bytes()).hexdigest(),bytes=output.stat().st_size,exit=0,reaped=True))
+    receipt={'schema':'ottplay.multiview.hls-probe-receipt.v1','status':'passed','rows':rows,
+        'worker_sha256':plan['worker_sha256'],'tool_sha256':plan['ffprobe']['sha256'],
+        'plan_sha256':hashlib.sha256(raw).hexdigest(),'outer_pgid_guard_required':True,'output_bytes':sum(row['bytes'] for row in rows)}
+    receipt_path.write_text(json.dumps(receipt,separators=(',',':')));receipt_path.chmod(0o600)
+    return 'unexpected packet stdout' if corrupt=='stdout' else ''
+
+
 class Attempt:
     """Real bounded evidence/finalization; every command and supplier is mocked."""
 
@@ -291,6 +320,12 @@ class Attempt:
         self.media = FakeMedia(self)
         for name in ('Cargo.toml', 'Cargo.lock', 'src-rs/core/Cargo.toml',
                      'src-rs/core/src/multiview/broker/registry.rs',
+                     'src-rs/core/src/multiview/broker/hls_timeline.rs',
+                     'src-rs/core/src/multiview/broker/hls_timeline_tests.rs',
+                     'src-rs/core/src/multiview/broker/stream_hls.rs',
+                     'src-rs/core/src/multiview/broker/stream_hls_tests.rs',
+                     'src-rs/core/src/multiview/broker/stream_hls_factory_tests.rs',
+                     'src-rs/server/src/multiview_media_config.rs',
                      'src-rs/server/Cargo.toml', 'src-rs/server/tests/multiview_fixtures.rs',
                      'src-rs/server/tests/multiview_production.rs',
                      'src-rs/server/tests/multiview_activation.rs', 'src-rs/server/src/main.rs',
@@ -304,15 +339,20 @@ class Attempt:
                      'src-rs/server/tests/support/streamed_archive.rs',
                      'src-rs/server/tests/support/streamed_decoder.rs',
                      'src-rs/server/tests/support/multiview_production_tls.rs',
+                     'src-rs/server/tests/support/hls_production.rs',
                      'src-rs/core/src/multiview/decoder.rs', 'src-rs/core/src/multiview/frames.rs',
                      'src-rs/core/src/multiview/geometry.rs', 'src-rs/core/src/multiview/timing.rs',
                      'scripts/ci-multiview-unix-media.py',
                      'scripts/ci-native-favorites.py', 'scripts/ci-multiview-unix.py',
+                     'scripts/ci-multiview-hls-probe-batch.py',
                      'tests/test_multiview_unix_ci.py',
                      'scripts/ci-apt-mirror.py'):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text('synthetic bounded source: ' + name)
+            if name == 'scripts/ci-multiview-hls-probe-batch.py':
+                path.write_bytes((ROOT / name).read_bytes())
+            else:
+                path.write_text('synthetic bounded source: ' + name)
         self.supplied = {}
         for name in ('ffmpeg', 'ffprobe', 'mkfifo', 'openssl'):
             path = self.directory / name
@@ -334,6 +374,9 @@ class Attempt:
 
             def run(self, name, argv, limit=1500):
                 # Deliberately no subprocess, shell or native-runtime access.
+                log_path = self.evidence / 'logs' / (name + '.log')
+                if log_path.exists() or log_path.is_symlink() or any(row['name'] == name for row in self.commands):
+                    raise FileExistsError('Duplicate owned command log label: ' + name)
                 self.commands.append({'name': name, 'argv': argv, 'limit': limit,
                                       'cleanup_confirmed': attempt.case != 'unknown-cleanup'
                                       and not (name == 'broker-ordinary' and attempt.case == 'broker-cleanup-unknown')
@@ -346,8 +389,11 @@ class Attempt:
                     attempt.rotation_case_was_fresh = not Path(
                         self.env['OTTPLAY_MULTIVIEW_ROTATE_CASE_DIR']).exists()
                 text = attempt.response(name, argv)
-                self.budget.atomic(self.evidence / 'logs' / (name + '.log'),
-                                   text.encode(), evidence=True)
+                raw = text.encode()
+                with log_path.open('xb') as stream:
+                    self.budget.allocate(len(raw), log=True)
+                    stream.write(raw)
+                    self.budget.evidence_files[str(log_path)] = len(raw)
                 if name == rotation_command and attempt.case == 'core-rotation-nonzero-exit':
                     raise RuntimeError('Synthetic Core rotation command exited nonzero')
                 if name == 'broker-ordinary' and attempt.case == 'broker-nonzero-exit':
@@ -391,7 +437,7 @@ class Attempt:
             if self.case != 'pending-missing-input':
                 Path(argv[-1]).write_bytes(b'synthetic pending TS payload: ' + name.encode())
             return ''
-        if name.startswith('production-source-'):
+        if name.startswith(('production-source-', 'production-hls-source-')):
             Path(argv[-1]).write_bytes((b'\x47' + b'\0' * 187) * 3)
             return 'synthetic MPEG-TS payload; no media process\n'
         if name == 'fixture-pending-clock':
@@ -500,6 +546,23 @@ class Attempt:
             elif self.case == 'listener-cargo-missing':
                 listener = ''
             return listener
+        if name.startswith('public-http-policy-'):
+            policy_name=argv[1]
+            index=int(name.split('-')[3])
+            faulty=(self.case or '').startswith(f'public-http-{index}-')
+            if name.endswith('-inventory'):
+                return '' if faulty and self.case.endswith('-missing') else policy_name+': test\n'
+            if name.endswith('-ignored'):
+                return policy_name+': test\n' if faulty and self.case.endswith('-ignored') else ''
+            if faulty and self.case.endswith('-zero'):
+                return 'running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;\n'
+            return passed(policy_name)
+        if name == 'hls-item-policy-inventory':
+            return '' if self.case == 'hls-policy-missing' else ci.HLS_ITEM_ADAPTER_TEST + ': test\n'
+        if name == 'hls-item-policy-ignored':
+            return ci.HLS_ITEM_ADAPTER_TEST + ': test\n' if self.case == 'hls-policy-ignored' else ''
+        if name == 'hls-item-policy':
+            return 'running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;\n' if self.case == 'hls-policy-zero' else passed(ci.HLS_ITEM_ADAPTER_TEST)
         if name == 'listener-inventory':
             names = list(LISTENER_NAMES)
             if self.case == 'listener-inventory-empty':
@@ -523,18 +586,33 @@ class Attempt:
             elif self.case == 'listener-conflicting-summary':
                 text += 'test result: FAILED. 0 passed; 1 failed; 0 ignored;\n'
             return text
-        if name in ('production-inventory', 'production-ignored-inventory'):
+        if name in ('production-inventory', 'production-ignored-inventory', 'production-hls-inventory', 'production-hls-ignored-inventory'):
+            name = name.replace('production-hls-', 'production-')
             if self.case == 'production-missing-inventory' and name == 'production-inventory':
                 return ''
             if self.case == 'production-extra-inventory' and name == 'production-inventory':
                 return EXPECTED_PRODUCTION_TEST + ': test\nunreviewed_test: test\n'
             if self.case == 'production-not-ignored' and name == 'production-ignored-inventory':
                 return ''
-            return EXPECTED_PRODUCTION_TEST + ': test\n'
-        if name == 'production-normal-server':
+            values = {EXPECTED_PRODUCTION_TEST, EXPECTED_HLS_PRODUCTION_TEST}
+            if name == 'production-inventory':
+                values |= ci.PRODUCTION_ORDINARY_TESTS
+            return ''.join(value + ': test\n' for value in sorted(values))
+        if name == 'production-ordinary':
+            if self.case == 'hls-support-not-executed':
+                return 'running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;\n'
+            return suite_passed(sorted(ci.PRODUCTION_ORDINARY_TESTS), sorted({EXPECTED_PRODUCTION_TEST, EXPECTED_HLS_PRODUCTION_TEST}))
+        if name in ('production-normal-server', 'production-live-hls-server'):
             manifest_path = Path(self.driver.env['OTTPLAY_MULTIVIEW_PRODUCTION_INPUTS'])
             manifest = json.loads(manifest_path.read_text())
+            hls = name == 'production-live-hls-server'
+            if hls:
+                input_rows = [{'id':row['id'],'sha256':row['original_sha256'],'bytes':row['original_bytes']} for row in manifest['sources']]
+            else:
+                input_rows = manifest['inputs']
             receipt = {'schema': 'ottplay.multiview.production-binary.v1', 'pass': True,
+                       'input_adapter':'http-hls-ts-v1' if hls else 'http-mpegts-v1',
+                       'sequential_contexts':17,'sequential_output_generations':17,'active_sigterm':True,
                        'scope': 'Normal production HTTPS control/HLS with a private RFC1918 HTTP MPEG-TS adapter, all nine advertised slots and private HLS output; no native-player or physical-television qualification',
                        'tls': {'configured_api_transport':'https','trust':'synthetic_ca_only',
                                'untrusted_ca_rejected':True,'wrong_hostname_rejected':True,
@@ -551,9 +629,29 @@ class Attempt:
                        'replacement_late_segment': True, 'sibling_frames_recent_at_end': True,
                        'sibling_frames_before_replace': 100, 'sibling_frames_after_replace': 200,
                        'hls_segment_audio_video': True,
-                       'upstream_request_counts': {f"source-{row['id']}.ts": 2 for row in manifest['inputs']},
+                       'upstream_request_counts': {f"source-{row['id']}.ts": 2 for row in input_rows},
                        'inputs': [{'id': row['id'], 'sha256': row['sha256'], 'bytes': row['bytes']}
-                                  for row in manifest['inputs']]}
+                                  for row in input_rows]}
+            if hls:
+                receipt['scope'] = 'Normal production HTTPS control/HLS with a private RFC1918 live HLS MPEG-TS adapter, one master level and sliding media windows; no native-player or physical-television qualification'
+                receipt['upstream_request_counts'] = {}
+                receipt['hls_source'] = {'stable_retirement_interval_seconds':12,
+                    'audit':{'master':[2]*3,'media':[20]*3,'future_denied':0,'segments':[[2]*8+[0]*42 for _ in range(3)]},
+                    'inputs':[{'id':row['id'],'original_sha256':row['original_sha256'],
+                        'packet_timeline_sha256':row['original_packet_timeline_sha256'],
+                        'segments':[{key:item[key] for key in ('index','sha256','bytes','duration_ns')} for item in row['segments']]}
+                        for row in manifest['sources']]}
+                if self.case == 'hls-no-active-sigterm': receipt['active_sigterm'] = False
+                if self.case == 'hls-sixteen-contexts': receipt['sequential_contexts'] = 16
+                if self.case == 'hls-no-segment-binding': receipt['hls_source']['inputs'][0]['segments'][0]['sha256'] = '0'*64
+                if self.case == 'hls-future-fetch': receipt['hls_source']['audit']['future_denied'] = 1
+                if self.case == 'hls-incomplete-master': receipt['hls_source']['audit']['master'][0] = 1
+                if self.case == 'hls-changed-segment':
+                    changed = Path(manifest['sources'][0]['segments'][0]['path']); changed.chmod(0o600)
+                    changed.write_bytes(b'changed immutable segment'); changed.chmod(0o400)
+                if self.case == 'hls-nonzero': raise RuntimeError('Synthetic HLS command exited nonzero')
+                if self.case == 'hls-zero-tests': return 'running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;\n'
+
             if self.case == 'production-bad-receipt':
                 receipt['pass'] = False
             elif self.case == 'production-missing-source':
@@ -570,7 +668,7 @@ class Attempt:
                 raise RuntimeError('Synthetic production command exited nonzero')
             if self.case == 'production-zero-tests':
                 return 'running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n'
-            return passed(EXPECTED_PRODUCTION_TEST)
+            return passed(EXPECTED_HLS_PRODUCTION_TEST if hls else EXPECTED_PRODUCTION_TEST)
         if name in ('fixture-build', 'core-fixture-build'):
             core = name == 'core-fixture-build'
             path = self.output / ('target/debug/deps/' + ('ottplay_core' if core else 'multiview_fixtures') + '-synthetic')
@@ -759,19 +857,192 @@ class Attempt:
             return text
         return 'synthetic tool metadata only\n'
 
+    def prepare_hls_inputs(self, driver, budget, command, tools, directory):
+        directory = Path(directory); directory.mkdir(mode=0o700)
+        rows=[]
+        for identity in range(1,4):
+            original=directory/f'original-{identity}.ts'; original.write_bytes((b'\x47'+bytes([identity])*187)*3); original.chmod(0o400)
+            segments=[]
+            for index in range(50):
+                path=directory/f'part-{identity}-{index}.ts';path.write_bytes((b'\x47'+bytes([index])*187)*3);path.chmod(0o400)
+                segments.append({'index':index,'path':str(path),'bytes':path.stat().st_size,'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'duration_ns':12_000_000_000})
+            rows.append({'id':identity,'original_path':str(original),'original_bytes':original.stat().st_size,
+                'original_sha256':hashlib.sha256(original.read_bytes()).hexdigest(),
+                'original_packet_timeline_sha256':'a'*64,'segmented_packet_timeline_sha256':'a'*64,'segments':segments})
+        manifest={'schema':'ottplay.multiview.production-hls-inputs.v1','seconds':600,'target_seconds':12,'sources':rows}
+        path=directory/'HLS-INPUTS.json';path.write_text(json.dumps(manifest,sort_keys=True)+'\n');path.chmod(0o400)
+        return path,manifest
+
     def run(self, path=None, required_core=(), required_server=()):
         argv = ['--work-root', str(path or self.output)]
         for name in required_core:
             argv.extend(['--required-core-test', name])
         for name in required_server:
             argv.extend(['--required-server-test', name])
-        ci.main(argv)
+        with mock.patch.object(ci, 'prepare_hls_production_inputs', side_effect=self.prepare_hls_inputs):
+            ci.main(argv)
 
     def terminal(self):
         return json.loads((self.output / 'evidence/terminal.json').read_text())
 
 
+class HlsBatchWorkerContracts(unittest.TestCase):
+    def setUp(self):
+        self.cancel=mock.patch.object(batch,'CANCELLED',False);self.cancel.start();self.addCleanup(self.cancel.stop)
+
+    def fixture(self, root):
+        root=root.resolve();root.chmod(0o700)
+        for name in ('inputs','proof','tools'):(root/name).mkdir(mode=0o700)
+        tool=root/'tools/ffprobe';tool.write_bytes(b'synthetic tool never executed');tool.chmod(0o700)
+        rows=[]
+        for index in range(153):
+            path=root/f'inputs/{index:03d}.ts';path.write_bytes((b'\x47'+b'\0'*187)*3);path.chmod(0o400)
+            rows.append({'input':str(path),'input_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'output':str(root/f'proof/p{index:03d}.json')})
+        return {'schema':'ottplay.multiview.hls-probes.v1','root':str(root),'worker_sha256':hashlib.sha256(Path(batch.__file__).read_bytes()).hexdigest(),
+            'ffprobe':{'path':str(tool),'bytes':tool.stat().st_size,'sha256':hashlib.sha256(tool.read_bytes()).hexdigest()},'rows':rows}
+
+    def test_closed_153_plan_and_final_identity_readback_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve();plan=self.fixture(root)
+            def probe(_binary,_source,output,_root,_end,_completed):output.write_bytes(b'{"packets":[]}')
+            with mock.patch.object(batch,'probe',side_effect=probe) as calls:
+                result=batch.execute(plan,Path(batch.__file__),batch.time.monotonic()+20)
+            self.assertEqual(calls.call_count,153);self.assertEqual(len(result['rows']),153)
+            self.assertTrue(all(row['exit']==0 and row['reaped'] is True for row in result['rows']))
+            self.assertTrue(result['outer_pgid_guard_required'])
+            self.assertEqual(result['output_bytes'],sum(Path(row['output']).stat().st_size for row in result['rows']))
+
+    def test_plan_rejects_duplicates_escape_unknowns_and_nonprivate_ancestors_before_launch(self):
+        for corruption in ('count','input','output','reserved','escape','argv','ancestor'):
+            with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as directory:
+                root=Path(directory).resolve();plan=self.fixture(root);reserved=root/'RESERVED.json'
+                if corruption=='count':plan['rows'].pop()
+                elif corruption=='input':plan['rows'][1]['input']=plan['rows'][0]['input']
+                elif corruption=='output':plan['rows'][1]['output']=plan['rows'][0]['output']
+                elif corruption=='reserved':plan['rows'][1]['output']=str(reserved)
+                elif corruption=='escape':plan['rows'][1]['input']='https://not-a-file.invalid/secret'
+                elif corruption=='argv':plan['rows'][0]['argv']=['untrusted']
+                else:(root/'inputs').chmod(0o755)
+                with mock.patch.object(batch.subprocess,'Popen',side_effect=AssertionError('invalid plan launched process')), self.assertRaises((batch.BatchError,OSError)):
+                    batch.execute(plan,Path(batch.__file__),batch.time.monotonic()+20,reserved=(reserved,))
+
+    def fake_probe(self, root, failure=None):
+        output=root/'out.json';registered={};streams={3:[b''],4:[b'']}
+        child=types.SimpleNamespace(returncode=None,stdout=types.SimpleNamespace(fileno=lambda:3,close=mock.Mock()),
+            stderr=types.SimpleNamespace(fileno=lambda:4,close=mock.Mock()),kill=mock.Mock())
+        def wait(timeout):
+            if failure=='cleanup-wait' and child.wait.call_count==1:
+                raise batch.subprocess.TimeoutExpired('owned',timeout)
+            child.returncode=-9 if child.kill.called else 0;return child.returncode
+        child.wait=mock.Mock(side_effect=wait)
+        def poll():
+            if failure=='closed-pipes-growth':
+                with output.open('wb') as stream:stream.truncate(batch.OUTPUT_CAP+1)
+                return None
+            child.returncode=0;return 0
+        child.poll=mock.Mock(side_effect=poll)
+        selector=mock.Mock()
+        selector.register.side_effect=lambda file,_,name:registered.update({file.fileno():types.SimpleNamespace(fileobj=file,data=name)})
+        selector.unregister.side_effect=lambda file:registered.pop(file.fileno())
+        selector.get_map.side_effect=lambda:registered
+        selector.select.side_effect=lambda _:[(key,1) for key in list(registered.values())]
+        def launch(*_args,**_kwargs):
+            if failure=='cancel-in-constructor':batch.request_cancel()
+            if failure=='oversized':
+                with output.open('wb') as stream:stream.truncate(batch.OUTPUT_CAP+1)
+            return child
+        with mock.patch.object(batch.subprocess,'Popen',side_effect=launch) as popen, \
+             mock.patch.object(batch.selectors,'DefaultSelector',side_effect=OSError('selector fault') if failure in ('selector','cleanup-wait') else lambda:selector), \
+             mock.patch.object(batch.os,'read',side_effect=OSError('pipe fault') if failure=='pipe' else lambda fd,_:streams[fd].pop(0)):
+            if failure is None:
+                batch.probe(root/'ffprobe',root/'input.ts',output,root,batch.time.monotonic()+3,0)
+            else:
+                with self.assertRaises((batch.BatchError,OSError)):
+                    batch.probe(root/'ffprobe',root/'input.ts',output,root,batch.time.monotonic()+3,0)
+        return child,popen
+
+    def test_child_inherits_owned_group_and_closed_environment_fixed_file_only_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            child,popen=self.fake_probe(Path(directory))
+            self.assertFalse(popen.call_args.kwargs['start_new_session'])
+            self.assertEqual(set(popen.call_args.kwargs['env']),{'PATH','HOME','TMPDIR','LANG','LC_ALL'})
+            args=popen.call_args.args[0]
+            self.assertEqual(args[args.index('-protocol_whitelist')+1],'file')
+            self.assertEqual(args[args.index('-format_whitelist')+1],'mpegts')
+            self.assertIn('-o',args);self.assertEqual(child.returncode,0)
+            child.stdout.close.assert_called_once();child.stderr.close.assert_called_once()
+
+    def test_selector_pipe_cancellation_and_closed_pipe_growth_always_retire_actual_child(self):
+        for failure in ('selector','pipe','cancel-in-constructor','oversized','closed-pipes-growth','cleanup-wait'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                batch.CANCELLED=False
+                child,_=self.fake_probe(Path(directory),failure)
+                child.kill.assert_called_once();self.assertIsNotNone(child.returncode)
+                child.wait.assert_called();child.stdout.close.assert_called_once();child.stderr.close.assert_called_once()
+        batch.CANCELLED=True
+        with mock.patch.object(batch.subprocess,'Popen',side_effect=AssertionError('cancelled batch launched child')), self.assertRaises(batch.BatchError):
+            batch.probe(Path('/not-executed/ffprobe'),Path('/not-read/input.ts'),Path('/not-created/output'),Path('/owned'),batch.time.monotonic()+1,0)
+
+    def test_receipt_write_failure_cannot_return_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve();plan=self.fixture(root);plan_path=root/'PLAN.json';receipt=root/'RECEIPT.json'
+            plan_path.write_text(json.dumps(plan));plan_path.chmod(0o400)
+            with mock.patch.object(batch.sys,'argv',['worker','--plan',str(plan_path),'--receipt',str(receipt)]), \
+                 mock.patch.object(batch.signal,'signal'),mock.patch.object(batch,'execute',return_value={'status':'passed'}), \
+                 mock.patch.object(Path,'open',side_effect=OSError('receipt write fault')), contextlib.redirect_stderr(__import__('io').StringIO()):
+                self.assertEqual(batch.main(),1)
+            self.assertFalse(receipt.exists())
+
+    def test_cancellation_during_receipt_fsync_cannot_return_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve();plan=self.fixture(root);plan_path=root/'PLAN.json';receipt=root/'RECEIPT.json'
+            plan_path.write_text(json.dumps(plan));plan_path.chmod(0o400)
+            with mock.patch.object(batch.sys,'argv',['worker','--plan',str(plan_path),'--receipt',str(receipt)]), \
+                 mock.patch.object(batch.signal,'signal'),mock.patch.object(batch,'execute',return_value={'status':'passed'}), \
+                 mock.patch.object(batch.os,'fsync',side_effect=batch.request_cancel), contextlib.redirect_stderr(__import__('io').StringIO()):
+                self.assertEqual(batch.main(),1)
+
+    def test_actual_158_character_hosted_prefix_keeps_closed_plan_and_receipt_under128k(self):
+        prefix='/home/runner/work/_temp/'+'w'*(158-len('/home/runner/work/_temp/'))
+        self.assertEqual(len(prefix),158)
+        jobs=[{'input':prefix+f'/production-hls/inputs/segments-{index//51}/segment-{index:03d}.ts',
+               'input_sha256':'a'*64,'output':prefix+f'/production-hls/inputs/packet-proof/p{index:03d}.json'} for index in range(153)]
+        plan={'schema':'ottplay.multiview.hls-probes.v1','root':prefix+'/production-hls/inputs','worker_sha256':'a'*64,
+              'ffprobe':{'path':'/usr/bin/ffprobe','sha256':'b'*64,'bytes':1},'rows':jobs}
+        receipt={'schema':'ottplay.multiview.hls-probe-receipt.v1','status':'passed','plan_sha256':'a'*64,
+                 'worker_sha256':'a'*64,'tool_sha256':'b'*64,'output_bytes':1,'outer_pgid_guard_required':True,
+                 'rows':[dict(row,output_sha256='c'*64,bytes=1,exit=0,reaped=True) for row in jobs]}
+        self.assertLessEqual(len(json.dumps(plan,separators=(',',':')).encode()),131072)
+        self.assertLessEqual(len(json.dumps(receipt,separators=(',',':')).encode()),131072)
+        self.assertEqual(ci.HLS_BATCH_SHA256,hashlib.sha256(Path(batch.__file__).read_bytes()).hexdigest())
+
+
 class BoundaryContracts(unittest.TestCase):
+    def test_both_existing_shutdown_regressions_must_be_present_and_nonignored(self):
+        expected = frozenset({
+            'broker::live::tests::shutdown_does_not_claim_unconfirmed_create_custody_is_clean',
+            'broker::live::tests::shutdown_waits_for_owned_operation_after_http_waiter_drops',
+        })
+        self.assertEqual(ci.BROKER_SHUTDOWN_TESTS, expected)
+        self.assertTrue(expected <= ci.BROKER_TESTS)
+        frozen = ci.BROKER_TESTS
+        for required in sorted(expected):
+            for ignored in (False, True):
+                with self.subTest(required=required,ignored=ignored), Attempt() as attempt:
+                    original=attempt.response
+                    def response(name,args,required=required,ignored=ignored,original=original):
+                        text=original(name,args)
+                        if ignored and name=='broker-ignored-inventory':return required+': test\n'
+                        if name=='broker-inventory':
+                            return ''.join(value+': test\n' for value in sorted(frozen) if ignored or value != required)
+                        return text
+                    with mock.patch.object(ci,'BROKER_TESTS',frozen), mock.patch.object(attempt,'response',side_effect=response), self.assertRaises(RuntimeError):
+                        attempt.run()
+                    result=attempt.terminal()
+                    self.assertIn('broker',result['error'].lower())
+                    self.assertFalse(result['normal_server_hls_to_hls'])
+                    self.assertFalse(result['normal_server_mpegts_to_hls'])
+
     def test_pending_fixture_is_mandatory_exact_and_runs_before_expensive_stream(self):
         for system in ('Linux', 'Darwin'):
             with self.subTest(system=system), Attempt(system=system) as attempt:
@@ -899,7 +1170,7 @@ class BoundaryContracts(unittest.TestCase):
                 self.assertTrue(ci.LISTENER_REQUIRED_TESTS <= set(LISTENER_NAMES))
                 self.assertNotEqual(attempt.listener_executable, attempt.normal_server)
                 self.assertEqual(result['ordinary_activation_tests'], sorted(ACTIVATION_NAMES))
-                self.assertEqual(result['tests'], list(EXPECTED_TESTS) + [EXPECTED_PRODUCTION_TEST])
+                self.assertEqual(result['tests'], list(EXPECTED_TESTS) + [EXPECTED_PRODUCTION_TEST, EXPECTED_HLS_PRODUCTION_TEST])
                 self.assertTrue(result['streamed_media']['pass'])
                 self.assertEqual(attempt.driver.budget.deadline, attempt.driver.budget.started + 1800)
                 self.assertEqual(attempt.driver.budget.work_deadline, attempt.driver.budget.started + 1680)
@@ -1001,7 +1272,7 @@ class CoreRequiredContracts(unittest.TestCase):
     def test_each_frozen_authority_regression_is_mandatory_and_cannot_be_ignored(self):
         self.assertEqual(ci.CORE_REQUIRED_TESTS, frozenset(CORE_REQUIRED_NAMES))
         self.assertEqual(len(CORE_REQUIRED_NAMES), 3)
-        for required in CORE_REQUIRED_NAMES:
+        for required in (*CORE_REQUIRED_NAMES, *sorted(ci.CORE_REQUIRED_HLS_TESTS)):
             for state in ('missing', 'ignored'):
                 with self.subTest(required=required, state=state), Attempt() as attempt:
                     original = attempt.response
@@ -1426,13 +1697,14 @@ class ParsingTests(unittest.TestCase):
     def test_pinned_guard_and_exact_existing_fixture_inventory(self):
         self.assertEqual(hashlib.sha256(REFERENCE.read_bytes()).hexdigest(), ci.GUARD_SHA256)
         self.assertEqual(tuple(name for name, _ in ci.TESTS), EXPECTED_TESTS)
-        self.assertEqual(len(ci.BROKER_TESTS - ci.BROKER_PRODUCTION_TESTS), 55)
-        self.assertEqual(hashlib.sha256("\n".join(sorted(ci.BROKER_TESTS - ci.BROKER_PRODUCTION_TESTS)).encode("utf8")).hexdigest(),
+        self.assertEqual(len(ci.BROKER_TESTS - ci.BROKER_PRODUCTION_TESTS - ci.BROKER_HLS_TESTS - ci.BROKER_SHUTDOWN_TESTS), 55)
+        self.assertEqual(hashlib.sha256("\n".join(sorted(ci.BROKER_TESTS - ci.BROKER_PRODUCTION_TESTS - ci.BROKER_HLS_TESTS - ci.BROKER_SHUTDOWN_TESTS)).encode("utf8")).hexdigest(),
                          "6e92eb3d53b6de4ae38ec7bdfdef92883e87f4a2e887efe2c4539b20a1fc4f9f")
 
     def test_exact_mandatory_production_broker_inventory(self):
-        self.assertEqual(len(ci.BROKER_TESTS), 68)
+        self.assertEqual(len(ci.BROKER_TESTS), 71)
         self.assertEqual(len(ci.BROKER_PRODUCTION_TESTS), 13)
+        self.assertEqual(ci.BROKER_HLS_TESTS, frozenset({'broker::live::tests::production_adapter_set_is_unique_explicit_and_keeps_other_guards'}))
         self.assertEqual(ci.BROKER_PRODUCTION_TESTS, frozenset({
             'broker::production_tests::busy_host_state_refuses_renew_without_waiting_or_mutating_lease',
             'broker::production_tests::busy_monotonic_deadline_refuses_renew_without_waiting_or_mutating_lease',
@@ -1448,7 +1720,7 @@ class ParsingTests(unittest.TestCase):
             'broker::production_tests::revoked_output_and_credential_cannot_extend_lease',
             'broker::production_tests::stale_binding_or_credential_revision_cannot_renew',
         }))
-        self.assertEqual(hashlib.sha256("\n".join(sorted(ci.BROKER_TESTS - ci.BROKER_PRODUCTION_TESTS)).encode("utf8")).hexdigest(),
+        self.assertEqual(hashlib.sha256("\n".join(sorted(ci.BROKER_TESTS - ci.BROKER_PRODUCTION_TESTS - ci.BROKER_HLS_TESTS - ci.BROKER_SHUTDOWN_TESTS)).encode("utf8")).hexdigest(),
                          "6e92eb3d53b6de4ae38ec7bdfdef92883e87f4a2e887efe2c4539b20a1fc4f9f")
 
     def test_fd_must_be_in_input_section(self):
@@ -1752,6 +2024,214 @@ class MockMainTests(unittest.TestCase):
         self.assertFalse(result['sustained_media_e2e'])
         return result
 
+    def test_hls_item_adapter_policy_has_exact_nonzero_execution_and_cannot_be_ignored(self):
+        with Attempt() as attempt:
+            attempt.run()
+            row=next(row for row in attempt.driver.commands if row['name']=='hls-item-policy')
+            self.assertEqual(row['argv'][1:], [ci.HLS_ITEM_ADAPTER_TEST,'--exact','--test-threads=1','--color=never'])
+            self.assertEqual(row['limit'],30)
+        for case in ('hls-policy-missing','hls-policy-ignored','hls-policy-zero'):
+            with self.subTest(case=case), Attempt(case) as attempt:
+                with self.assertRaises(RuntimeError):attempt.run()
+                self.assertFalse(attempt.terminal()['normal_server_hls_to_hls'])
+                self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
+
+    def test_public_http_policy_requires_each_exact_nonignored_nonzero_unit(self):
+        self.assertEqual(len(ci.PUBLIC_HTTP_POLICY_TESTS),3)
+        with Attempt() as attempt:
+            attempt.run()
+            for index,name in enumerate(ci.PUBLIC_HTTP_POLICY_TESTS):
+                row=next(row for row in attempt.driver.commands if row['name']==f'public-http-policy-{index}')
+                self.assertEqual(row['argv'][1:],[name,'--exact','--test-threads=1','--color=never'])
+                self.assertEqual(row['limit'],30)
+        for index in range(3):
+            for failure in ('missing','ignored','zero'):
+                with self.subTest(index=index,failure=failure), Attempt(f'public-http-{index}-{failure}') as attempt:
+                    with self.assertRaises(RuntimeError):attempt.run()
+                    self.assertFalse(attempt.terminal()['normal_server_hls_to_hls'])
+                    self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
+
+    def test_mock_driver_log_names_are_exclusive_before_any_response_or_overwrite(self):
+        with Attempt() as attempt:
+            attempt.run()
+            self.assertEqual(len(attempt.driver.commands),len({row['name'] for row in attempt.driver.commands}))
+            original=attempt.driver.commands[0]['name']
+            paths=[(original,attempt.driver.evidence/'logs'/(original+'.log')),
+                   ('preexisting-owned-label',attempt.driver.evidence/'logs/preexisting-owned-label.log')]
+            paths[1][1].write_bytes(b'owned sentinel')
+            for name,path in paths:
+                before=path.read_bytes();count=len(attempt.driver.commands)
+                with mock.patch.object(attempt,'response',side_effect=AssertionError('duplicate reached response')), self.assertRaisesRegex(FileExistsError,'Duplicate owned command log'):
+                    attempt.driver.run(name,['not-executed'])
+                self.assertEqual(path.read_bytes(),before)
+                self.assertEqual(len(attempt.driver.commands),count)
+
+    def test_real_ledger_accounting_with_full_hosted_prefix_fits_existing_caps_only_with_batch(self):
+        with Attempt() as attempt:
+            real_prepare=ci.prepare_hls_production_inputs
+            original=attempt.response
+            in_hls=False
+            packets={stream:[{'stream_index':stream,'pts':126000+n*step,'dts':126000+n*step,'duration':step,
+                     'data_hash':'SHA256:'+f'{stream*10000+n:064x}'} for n in range(count)]
+                     for stream,step,count in ((0,9000,6000),(1,1080000,50))}
+            def response(name,args):
+                if not in_hls:return original(name,args)
+                if name.startswith('production-hls-source-'):
+                    Path(args[-1]).write_bytes((b'\x47'+b'\0'*187)*3);return ''
+                if name.startswith('production-hls-split-'):
+                    for index in range(50):Path(args[-1].replace('%02d',f'{index:02d}')).write_bytes((b'\x47'+bytes([index])*187)*3)
+                    return ''
+                self.assertEqual(name,'production-hls-probe-batch')
+                return synthetic_hls_batch(args,packets)
+            def prepare(*args):
+                nonlocal in_hls
+                in_hls=True
+                try:return real_prepare(*args)
+                finally:in_hls=False
+            attempt.response=response;attempt.prepare_hls_inputs=prepare
+            attempt.run()
+            prefix='/home/runner/work/_temp/'+'w'*(158-len('/home/runner/work/_temp/'))
+            def substitute(value):
+                return value.replace(str(attempt.output),prefix).replace(str(attempt.root),'/home/runner/work/ottplay-foss/ottplay-foss')
+            commands=[{'name':row['name'],'argv':[substitute(arg) for arg in row['argv']]} for row in attempt.driver.commands]
+            self.assertEqual(sum(row['name']=='production-hls-probe-batch' for row in commands),1)
+            self.assertEqual(len(commands),len({row['name'] for row in commands}))
+            def account(rows, destination):
+                budget=guard.Budget();budget.allocate(guard.LOG_CAP,log=True)
+                budget.allocate(8*1024**2)  # Additional conservative nonlog evidence reserve.
+                entries=[]
+                for row in rows:
+                    current=dict(row,pid=999999,pgid=999999,sid=999999,exit_code=None,reaped=False,
+                                 group_gone=False,ownership_verified=True,cleanup_errors=[])
+                    entries.append(current);budget.json_evidence(destination,entries)
+                    current.update(exit_code=0,reaped=True,group_gone=True,cleanup_confirmed=True)
+                    budget.json_evidence(destination,entries)
+                return budget.evidence_total
+            actual=account(commands,attempt.directory/'budget-batch-ledger.json')
+            self.assertLess(actual,guard.EVIDENCE_CAP)
+            with self.assertRaisesRegex(RuntimeError,'evidence cap'):
+                old=commands+[{'name':f'old-probe-{i}','argv':['/usr/bin/ffprobe',prefix+f'/production-hls/inputs/segments-3/segment-{i}.ts']} for i in range(153)]
+                account(old,attempt.directory/'budget-old-ledger.json')
+            self.assertEqual((guard.LOG_CAP,guard.EVIDENCE_CAP),(16*1024**2,32*1024**2))
+
+    def test_both_production_modes_and_actual_support_units_are_mandatory(self):
+        with Attempt() as attempt:
+            attempt.run()
+            names=[row['name'] for row in attempt.driver.commands]
+            self.assertLess(names.index('production-normal-server'), names.index('production-live-hls-server'))
+            self.assertIn('production-ordinary', names)
+            hls=next(row for row in attempt.driver.commands if row['name']=='production-live-hls-server')
+            self.assertEqual(hls['argv'],[str(attempt.production_executable),EXPECTED_HLS_PRODUCTION_TEST,'--ignored','--exact','--test-threads=1','--color=never'])
+            self.assertEqual(hls['limit'],600)
+            self.assertTrue(attempt.terminal()['normal_server_hls_to_hls'])
+            self.assertNotIn('OTTPLAY_MULTIVIEW_PRODUCTION_HLS_INPUTS',attempt.driver.env)
+
+    def test_live_hls_failure_never_publishes_partial_production_pass(self):
+        for case in ('hls-no-active-sigterm','hls-sixteen-contexts','hls-no-segment-binding','hls-future-fetch',
+                     'hls-incomplete-master','hls-changed-segment','hls-nonzero','hls-zero-tests','hls-support-not-executed'):
+            with self.subTest(case=case), Attempt(case) as attempt:
+                with self.assertRaises(RuntimeError): attempt.run()
+                result=attempt.terminal()
+                self.assertFalse(result['normal_server_hls_to_hls'])
+                self.assertFalse(result['normal_server_mpegts_to_hls'])
+                self.assertFalse(result['sustained_media_e2e'])
+                self.assertFalse(result['production_admission'])
+                self.assertNotIn('OTTPLAY_MULTIVIEW_PRODUCTION_HLS_INPUTS',attempt.driver.env)
+
+    def test_original_packet_timeline_rejects_repetition_missing_pts_and_non_ts_stream_identity(self):
+        streams=[{'index':0,'codec_name':'h264','time_base':'1/90000'},{'index':1,'codec_name':'aac','time_base':'1/90000'}]
+        packets=[{'stream_index':index,'pts':100,'dts':100,'duration':9000,'data_hash':'SHA256:'+'a'*64} for index in (0,1)]
+        good={'streams':streams,'packets':packets}
+        observed=ci.packet_timeline(json.dumps(good));self.assertEqual(len(observed[0]),1)
+        for mutation in ('repeat','no-pts','wrong-stream','hash','string-time','empty'):
+            data=json.loads(json.dumps(good))
+            if mutation=='repeat':data['packets'].append(data['packets'][0])
+            elif mutation=='no-pts':del data['packets'][0]['pts']
+            elif mutation=='wrong-stream':data['streams'][0]['codec_name']='hevc'
+            elif mutation=='hash':data['packets'][0]['data_hash']='absent'
+            elif mutation=='string-time':data['packets'][0]['pts']='100'
+            else:data['packets']=[]
+            with self.subTest(mutation=mutation), self.assertRaises(RuntimeError):ci.packet_timeline(json.dumps(data))
+
+    def test_packet_proof_metadata_fence_rejects_unsafe_files_before_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            for shape in ('missing','symlink','hardlink','directory','oversized','foreign-owner'):
+                with self.subTest(shape=shape):
+                    path=root/shape
+                    if shape=='symlink':
+                        target=root/'symlink-target';target.write_text('{}');path.symlink_to(target)
+                    elif shape=='hardlink':
+                        target=root/'hardlink-target';target.write_text('{}');os.link(target,path)
+                    elif shape=='directory':path.mkdir()
+                    elif shape=='oversized':
+                        with path.open('wb') as stream:stream.truncate(16*1024**2+1)
+                    elif shape=='foreign-owner':path.write_text('{}')
+                    budget=types.SimpleNamespace(read=mock.Mock(side_effect=AssertionError('unsafe packet file reached read')))
+                    owner=mock.patch.object(ci.os,'geteuid',return_value=os.geteuid()+1) if shape=='foreign-owner' else contextlib.nullcontext()
+                    with owner, self.assertRaises((RuntimeError,OSError)):
+                        ci.read_packet_proof(path,budget)
+                    budget.read.assert_not_called()
+
+    def test_finite_hls_preparation_uses_copyts_and_rejects_packet_rewrite_without_media_processes(self):
+        for corrupt in (False, True, 'stdout'):
+            with self.subTest(corrupt=corrupt), Attempt() as attempt:
+                budget=guard.Budget()
+                tools={name:ci.system_tool_identity(Path(attempt.supplied[name]),budget) for name in ('ffmpeg','ffprobe')}
+                calls=[(f'production-source-{identity}',[],0) for identity in (1,2,3)]
+                def packet(stream,index):
+                    step=9000 if stream==0 else 1080000
+                    return {'stream_index':stream,'pts':126000+index*step,'dts':126000+index*step,
+                            'duration':step,'data_hash':'SHA256:'+f'{stream*10000+index:064x}'}
+                all_rows={0:[packet(0,n) for n in range(6000)],1:[packet(1,n) for n in range(50)]}
+                def command(name,args,seconds=15,*,calls=calls,all_rows=all_rows,corrupt=corrupt):
+                    self.assertNotIn(name,[row[0] for row in calls], 'command name reused across Raw/HLS preparation')
+                    calls.append((name,args,seconds))
+                    if name.startswith(('production-source-', 'production-hls-source-')):
+                        Path(args[-1]).write_bytes((b'\x47'+b'\0'*187)*3)
+                        return ''
+                    if name.startswith('production-hls-split-'):
+                        for index in range(50):
+                            Path(args[-1].replace('%02d',f'{index:02d}')).write_bytes((b'\x47'+bytes([index])*187)*3)
+                        return ''
+                    self.assertEqual(name,'production-hls-probe-batch')
+                    self.assertEqual(seconds,240)
+                    return synthetic_hls_batch(args,all_rows,corrupt)
+                directory=attempt.directory/'actual-helper-synthetic-command-fixture'
+                evidence=attempt.directory/'batch-proof-evidence';evidence.mkdir(mode=0o700)
+                proof_driver=types.SimpleNamespace(evidence=evidence)
+                if corrupt:
+                    reason = 'Packet batch must not enter' if corrupt == 'stdout' else 'changed, omitted, duplicated or reset'
+                    with self.assertRaisesRegex(RuntimeError,reason):
+                        ci.prepare_hls_production_inputs(proof_driver,budget,command,tools,directory)
+                else:
+                    path,manifest=ci.prepare_hls_production_inputs(proof_driver,budget,command,tools,directory)
+                    self.assertEqual(manifest['seconds'],600)
+                    self.assertEqual([len(row['segments']) for row in manifest['sources']],[50,50,50])
+                    self.assertEqual(path.stat().st_mode&0o222,0)
+                    self.assertTrue(all(row['original_packet_timeline_sha256']==row['segmented_packet_timeline_sha256'] for row in manifest['sources']))
+                    self.assertEqual(list((directory/'packet-proof').iterdir()), [], 'large packet JSON never retained as evidence/logs')
+                    probes=[args for name,args,_ in calls if name=='production-hls-probe-batch']
+                    self.assertEqual(len(probes),1)
+                    retained_plan=(evidence/'production-hls-probe-plan.json').read_bytes()
+                    retained_receipt=(evidence/'production-hls-probe-receipt.json').read_bytes()
+                    self.assertEqual(retained_plan,(directory/'HLS-PROBE-PLAN.json').read_bytes())
+                    self.assertEqual(retained_receipt,(directory/'HLS-PROBE-RECEIPT.json').read_bytes())
+                    summary=json.loads((evidence/'production-hls-probe-batch.json').read_bytes())
+                    self.assertEqual(hashlib.sha256(retained_plan).hexdigest(),summary['plan_sha256'])
+                    self.assertEqual(hashlib.sha256(retained_receipt).hexdigest(),summary['receipt_sha256'])
+                    self.assertEqual(len(json.loads(retained_receipt)['rows']),153)
+                    self.assertEqual(guard.LOG_CAP,16*1024**2)
+                    self.assertEqual(guard.EVIDENCE_CAP,32*1024**2)
+                split=next(args for name,args,_ in calls if name.startswith('production-hls-split-'))
+                self.assertIn('-copyts',split)
+                self.assertEqual(split[split.index('-reset_timestamps')+1],'0')
+                self.assertEqual(split[split.index('-c')+1],'copy')
+                self.assertNotIn('-stream_loop',split)
+                self.assertNotIn('-start_at_zero',split)
+                generated=next(args for name,args,_ in calls if name.startswith('production-hls-source-'))
+                self.assertEqual(generated[generated.index('-t')+1],'600')
+
     def test_normal_server_mpegts_fixture_is_exact_bounded_and_receipt_backed(self):
         with Attempt() as attempt:
             attempt.run()
@@ -1826,9 +2306,9 @@ class MockMainTests(unittest.TestCase):
 
     def test_production_target_inventory_and_receipt_fail_closed(self):
         cases = {
-            'production-missing-inventory': 'Production normal-binary fixture must be the one exact ignored test',
-            'production-extra-inventory': 'Production normal-binary fixture must be the one exact ignored test',
-            'production-not-ignored': 'Production normal-binary fixture must be the one exact ignored test',
+            'production-missing-inventory': 'Production normal-binary fixture must have both exact ignored modes and frozen ordinary support',
+            'production-extra-inventory': 'Production normal-binary fixture must have both exact ignored modes and frozen ordinary support',
+            'production-not-ignored': 'Production normal-binary fixture must have both exact ignored modes and frozen ordinary support',
             'production-bad-receipt': 'Normal production-server adapter receipt did not qualify its bounded contract',
             'production-missing-source': 'Actual test receipt does not bind the three sealed transport sources',
             'production-no-hls-av': 'Normal production-server adapter receipt did not qualify its bounded contract',
@@ -1888,7 +2368,7 @@ class MockMainTests(unittest.TestCase):
                 if case == 'hardlinked-normal-server':
                     with self.assertRaisesRegex(RuntimeError, 'Hash input not bounded regular file'):
                         guard.Budget().digest(attempt.normal_server)
-                self.assertEqual(result['tests'], list(EXPECTED_TESTS) + [EXPECTED_PRODUCTION_TEST])
+                self.assertEqual(result['tests'], list(EXPECTED_TESTS) + [EXPECTED_PRODUCTION_TEST, EXPECTED_HLS_PRODUCTION_TEST])
                 self.assertFalse(result['production_admission'])
                 self.assertTrue(result['sustained_media_e2e'])
 
@@ -1983,7 +2463,7 @@ class MockMainTests(unittest.TestCase):
                 self.assertTrue(result['sustained_media_e2e'])
                 self.assertTrue(result['generated_media_hashes_available'])
                 self.assertTrue(result['normal_server_mpegts_to_hls'])
-                self.assertEqual(result['tests'], list(EXPECTED_TESTS) + [EXPECTED_PRODUCTION_TEST])
+                self.assertEqual(result['tests'], list(EXPECTED_TESTS) + [EXPECTED_PRODUCTION_TEST, EXPECTED_HLS_PRODUCTION_TEST])
                 self.assertTrue(result['production_adapter']['passed'])
                 self.assertEqual(result['production_adapter']['scope'],
                     'Actual production binary with protected HTTP-MPEGTS enrollment, all nine advertised slots, decoded grid RGB and selected audio tones, A/V HLS ffprobe, active-credential expiry, source replacement and cleanup; no native-player or physical-television proof')

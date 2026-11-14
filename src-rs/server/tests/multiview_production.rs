@@ -3,6 +3,8 @@
 //! player, UI, television, or visual-compositor qualification.
 #![cfg(unix)]
 
+#[path = "support/hls_production.rs"]
+mod hls_production;
 #[path = "support/multiview_production_tls.rs"]
 mod production_tls;
 
@@ -31,6 +33,25 @@ const TOKEN: &str = "production_fixture_control_owner_aaaaaaaaaaaaaaaa";
 const EXPIRING_TOKEN: &str = "production_fixture_control_expiring_bbbbbbbbbbbb";
 const PROFILE: &str = "http-mpegts-v1-640x360-10fps";
 const INPUTS: &str = "OTTPLAY_MULTIVIEW_PRODUCTION_INPUTS";
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProductionMode {
+    RawMpegTs,
+    LiveHlsTs,
+}
+impl ProductionMode {
+    fn adapter(self) -> &'static str {
+        match self {
+            Self::RawMpegTs => "http-mpegts-v1",
+            Self::LiveHlsTs => "http-hls-ts-v1",
+        }
+    }
+    fn path(self, id: usize) -> String {
+        match self {
+            Self::RawMpegTs => format!("source-{id}.ts"),
+            Self::LiveHlsTs => format!("source-{id}/master.m3u8"),
+        }
+    }
+}
 
 struct FixtureHttp {
     runtime: tokio::runtime::Runtime,
@@ -180,9 +201,17 @@ struct Upstream {
     requests: Arc<Mutex<HashMap<String, usize>>>,
     active: Arc<std::sync::atomic::AtomicUsize>,
     accept: Option<JoinHandle<()>>,
+    hls: Option<Arc<hls_production::HlsSources>>,
 }
 impl Upstream {
     fn start(address: IpAddr, files: HashMap<String, Arc<Vec<u8>>>) -> Self {
+        Self::start_mode(address, files, None)
+    }
+    fn start_mode(
+        address: IpAddr,
+        files: HashMap<String, Arc<Vec<u8>>>,
+        hls: Option<Arc<hls_production::HlsSources>>,
+    ) -> Self {
         let listener =
             TcpListener::bind(SocketAddr::new(address, 0)).expect("private fixture listener");
         listener
@@ -196,6 +225,7 @@ impl Upstream {
         let worker_requests = requests.clone();
         let worker_active = active.clone();
         let files = Arc::new(files);
+        let worker_hls = hls.clone();
         let accept = thread::spawn(move || {
             let workers = Arc::new(Mutex::new(Vec::<JoinHandle<()>>::new()));
             while !worker_stop.load(Ordering::Acquire) {
@@ -204,10 +234,15 @@ impl Upstream {
                         let stop = worker_stop.clone();
                         let requests = worker_requests.clone();
                         let files = files.clone();
+                        let hls = worker_hls.clone();
                         let active = worker_active.clone();
                         active.fetch_add(1, Ordering::AcqRel);
                         workers.lock().unwrap().push(thread::spawn(move || {
-                            let _ = serve_source(stream, &files, &requests, &stop);
+                            if let Some(hls) = hls {
+                                let _ = hls.serve(stream, &stop);
+                            } else {
+                                let _ = serve_source(stream, &files, &requests, &stop);
+                            }
                             active.fetch_sub(1, Ordering::AcqRel);
                         }));
                     }
@@ -227,6 +262,7 @@ impl Upstream {
             requests,
             active,
             accept: Some(accept),
+            hls,
         }
     }
     fn request_counts(&self) -> HashMap<String, usize> {
@@ -234,6 +270,39 @@ impl Upstream {
     }
     fn active_connections(&self) -> usize {
         self.active.load(Ordering::Acquire)
+    }
+    fn source_was_read(&self, mode: ProductionMode) -> bool {
+        if mode == ProductionMode::RawMpegTs {
+            return self.active_connections() > 0;
+        }
+        self.hls
+            .as_ref()
+            .unwrap()
+            .audit()
+            .segments
+            .iter()
+            .flatten()
+            .any(|count| *count > 0)
+    }
+    fn confirm_cleanup(&self, output: &Path, stable_hls: bool) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while fs::read_dir(output).unwrap().next().is_some() || self.active_connections() != 0 {
+            assert!(
+                Instant::now() < until,
+                "source/output custody did not retire"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+        if let Some(hls) = self.hls.as_ref().filter(|_| stable_hls) {
+            let observation = hls.observe_retirement();
+            let until = Instant::now() + Duration::from_secs(12);
+            while Instant::now() < until {
+                assert_eq!(self.active_connections(), 0, "retired HLS body resumed");
+                assert!(fs::read_dir(output).unwrap().next().is_none());
+                thread::sleep(Duration::from_millis(50));
+            }
+            hls.confirm_retired_scene(observation, output, self.active_connections());
+        }
     }
 }
 impl Drop for Upstream {
@@ -1134,9 +1203,74 @@ fn source_input_manifest(path: &Path) -> Vec<(u8, PathBuf, String, u64)> {
     result
 }
 
+fn start_single_playing_context(
+    base: &str,
+    epoch: &Value,
+    label: &str,
+) -> (Value, String, String, String) {
+    let mut native = native_for_slot(0);
+    native["runtime"] = json!("native_runtime_sequential");
+    native["expected"]["scene"] = json!(format!("scene_{label}"));
+    native["slot_generation"] = json!(format!("slot_{label}"));
+    native["source_revision"] = json!(format!("source_{label}"));
+    let created = create_session(base, TOKEN, epoch, native, &format!("create_{label}"));
+    let (ctx, _) = contexts(&created);
+    let list = catalog(base, TOKEN, &ctx, &format!("catalog_{label}"));
+    let ctx = request_source(
+        base,
+        TOKEN,
+        &list["context"],
+        &list["items"][0],
+        &list["catalog_revision"],
+        label,
+    );
+    let end = Instant::now() + Duration::from_secs(12);
+    let mut current = wait_slot(base, TOKEN, &ctx, 0, "production_item_1", end);
+    loop {
+        if let (Some(path), Some(generation)) = (
+            current["output"]["playlist_path"].as_str(),
+            current["output"]["output_generation"].as_str(),
+        ) {
+            let path = path.to_owned();
+            let generation = generation.to_owned();
+            let (_, _, bytes) = wait_new_segment(base, &path, &mut HashSet::new(), end);
+            assert!(
+                bytes.len() >= 188 * 3
+                    && [0, 188, 376]
+                        .into_iter()
+                        .all(|offset| bytes[offset] == 0x47)
+            );
+            let binding = context_for_slot(&current, 0, &ctx["native_expected"]);
+            return (
+                binding,
+                path,
+                current["session_id"]
+                    .as_str()
+                    .expect("owned session")
+                    .to_owned(),
+                generation,
+            );
+        }
+        assert!(
+            Instant::now() < end,
+            "context never minted actual readable output"
+        );
+        thread::sleep(Duration::from_millis(100));
+        current = snapshot(base, TOKEN, &ctx, &format!("output_{label}"));
+    }
+}
+
 #[test]
 #[ignore = "hosted production binary; private HTTP MPEG-TS, 210-second decode and normal HLS output qualification"]
 fn normal_server_private_http_mpegts_renew_replace_and_cleanup() {
+    run_normal_production(ProductionMode::RawMpegTs);
+}
+#[test]
+#[ignore = "hosted production binary; private live HLS MPEG-TS input, real HTTPS, 185s strict sustained decode and owned cleanup"]
+fn normal_server_private_http_hls_renew_replace_and_cleanup() {
+    run_normal_production(ProductionMode::LiveHlsTs);
+}
+fn run_normal_production(mode: ProductionMode) {
     let started = Instant::now();
     let mut root = OwnedRoot::new();
     let mut tls = production_tls::SyntheticTls::generate(&root.0);
@@ -1144,7 +1278,20 @@ fn normal_server_private_http_mpegts_renew_replace_and_cleanup() {
     let public = root.0.join("public");
     fs::DirBuilder::new().mode(0o700).create(&public).unwrap();
     let inputs_path = PathBuf::from(std::env::var_os(INPUTS).expect("sealed source manifest"));
-    let inputs = source_input_manifest(&inputs_path);
+    let hls_sources = if mode == ProductionMode::LiveHlsTs {
+        let path = PathBuf::from(
+            std::env::var_os("OTTPLAY_MULTIVIEW_PRODUCTION_HLS_INPUTS")
+                .expect("sealed HLS source manifest"),
+        );
+        Some(Arc::new(hls_production::HlsSources::load(&path)))
+    } else {
+        None
+    };
+    let inputs = if let Some(hls) = &hls_sources {
+        hls.original_inputs()
+    } else {
+        source_input_manifest(&inputs_path)
+    };
     let files: HashMap<String, Arc<Vec<u8>>> = inputs
         .iter()
         .map(|(id, path, _, _)| {
@@ -1153,7 +1300,11 @@ fn normal_server_private_http_mpegts_renew_replace_and_cleanup() {
         })
         .collect();
     let private_peer = private_ip();
-    let upstream = Upstream::start(private_peer, files);
+    let upstream = if mode == ProductionMode::RawMpegTs {
+        Upstream::start(private_peer, files)
+    } else {
+        Upstream::start_mode(private_peer, files, hls_sources)
+    };
     let source_origin = format!("http://{}:{}", private_peer, upstream.address.port());
     let api_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let decoy_listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1172,7 +1323,7 @@ fn normal_server_private_http_mpegts_renew_replace_and_cleanup() {
     let items: Vec<Value> = inputs.iter().enumerate().map(|(index, (_, _, sha, _))| json!({
         "item_ref": format!("production_item_{}", index + 1), "favorite_sha256":sha,
         "title":format!("Fixture source {}", index + 1), "provider":"fixture",
-        "url":format!("{source_origin}/source-{}.ts", index + 1), "allow_cleartext_credentials":true,
+        "input_adapter":mode.adapter(), "url":format!("{source_origin}/{}", mode.path(index + 1)), "allow_cleartext_credentials":true,
     })).collect();
     let allowed = json!([
         {"subject":"production_owner_A","installation_id":"production_install_A"},
@@ -1239,7 +1390,7 @@ fn normal_server_private_http_mpegts_renew_replace_and_cleanup() {
             assert_eq!(capabilities["max_inputs"], 9);
             assert_eq!(
                 capabilities["qualified_input_adapters"],
-                json!(["http-mpegts-v1"])
+                json!([mode.adapter()])
             );
             assert_eq!(capabilities["output_profiles"][0]["profile_id"], PROFILE);
             server_epoch = capabilities["server_epoch"].clone();
@@ -1312,7 +1463,7 @@ fn normal_server_private_http_mpegts_renew_replace_and_cleanup() {
         expiry_deadline,
     );
     for _ in 0..50 {
-        if fs::read_dir(&output).unwrap().next().is_some() && upstream.active_connections() > 0 {
+        if fs::read_dir(&output).unwrap().next().is_some() && upstream.source_was_read(mode) {
             break;
         }
         assert!(
@@ -1326,8 +1477,8 @@ fn normal_server_private_http_mpegts_renew_replace_and_cleanup() {
         "credential expiry case had no active output to retire"
     );
     assert!(
-        upstream.active_connections() > 0,
-        "credential expiry case had no active upstream decode connection"
+        upstream.source_was_read(mode),
+        "credential expiry case had no actual source read (raw requires active connection)"
     );
     let mut next_renewal = Instant::now() + Duration::from_secs(18);
     while Instant::now() + Duration::from_secs(2) < expiry_deadline {
@@ -1399,6 +1550,7 @@ fn normal_server_private_http_mpegts_renew_replace_and_cleanup() {
         0,
         "expired source decode connection was not closed"
     );
+    upstream.confirm_cleanup(&output, true);
 
     // Fill all nine advertised slots in one disjoint 3x3 geometry. The three
     // sealed sources have distinct solid colors and tones so the encoded HLS
@@ -1565,6 +1717,7 @@ fn normal_server_private_http_mpegts_renew_replace_and_cleanup() {
         0,
         "nine-slot source connections survived Off"
     );
+    upstream.confirm_cleanup(&output, true);
 
     let native = json!({"runtime":"native_runtime_main","expected":{"scene":"native_scene_main",
         "layout_revision":"layout_main","focus_revision":"focus_main","audio_revision":"audio_main"},
@@ -1837,13 +1990,28 @@ fn normal_server_private_http_mpegts_renew_replace_and_cleanup() {
         "sibling source did not continue advancing through the late sustained interval"
     );
     let counts = upstream.request_counts();
-    for source in 1..=3 {
-        assert!(
-            counts
-                .get(&format!("source-{source}.ts"))
-                .copied()
-                .unwrap_or(0)
-                >= 2
+    if mode == ProductionMode::RawMpegTs {
+        for source in 1..=3 {
+            assert!(
+                counts
+                    .get(&format!("source-{source}.ts"))
+                    .copied()
+                    .unwrap_or(0)
+                    >= 2
+            );
+        }
+    } else {
+        let audit = upstream.hls.as_ref().unwrap().audit();
+        assert!(audit.master.iter().all(|count| *count >= 2));
+        assert!(audit.media.iter().all(|count| *count >= 2));
+        assert!(audit.segments.iter().all(|source| source
+            .iter()
+            .filter(|count| **count > 0)
+            .count()
+            >= 8));
+        assert_eq!(
+            audit.future_denied, 0,
+            "runtime requested unpublished or expired source window"
         );
     }
     let client = fixture_http();
@@ -1892,6 +2060,47 @@ fn normal_server_private_http_mpegts_renew_replace_and_cleanup() {
         None,
     );
     assert_eq!(close["accepted"], true);
+    upstream.confirm_cleanup(&output, true);
+    let mut sequential_sessions = HashSet::new();
+    let mut sequential_outputs = HashSet::new();
+    for index in 0..17 {
+        assert!(
+            started.elapsed() < RUN_LIMIT,
+            "17-context qualification exceeded budget"
+        );
+        let (ctx, output_path, session_id, generation) = start_single_playing_context(
+            &api_origin,
+            &server_epoch,
+            &format!("sequential_{index}"),
+        );
+        assert!(sequential_sessions.insert(session_id));
+        assert!(sequential_outputs.insert(generation));
+        let closed = control(
+            &api_origin,
+            TOKEN,
+            &ctx,
+            &format!("sequential_off_{index}"),
+            json!({"name":"off"}),
+            None,
+        );
+        assert_eq!(closed["accepted"], true);
+        upstream.confirm_cleanup(&output, false);
+        let stale = get(&api_origin, &output_path, None, 256 * 1024).0;
+        assert!(
+            matches!(stale, 401 | 403 | 404 | 410),
+            "retired output remained readable or failed unexpectedly"
+        );
+    }
+    assert_eq!(sequential_sessions.len(), 17);
+    assert_eq!(sequential_outputs.len(), 17);
+    // A NEW actual Playing/output context must be alive at SIGTERM. There is
+    // intentionally no Off between this observation and the owned signal.
+    let (_active_ctx, _active_path, active_session, active_generation) =
+        start_single_playing_context(&api_origin, &server_epoch, "active_sigterm");
+    assert!(!sequential_sessions.contains(&active_session));
+    assert!(!sequential_outputs.contains(&active_generation));
+    assert!(fs::read_dir(&output).unwrap().next().is_some());
+    assert!(upstream.source_was_read(mode));
     let signal = unsafe { libc::kill(server.0.id() as i32, libc::SIGTERM) };
     assert_eq!(signal, 0, "send daemon SIGTERM to owned normal server");
     let shutdown_deadline = Instant::now() + Duration::from_secs(10);
@@ -1919,10 +2128,12 @@ fn normal_server_private_http_mpegts_renew_replace_and_cleanup() {
         fs::read_dir(&output).unwrap().next().is_none(),
         "normal binary output files were not retired"
     );
+    upstream.confirm_cleanup(&output, true);
     assert!(
         started.elapsed() < RUN_LIMIT,
-        "production fixture exceeded six-minute work bound"
+        "production fixture exceeded unchanged600-second work bound"
     );
+    let hls_source_evidence = upstream.hls.as_ref().map(|hls| json!({"audit":hls.audit(),"inputs":hls.input_receipt(),"stable_retirement_interval_seconds":12}));
     drop(upstream);
     root.remove()
         .expect("remove owned private normal-binary fixture directory");
@@ -1935,9 +2146,11 @@ fn normal_server_private_http_mpegts_renew_replace_and_cleanup() {
     );
     let receipt = json!({
         "schema":"ottplay.multiview.production-binary.v1","pass":true,
+        "input_adapter":mode.adapter(),"sequential_contexts":sequential_sessions.len(),
+        "sequential_output_generations":sequential_outputs.len(),"active_sigterm":true,"hls_source":hls_source_evidence,
         "tls":tls.receipt(),
         "https_control_requests":https_control_requests,"https_media_requests":https_media_requests,
-        "scope":"Normal production HTTPS control/HLS with a private RFC1918 HTTP MPEG-TS adapter, all nine advertised slots and private HLS output; no native-player or physical-television qualification",
+        "scope":if mode == ProductionMode::RawMpegTs { "Normal production HTTPS control/HLS with a private RFC1918 HTTP MPEG-TS adapter, all nine advertised slots and private HLS output; no native-player or physical-television qualification" } else { "Normal production HTTPS control/HLS with a private RFC1918 live HLS MPEG-TS adapter, one master level and sliding media windows; no native-player or physical-television qualification" },
         "elapsed_seconds":started.elapsed().as_secs(),"sustained_seconds":sustained_started.elapsed().as_secs(),
         "credential_expiry_rejected":expired,
         "expiry_output_was_active":true,"expired_source_connections_closed":true,

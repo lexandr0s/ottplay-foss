@@ -13,10 +13,13 @@ use reqwest::{
 use serde_json::Value;
 use std::{
     collections::{HashSet, VecDeque},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::{sync::OwnedSemaphorePermit, task::JoinHandle};
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,11 +34,22 @@ pub enum Adapter {
 pub struct ServerSource {
     kind: Source,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum InputKind {
+    DirectMpegTs,
+    HlsTs,
+}
+#[derive(Clone)]
+pub(super) enum HlsSelection {
+    Media,
+    Variant(Arc<HlsResource>),
+}
 #[derive(Clone)]
 enum Source {
     Http {
         url: Url,
         credentials: Option<OriginCredentials>,
+        input: InputKind,
     },
     Plex {
         base: Url,
@@ -55,6 +69,17 @@ impl ServerSource {
             kind: Source::Http {
                 url: network::address(url)?,
                 credentials,
+                input: InputKind::DirectMpegTs,
+            },
+        })
+    }
+    /// Explicit trusted enrollment; neither URL suffix nor response MIME selects HLS.
+    pub fn hls_ts(url: &str, credentials: Option<OriginCredentials>) -> Result<Self, Error> {
+        Ok(Self {
+            kind: Source::Http {
+                url: network::address(url)?,
+                credentials,
+                input: InputKind::HlsTs,
             },
         })
     }
@@ -156,8 +181,19 @@ impl ServerSource {
         permit: Arc<OwnedSemaphorePermit>,
     ) -> Result<PreparedSource, Error> {
         let adapter = self.adapter();
+        let input = match &self.kind {
+            Source::Http { input, .. } => *input,
+            _ => InputKind::DirectMpegTs,
+        };
+        let transport = if input == InputKind::HlsTs {
+            transport.hls_transport()
+        } else {
+            transport
+        };
         let (url, credentials, lease) = match self.kind {
-            Source::Http { url, credentials } => {
+            Source::Http {
+                url, credentials, ..
+            } => {
                 transport.validate(&url)?;
                 (url, credentials, None)
             }
@@ -291,6 +327,9 @@ impl ServerSource {
             provenance: Arc::new(()),
             _permit: permit,
             adapter,
+            input,
+            hls_readers: Arc::new(Semaphore::new(1)),
+            hls_selection: Mutex::new(None),
         };
         if prepared.cancel.is_cancelled() {
             prepared.finish().await?;
@@ -319,6 +358,9 @@ pub struct PreparedSource {
     provenance: Arc<()>,
     _permit: Arc<OwnedSemaphorePermit>,
     adapter: Adapter,
+    input: InputKind,
+    hls_readers: Arc<Semaphore>,
+    hls_selection: Mutex<Option<HlsSelection>>,
 }
 impl PreparedSource {
     pub fn adapter(&self) -> Adapter {
@@ -327,6 +369,51 @@ impl PreparedSource {
     pub fn cancel(&self) {
         self.cancel.cancel();
     }
+    pub(super) fn input_kind(&self) -> InputKind {
+        self.input
+    }
+    pub(super) fn reserve_hls_reader(&self) -> Result<Arc<OwnedSemaphorePermit>, Error> {
+        if self.input != InputKind::HlsTs {
+            return Err(Error::Unsupported);
+        }
+        self.hls_readers
+            .clone()
+            .try_acquire_owned()
+            .map(Arc::new)
+            .map_err(|_| Error::Busy)
+    }
+    pub(super) fn hls_selection(&self) -> Result<Option<HlsSelection>, Error> {
+        self.hls_selection
+            .try_lock()
+            .map(|pin| pin.clone())
+            .map_err(|_| Error::Busy)
+    }
+    pub(super) fn pin_hls_selection(&self, selection: HlsSelection) -> Result<HlsSelection, Error> {
+        if self.input != InputKind::HlsTs || self.cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if let HlsSelection::Variant(resource) = &selection {
+            if resource.kind != ResourceKind::Playlist
+                || !resource
+                    .provenance
+                    .as_ref()
+                    .is_some_and(|p| Arc::ptr_eq(p, &self.provenance))
+            {
+                return Err(Error::DestinationDenied);
+            }
+        }
+        let mut pin = self.hls_selection.try_lock().map_err(|_| Error::Busy)?;
+        match (&*pin, &selection) {
+            (None, _) | (Some(HlsSelection::Media), HlsSelection::Media) => {}
+            (Some(HlsSelection::Variant(old)), HlsSelection::Variant(current))
+                if old.url == current.url => {}
+            _ => return Err(Error::Unsupported),
+        }
+        // Keep the immutable identity, but return/retain the CURRENT checked
+        // resource after each fresh root parse, not stale manifest custody.
+        *pin = Some(selection.clone());
+        Ok(selection)
+    }
     /// Fresh checked HTTP subscription for each host Probe/Decode open. This
     /// reuses the resolved source lease, never redeems or resolves it a second time.
     /// Only sniffed MPEG-TS is admitted; HLS/MP4 need a separate owned demuxer.
@@ -334,6 +421,9 @@ impl PreparedSource {
         &self,
         limits: super::stream_transport::StreamLimits,
     ) -> Result<super::stream_transport::MpegTsStream, Error> {
+        if self.input != InputKind::DirectMpegTs {
+            return Err(Error::Unsupported);
+        }
         super::stream_transport::MpegTsStream::open(
             &self.transport,
             self.url.as_str(),

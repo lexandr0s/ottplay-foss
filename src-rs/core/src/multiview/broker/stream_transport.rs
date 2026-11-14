@@ -32,7 +32,7 @@ impl StreamLimits {
             hard_end,
         }
     }
-    fn validate(&self) -> Result<(), Error> {
+    pub(super) fn validate(&self) -> Result<(), Error> {
         let now = Instant::now();
         if self.first_response.is_zero()
             || self.first_response > Duration::from_secs(30)
@@ -271,7 +271,7 @@ impl Drop for MpegTsStream {
     }
 }
 
-fn check_packets(bytes: &[u8], received: u64) -> Result<(), Error> {
+pub(super) fn check_packets(bytes: &[u8], received: u64) -> Result<(), Error> {
     for (index, byte) in bytes.iter().enumerate() {
         let position = (received % PACKET_BYTES as u64 + index as u64) % PACKET_BYTES as u64;
         if position == 0 && *byte != 0x47 || position == 3 && byte & 0x30 == 0 {
@@ -279,6 +279,32 @@ fn check_packets(bytes: &[u8], received: u64) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// The producer consumes bytes only. No upstream URL/protocol reaches FFmpeg.
+pub(super) enum InputStream {
+    Direct(MpegTsStream),
+    HlsTs(super::stream_hls::HlsTsStream),
+}
+impl InputStream {
+    pub(super) fn cancel(&self) {
+        match self {
+            Self::Direct(s) => s.cancel(),
+            Self::HlsTs(s) => s.cancel(),
+        }
+    }
+    pub(super) fn cancellation(&self) -> CancellationToken {
+        match self {
+            Self::Direct(s) => s.cancellation(),
+            Self::HlsTs(s) => s.cancellation(),
+        }
+    }
+    pub(super) async fn next_chunk(&mut self) -> Result<Option<Bytes>, Error> {
+        match self {
+            Self::Direct(s) => s.next_chunk().await,
+            Self::HlsTs(s) => s.next_chunk().await,
+        }
+    }
 }
 
 #[cfg(test)]

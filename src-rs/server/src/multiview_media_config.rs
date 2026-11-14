@@ -41,6 +41,10 @@ use crate::multiview_broker::{BackendConfig, CredentialConfig, OperatorConfig};
 
 const MEDIA_VERSION: u8 = 1;
 const ADAPTER: &str = "http-mpegts-v1";
+const HLS_ADAPTER: &str = "http-hls-ts-v1";
+fn default_input_adapter() -> String {
+    ADAPTER.into()
+}
 const MAX_ITEMS: usize = 256;
 const MAX_INPUTS: u8 = 9;
 const MAX_ALLOWED: usize = 128;
@@ -98,11 +102,15 @@ pub(crate) struct NetworkDocument {
     origin: String,
     #[serde(default)]
     private_addresses: Vec<IpAddr>,
+    #[serde(default)]
+    allow_public_http: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ItemDocument {
     item_ref: String,
+    #[serde(default = "default_input_adapter")]
+    input_adapter: String,
     favorite_sha256: String,
     title: String,
     provider: String,
@@ -234,6 +242,8 @@ impl MediaDocument {
             if origin.origin().ascii_serialization() != rule.origin
                 || origin.path() != "/"
                 || origin.query().is_some()
+                || rule.allow_public_http
+                    && (origin.scheme() != "http" || !rule.private_addresses.is_empty())
                 || origins
                     .insert(
                         rule.origin.clone(),
@@ -249,7 +259,8 @@ impl MediaDocument {
         let mut seen_items = BTreeSet::new();
         let mut used_origins = BTreeSet::new();
         for item in &self.items {
-            if !wire::opaque(&item.item_ref)
+            if !matches!(item.input_adapter.as_str(), ADAPTER | HLS_ADAPTER)
+                || !wire::opaque(&item.item_ref)
                 || !wire::favorite_digest(&item.favorite_sha256)
                 || item.title.is_empty()
                 || item.title.len() > 512
@@ -282,11 +293,14 @@ impl MediaDocument {
                 return Err(invalid("private source address is not enrolled"));
             }
             if url.scheme() == "http" {
-                // Cleartext is confined to an explicitly enrolled literal
-                // private peer; DNS answers cannot authorize cleartext.
-                let peer = private_literal.ok_or_else(|| invalid("cleartext source denied"))?;
-                if !rule.private_addresses.contains(&peer) {
-                    return Err(invalid("cleartext source denied"));
+                // Public HTTP is a protected per-origin opt-in. Its empty
+                // private allowlist still requires every DNS answer to be public.
+                // Otherwise preserve the explicitly enrolled private-literal path.
+                if !rule.allow_public_http {
+                    let peer = private_literal.ok_or_else(|| invalid("cleartext source denied"))?;
+                    if !rule.private_addresses.contains(&peer) {
+                        return Err(invalid("cleartext source denied"));
+                    }
                 }
             } else if url.scheme() != "https" {
                 return Err(invalid("unsupported source transport"));
@@ -366,7 +380,13 @@ impl MediaConfig {
                     require_broker_grants: true,
                 },
                 profile,
-                input_adapters: vec![ADAPTER.into()],
+                input_adapters: self
+                    .items
+                    .iter()
+                    .map(|item| item.input_adapter.clone())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
             };
             let registry = Arc::new(
                 Registry::new(operator.server_id.clone(), operator.server_epoch.clone())
@@ -407,8 +427,12 @@ impl MediaConfig {
                             .map_err(|_| invalid("invalid source credential policy"))
                     })
                     .transpose()?;
-                let source = ServerSource::http(&item.url, credentials)
-                    .map_err(|_| invalid("invalid source address"))?;
+                let source = match item.input_adapter.as_str() {
+                    ADAPTER => ServerSource::http(&item.url, credentials),
+                    HLS_ADAPTER => ServerSource::hls_ts(&item.url, credentials),
+                    _ => return Err(invalid("unsupported source adapter")),
+                }
+                .map_err(|_| invalid("invalid source address"))?;
                 configurations.insert(
                     item.item_ref.clone(),
                     SourceConfig {
@@ -421,7 +445,7 @@ impl MediaConfig {
                     identity_version: 1,
                     favorite_sha256: item.favorite_sha256.clone(),
                     kind: "live".into(),
-                    input_adapter: ADAPTER.into(),
+                    input_adapter: item.input_adapter.clone(),
                     protection: Protection {
                         known: true,
                         restricted: false,
@@ -531,8 +555,10 @@ mod tests {
             network: vec![NetworkDocument {
                 origin: origin.into(),
                 private_addresses,
+                allow_public_http: false,
             }],
             items: vec![ItemDocument {
+                input_adapter: ADAPTER.into(),
                 item_ref: "item-1".into(),
                 favorite_sha256: "a".repeat(64),
                 title: "News".into(),
@@ -642,6 +668,7 @@ mod tests {
         unused.network.push(NetworkDocument {
             origin: "https://unused.example".into(),
             private_addresses: vec![],
+            allow_public_http: false,
         });
         assert!(unused.validate(&operator()).is_err());
 
@@ -651,6 +678,7 @@ mod tests {
             vec![],
         );
         duplicate_item.items.push(ItemDocument {
+            input_adapter: ADAPTER.into(),
             item_ref: "item-1".into(),
             favorite_sha256: "b".repeat(64),
             title: "Duplicate".into(),
@@ -660,6 +688,135 @@ mod tests {
             allow_cleartext_credentials: false,
         });
         assert!(duplicate_item.validate(&operator()).is_err());
+    }
+
+    #[test]
+    fn public_http_is_protected_exact_origin_opt_in_and_keeps_bearer_consent() {
+        for url in ["http://media.example/live.ts", "http://8.8.8.8/live.ts"] {
+            let origin = Url::parse(url).unwrap().origin().ascii_serialization();
+            assert!(document(url, &origin, vec![])
+                .validate(&operator())
+                .is_err());
+            let mut allowed = document(url, &origin, vec![]);
+            allowed.network[0].allow_public_http = true;
+            assert!(allowed.validate(&operator()).is_ok());
+            let mut denied = document(url, &origin, vec![]);
+            denied.network[0].allow_public_http = true;
+            denied.items[0].bearer_token = Some("synthetic-secret-token".into());
+            let error = denied.validate(&operator()).err().unwrap().to_string();
+            assert!(!error.contains(url) && !error.contains("synthetic-secret-token"));
+            let mut credential = document(url, &origin, vec![]);
+            credential.network[0].allow_public_http = true;
+            credential.items[0].bearer_token = Some("synthetic-secret-token".into());
+            credential.items[0].allow_cleartext_credentials = true;
+            assert!(credential.validate(&operator()).is_ok());
+        }
+        for url in [
+            "http://other.example/live.ts",
+            "http://media.example:8080/live.ts",
+            "http://child.media.example/live.ts",
+            "http://user@media.example/live.ts",
+            "http://media.example/live.ts#fragment",
+        ] {
+            let mut denied = document(url, "http://media.example", vec![]);
+            denied.network[0].allow_public_http = true;
+            assert!(denied.validate(&operator()).is_err());
+        }
+    }
+
+    #[test]
+    fn public_http_rejects_https_and_any_private_rule_even_when_unused() {
+        let mut https = document(
+            "https://media.example/live.ts",
+            "https://media.example",
+            vec![],
+        );
+        https.network[0].allow_public_http = true;
+        assert!(https.validate(&operator()).is_err());
+        let private = "192.168.1.20".parse().unwrap();
+        let mut denied = document(
+            "http://media.example/live.ts",
+            "http://media.example",
+            vec![private],
+        );
+        denied.network[0].allow_public_http = true;
+        assert!(denied.validate(&operator()).is_err());
+        let mut unused = document(
+            "https://media.example/live.ts",
+            "https://media.example",
+            vec![],
+        );
+        unused.network.push(NetworkDocument {
+            origin: "http://unused.example".into(),
+            private_addresses: vec![private],
+            allow_public_http: true,
+        });
+        assert!(unused.validate(&operator()).is_err());
+        let mut no_token = document(
+            "http://media.example/live.ts",
+            "http://media.example",
+            vec![],
+        );
+        no_token.network[0].allow_public_http = true;
+        no_token.items[0].allow_cleartext_credentials = true;
+        assert!(no_token.validate(&operator()).is_err());
+    }
+
+    #[test]
+    fn public_http_network_flag_is_closed_boolean_and_defaults_false() {
+        let absent: NetworkDocument =
+            serde_json::from_value(serde_json::json!({"origin":"http://media.example"})).unwrap();
+        assert!(!absent.allow_public_http);
+        let explicit: NetworkDocument = serde_json::from_value(
+            serde_json::json!({"origin":"http://media.example", "allow_public_http":false}),
+        )
+        .unwrap();
+        assert!(!explicit.allow_public_http);
+        let enabled: NetworkDocument = serde_json::from_value(
+            serde_json::json!({"origin":"http://media.example", "allow_public_http":true}),
+        )
+        .unwrap();
+        assert!(enabled.allow_public_http);
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::json!({}),
+        ] {
+            assert!(serde_json::from_value::<NetworkDocument>(
+                serde_json::json!({"origin":"http://media.example", "allow_public_http":value})
+            )
+            .is_err());
+        }
+        assert!(serde_json::from_value::<NetworkDocument>(
+            serde_json::json!({"origin":"http://media.example", "allow_http":true})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn item_adapter_is_explicit_closed_and_defaults_to_direct_ts() {
+        let base = serde_json::json!({"item_ref":"item-1","favorite_sha256":"a".repeat(64),"title":"Synthetic","provider":"m3u","url":"https://media.example/live"});
+        let direct: ItemDocument = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(direct.input_adapter, ADAPTER);
+        for (adapter, accepted) in [
+            (ADAPTER, true),
+            (HLS_ADAPTER, true),
+            ("auto", false),
+            ("hls", false),
+            ("http-fmp4-v1", false),
+        ] {
+            let mut value = base.clone();
+            value["input_adapter"] = adapter.into();
+            let item = serde_json::from_value(value).unwrap();
+            let mut candidate = document(
+                "https://media.example/live",
+                "https://media.example",
+                vec![],
+            );
+            candidate.items = vec![item];
+            assert_eq!(candidate.validate(&operator()).is_ok(), accepted);
+        }
     }
 
     #[cfg(unix)]
@@ -706,6 +863,53 @@ mod tests {
             mkfifo: tools[2].clone(),
         };
         assert!(validate_output_paths(&document).is_ok());
+        // Prepare the actual plan, without executing these fixture tools.
+        // Advertise exactly the item adapters, not every compiled adapter.
+        for adapters in [vec![ADAPTER], vec![HLS_ADAPTER], vec![ADAPTER, HLS_ADAPTER]] {
+            let mut candidate = self::document(
+                "https://media.example/live",
+                "https://media.example",
+                vec![],
+            );
+            candidate.items.clear();
+            for (index, adapter) in adapters.iter().enumerate() {
+                let mut item = self::document(
+                    "https://media.example/live",
+                    "https://media.example",
+                    vec![],
+                )
+                .items
+                .remove(0);
+                item.item_ref = format!("item-{index}");
+                item.input_adapter = (*adapter).into();
+                candidate.items.push(item);
+            }
+            candidate.output = OutputDocument {
+                root: output_root.clone(),
+                ffmpeg: tools[0].clone(),
+                ffprobe: tools[1].clone(),
+                mkfifo: tools[2].clone(),
+            };
+            let validated = candidate.validate(&operator()).unwrap();
+            let mut plan = validated.prepare(&operator()).unwrap();
+            let backend = plan.take_backend().unwrap();
+            let expected: Vec<String> = adapters
+                .iter()
+                .map(|v| (*v).to_owned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            assert_eq!(backend.input_adapters, expected);
+            assert_eq!(backend.profile.max_inputs, 9);
+            assert_eq!(backend.media.max_disk_bytes, 128 * 1024 * 1024);
+            assert!(plan
+                .enrollment
+                .as_ref()
+                .unwrap()
+                .items
+                .iter()
+                .all(|item| expected.contains(&item.input_adapter)));
+        }
 
         fs::set_permissions(&output_root, Permissions::from_mode(0o755)).unwrap();
         assert!(validate_output_root(&output_root).is_err());

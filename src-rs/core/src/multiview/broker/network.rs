@@ -342,6 +342,14 @@ impl CheckedTransport {
             fixture_dns: None,
         })
     }
+    /// HLS reuses exactly the existing authority/client/gates. It can only
+    /// tighten finite body/redirect policy, never enlarge or replace it.
+    pub(super) fn hls_transport(&self) -> Self {
+        let mut bounded = self.clone();
+        bounded.limits.redirects = 0;
+        bounded.limits.body_bytes = bounded.limits.body_bytes.min(8 * 1024 * 1024);
+        bounded
+    }
     /// The Plex resolver calls this only after validating its enrolled machine ID.
     /// Bind a new source-local copy; never retarget enrolled/shared credentials.
     pub(super) fn bind_credentials(
@@ -918,3 +926,39 @@ impl CheckedTransport {
 #[cfg(test)]
 #[path = "network_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod hls_transport_contract {
+    use super::*;
+    #[test]
+    fn hls_clone_only_tightens_and_keeps_source_request_identity_and_policy() {
+        let original = CheckedTransport::new(
+            NetworkPolicy::fixture(&["https://fixture.invalid"]),
+            Limits {
+                body_bytes: 16 * 1024 * 1024,
+                redirects: 2,
+                concurrent: 1,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+        let bounded = original.hls_transport();
+        assert_eq!(bounded.limits.body_bytes, 8 * 1024 * 1024);
+        assert_eq!(bounded.limits.redirects, 0);
+        assert_eq!(original.limits.redirects, 2);
+        assert_eq!(original.limits.body_bytes, 16 * 1024 * 1024);
+        assert!(Arc::ptr_eq(&original.identity, &bounded.identity));
+        assert!(Arc::ptr_eq(&original.permits, &bounded.permits));
+        assert!(Arc::ptr_eq(&original.sources, &bounded.sources));
+        assert!(bounded
+            .validate(&address("https://denied.invalid/secret").unwrap())
+            .is_err());
+        let permit = original.reserve_source().unwrap();
+        assert!(matches!(bounded.reserve_source(), Err(Error::Busy)));
+        drop(permit);
+        assert!(bounded.reserve_source().is_ok());
+        let mut smaller = original.clone();
+        smaller.limits.body_bytes = 17;
+        assert_eq!(smaller.hls_transport().limits.body_bytes, 17);
+    }
+}

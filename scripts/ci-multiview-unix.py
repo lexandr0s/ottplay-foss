@@ -18,7 +18,14 @@ sys.dont_write_bytecode = True
 GUARD_SHA256 = '6f623bb7234b3619ff859dec0afe9c1ad938f29d606f0836b69434312867e020'
 STREAM_MEDIA_SHA256 = '97703a705a2c33a1536893eeca2d11e65022d44fa1189ff59f300e2040cdf4e9'
 STREAM_TEST = 'streamed_session_two_owner_continuity'
+HLS_BATCH_SHA256 = '967ceaa7e7478c2488c3a984d4a4a15f968226ef82a7cd065b4a93b84aa161e7'
 PRODUCTION_TEST = 'normal_server_private_http_mpegts_renew_replace_and_cleanup'
+HLS_PRODUCTION_TEST = 'normal_server_private_http_hls_renew_replace_and_cleanup'
+PRODUCTION_ORDINARY_TESTS = frozenset({
+    'hls_production::tests::starts_with_three_complete_and_slides_six_without_exposing_future',
+    'hls_production::tests::never_loops_or_serves_fifty_first_segment_and_keeps_original_duration',
+    'hls_production::tests::exact_path_fence_and_master_child_are_self_contained',
+})
 PENDING_TEST = 'streamed_decoder_short_track_pending_and_failure'
 MKFIFO = Path('/usr/bin/mkfifo')
 TESTS = (
@@ -40,6 +47,10 @@ ACTIVATION_TESTS = frozenset({
 })
 # Source-derived Unix inventory from the reviewed broker/connection freeze.
 BROKER_TESTS = frozenset({
+    'broker::live::tests::shutdown_does_not_claim_unconfirmed_create_custody_is_clean',
+    'broker::live::tests::shutdown_waits_for_owned_operation_after_http_waiter_drops',
+
+    'broker::live::tests::production_adapter_set_is_unique_explicit_and_keeps_other_guards',
     'body_lifetime_checks_expiry_credential_session_and_replacement',
     'broker::live::tests::configuration_rejects_lifetime_and_profile_without_launching_media',
     'broker::live::tests::native_changes_are_operation_specific_before_any_effect',
@@ -111,6 +122,11 @@ BROKER_TESTS = frozenset({
 })
 BROKER_PRODUCTION_TESTS = frozenset(name for name in BROKER_TESTS
                                     if name.startswith('broker::production_tests::'))
+BROKER_SHUTDOWN_TESTS = frozenset({
+    'broker::live::tests::shutdown_does_not_claim_unconfirmed_create_custody_is_clean',
+    'broker::live::tests::shutdown_waits_for_owned_operation_after_http_waiter_drops',
+})
+BROKER_HLS_TESTS = frozenset({'broker::live::tests::production_adapter_set_is_unique_explicit_and_keeps_other_guards'})
 CORE_REQUIRED_TESTS = frozenset({
     'multiview::broker::registry::try_authority_tests::try_session_authority_returns_busy_without_callback_then_recovers',
     'multiview::broker::registry::try_authority_tests::try_session_authority_maps_poison_to_unavailable_without_callback',
@@ -132,6 +148,16 @@ CORE_REQUIRED_CLOCK_RETIREMENT_TESTS = frozenset({
 })
 CORE_ROTATION_TEST = 'multiview::persistent::tests::real_stream_output_rotation_preserves_sibling_decoders'
 CORE_IGNORED_TESTS = frozenset({CORE_ROTATION_TEST})
+HLS_ITEM_ADAPTER_TEST = 'multiview_operator::media_config::tests::item_adapter_is_explicit_closed_and_defaults_to_direct_ts'
+PUBLIC_HTTP_POLICY_TESTS = tuple('multiview_operator::media_config::tests::' + name for name in (
+    'public_http_is_protected_exact_origin_opt_in_and_keeps_bearer_consent',
+    'public_http_rejects_https_and_any_private_rule_even_when_unused',
+    'public_http_network_flag_is_closed_boolean_and_defaults_false',
+))
+CORE_REQUIRED_HLS_TESTS = frozenset({
+    'multiview::broker::stream::hls_factory_tests::actual_factory_finish_is_busy_while_hls_chunk_keeps_authorized_source',
+    'multiview::broker::stream::hls_factory_tests::hls_probe_join_precedes_fresh_decode_and_final_cleanup',
+})
 LISTENER_TEST_PREFIX = 'listener_tests::'
 LISTENER_REQUIRED_TESTS = frozenset({
     'listener_tests::selected_media_dispatch_preserves_public_request_context_and_response',
@@ -820,8 +846,10 @@ def run_pending_fixture(driver, budget, command, executable, tools, result):
                 driver.env[key] = value
 
 
-def prepare_production_inputs(driver, budget, command, tools, directory):
+def prepare_production_inputs(driver, budget, command, tools, directory, seconds=210, label_prefix='production'):
     """Create three sealed 210-second MPEG-TS sources for the normal binary test."""
+    require((seconds, label_prefix) in ((210, 'production'), (600, 'production-hls')),
+            'Only finite reviewed production duration/command namespaces are allowed')
     inputs = Path(directory)
     require(not inputs.exists() and not inputs.is_symlink(), 'Fresh production-input directory required')
     inputs.mkdir(mode=0o700)
@@ -832,11 +860,11 @@ def prepare_production_inputs(driver, budget, command, tools, directory):
         require(all(tools['ffmpeg'][key] == value for key, value in observed.items()),
                 'Production fixture generator identity changed')
         path = inputs / f'source-{identity}.ts'
-        command('production-source-' + str(identity), [tools['ffmpeg']['path'], '-nostdin', '-hide_banner',
+        command(label_prefix + '-source-' + str(identity), [tools['ffmpeg']['path'], '-nostdin', '-hide_banner',
                 '-loglevel', 'error', '-n', '-f', 'lavfi', '-i',
-                f'color=c={color}:s=96x64:r=10:d=210', '-f', 'lavfi', '-i',
-                f'sine=frequency={frequency}:sample_rate=48000:duration=210',
-                '-map', '0:v:0', '-map', '1:a:0', '-t', '210',
+                f'color=c={color}:s=96x64:r=10:d={seconds}', '-f', 'lavfi', '-i',
+                f'sine=frequency={frequency}:sample_rate=48000:duration={seconds}',
+                '-map', '0:v:0', '-map', '1:a:0', '-t', str(seconds),
                 '-c:v', 'libx264', '-threads:v', '1', '-preset', 'ultrafast', '-tune', 'zerolatency',
                 '-b:v', '160k', '-g', '10', '-keyint_min', '10', '-sc_threshold', '0', '-pix_fmt', 'yuv420p',
                 '-c:a', 'aac', '-threads:a', '1', '-ar', '48000', '-ac', '2', '-b:a', '64k',
@@ -853,7 +881,7 @@ def prepare_production_inputs(driver, budget, command, tools, directory):
         rows.append({'id': identity, 'path': str(path), 'bytes': len(raw),
                      'sha256': hashlib.sha256(raw).hexdigest(),
                      'color': color, 'audio_frequency_hz': frequency})
-    manifest = {'schema': 'ottplay.multiview.production-inputs.v1', 'seconds': 210,
+    manifest = {'schema': 'ottplay.multiview.production-inputs.v1', 'seconds': seconds,
                 'fps': 10, 'width': 96, 'height': 64, 'inputs': rows}
     manifest_path = inputs / 'INPUTS.json'
     budget.atomic(manifest_path, (json.dumps(manifest, sort_keys=True) + '\n').encode())
@@ -862,6 +890,169 @@ def prepare_production_inputs(driver, budget, command, tools, directory):
     require(all(tools['ffmpeg'][key] == value for key, value in observed.items()),
             'Production fixture generator changed after generation')
     return manifest_path, manifest
+
+
+def read_packet_proof(output, budget, expected_sha256=None, expected_bytes=None):
+    metadata = output.lstat()
+    require(stat.S_ISREG(metadata.st_mode) and not output.is_symlink()
+            and metadata.st_nlink == 1 and metadata.st_uid == os.geteuid()
+            and 0 < metadata.st_size <= 16 * 1024**2,
+            'Packet proof is not a bounded owned regular file')
+    raw = budget.read(output, 16 * 1024**2)
+    after = output.lstat()
+    require((metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink, metadata.st_size,
+             metadata.st_mtime_ns, metadata.st_ctime_ns)
+            == (after.st_dev, after.st_ino, after.st_mode, after.st_nlink, after.st_size,
+                after.st_mtime_ns, after.st_ctime_ns), 'Packet proof changed during bounded read')
+    require(expected_sha256 is None or hashlib.sha256(raw).hexdigest() == expected_sha256,
+            'Batch packet output hash changed')
+    require(expected_bytes is None or len(raw) == expected_bytes, 'Batch packet output size changed')
+    result = packet_timeline(raw)
+    output.unlink()
+    return result
+
+
+def packet_timeline(text):
+    data = json.loads(text)
+    require(type(data) is dict and type(data.get('streams')) is list and type(data.get('packets')) is list,
+            'Bounded packet timeline must have actual streams and packets')
+    streams = sorted(data['streams'], key=lambda row: row['index'])
+    require(len(streams) == 2 and [(row['index'], row['codec_name'], row['time_base']) for row in streams]
+            == [(0, 'h264', '1/90000'), (1, 'aac', '1/90000')], 'Segment stream identity changed')
+    rows = {0: [], 1: []}
+    for packet in data['packets']:
+        require(type(packet) is dict and type(packet.get('stream_index')) is int
+                and packet['stream_index'] in rows, 'Unknown packet stream')
+        values = []
+        for key in ('pts', 'dts', 'duration'):
+            value = packet.get(key)
+            require(type(value) is int and -(1 << 62) <= value < (1 << 62), 'Missing or invalid original packet timestamp')
+            values.append(value)
+        require(values[2] > 0 and re.fullmatch(r'SHA256:[0-9a-f]{64}', packet.get('data_hash', '')),
+                'Packet duration or payload digest absent')
+        row = (*values, packet['data_hash'])
+        previous = rows[packet['stream_index']]
+        require(not previous or previous[-1][0] < row[0], 'Packet timeline repeats or rolls back')
+        previous.append(row)
+    require(all(rows.values()) and sum(map(len, rows.values())) <= 65536, 'Packet timeline empty or excessive')
+    return rows
+
+
+def prepare_hls_production_inputs(driver, budget, command, tools, directory):
+    inputs = Path(directory).resolve()
+    require(not inputs.exists(), 'Fresh live HLS input root required')
+    inputs.mkdir(mode=0o700)
+    _, originals = prepare_production_inputs(driver, budget, command, tools, inputs / 'originals', seconds=600, label_prefix='production-hls')
+    sources = []
+    packet_dir = inputs / 'packet-proof'
+    packet_dir.mkdir(mode=0o700)
+    jobs = []
+    source_rows = []
+    for original in originals['inputs']:
+        identity = original['id']
+        folder = inputs / f'segments-{identity}'
+        folder.mkdir(mode=0o700)
+        command(f'production-hls-split-{identity}', [tools['ffmpeg']['path'], '-nostdin', '-hide_banner',
+                '-loglevel', 'error', '-n', '-copyts', '-i', original['path'], '-map', '0:v:0', '-map', '0:a:0',
+                '-c', 'copy', '-f', 'segment', '-segment_time', '12', '-reset_timestamps', '0',
+                '-segment_format', 'mpegts', '-segment_format_options', 'mpegts_copyts=1',
+                str(folder / 'segment-%02d.ts')], 120)
+        paths = [folder / f'segment-{index:02d}.ts' for index in range(50)]
+        require(set(folder.iterdir()) == set(paths), 'Expected exactly50 finite HLS segments')
+        segments = []
+        for index, path in enumerate(paths):
+            raw = budget.read(path, 8 * 1024**2)
+            require(len(raw) >= 188 * 3 and len(raw) % 188 == 0
+                    and all(raw[offset] == 0x47 for offset in (0, 188, 376)), 'Segment failed MPEG-TS sniff')
+            path.chmod(0o400)
+            segments.append({'index': index, 'path': str(path), 'bytes': len(raw),
+                             'sha256': hashlib.sha256(raw).hexdigest(), 'duration_ns': 12_000_000_000})
+        first = len(jobs)
+        jobs.append({'input': str(Path(original['path']).resolve()), 'input_sha256': original['sha256'],
+                     'output': str((packet_dir / f'p{len(jobs):03d}.json').resolve())})
+        for segment in segments:
+            jobs.append({'input': str(Path(segment['path']).resolve()), 'input_sha256': segment['sha256'],
+                         'output': str((packet_dir / f'p{len(jobs):03d}.json').resolve())})
+        source_rows.append((original, segments, first))
+    require(len(jobs) == 153, 'Closed HLS proof batch requires exactly153 unique inputs')
+    worker = Path(__file__).resolve().with_name('ci-multiview-hls-probe-batch.py')
+    worker_before = budget.digest(worker)
+    require(worker_before == HLS_BATCH_SHA256, 'HLS packet worker source changed')
+    plan = {'schema': 'ottplay.multiview.hls-probes.v1', 'root': str(inputs.resolve()),
+            'worker_sha256': worker_before, 'ffprobe': {key: tools['ffprobe'][key] for key in ('path', 'sha256', 'bytes')},
+            'rows': jobs}
+    plan_raw = json.dumps(plan, separators=(',', ':')).encode()
+    require(len(plan_raw) <= 131072, 'Bounded HLS probe plan exceeded128KiB')
+    plan_path = inputs / 'HLS-PROBE-PLAN.json'
+    receipt_path = inputs / 'HLS-PROBE-RECEIPT.json'
+    require(not plan_path.exists() and not receipt_path.exists(), 'Fresh batch plan/receipt required')
+    budget.atomic(plan_path, plan_raw)
+    plan_path.chmod(0o400)
+    text = command('production-hls-probe-batch', [sys.executable, str(worker), '--plan', str(plan_path.resolve()),
+                   '--receipt', str(receipt_path.resolve())], 240)
+    require(not text.strip(), 'Packet batch must not enter the combined command log')
+    require(budget.digest(worker) == worker_before
+            and budget.read(plan_path, 131072) == plan_raw, 'Worker or closed batch plan changed')
+    observed_tool = system_tool_identity(Path(tools['ffprobe']['requested_path']), budget)
+    require(all(tools['ffprobe'][key] == value for key, value in observed_tool.items()), 'Packet batch tool changed')
+    receipt_raw = budget.read(receipt_path, 131072)
+    receipt = json.loads(receipt_raw)
+    require(type(receipt) is dict and set(receipt) == {'schema', 'status', 'worker_sha256', 'tool_sha256',
+            'rows', 'output_bytes', 'outer_pgid_guard_required', 'plan_sha256'}
+            and receipt['schema'] == 'ottplay.multiview.hls-probe-receipt.v1' and receipt['status'] == 'passed'
+            and receipt['worker_sha256'] == worker_before and receipt['tool_sha256'] == tools['ffprobe']['sha256']
+            and receipt['plan_sha256'] == hashlib.sha256(plan_raw).hexdigest()
+            and receipt['outer_pgid_guard_required'] is True and type(receipt['rows']) is list
+            and len(receipt['rows']) == len(jobs), 'Packet batch receipt binding failed')
+    output_total = 0
+    for expected, actual in zip(jobs, receipt['rows'], strict=True):
+        require(type(actual) is dict and set(actual) == {'input', 'output', 'input_sha256', 'output_sha256', 'bytes', 'exit', 'reaped'}
+                and all(actual[key] == expected[key] for key in ('input', 'output', 'input_sha256'))
+                and type(actual['exit']) is int and actual['exit'] == 0 and actual['reaped'] is True
+                and type(actual['bytes']) is int and 0 < actual['bytes'] <= 16 * 1024**2
+                and re.fullmatch(r'[0-9a-f]{64}', actual['output_sha256']), 'Packet batch row failed')
+        metadata = Path(actual['output']).lstat()
+        require(stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1 and metadata.st_uid == os.geteuid()
+                and metadata.st_size == actual['bytes'], 'Packet batch output shape changed')
+        output_total += metadata.st_size
+    require(type(receipt['output_bytes']) is int and output_total == receipt['output_bytes'] <= 128 * 1024**2,
+            'Aggregate packet proof exceeded128MiB')
+    for original, segments, first in source_rows:
+        def proof(index):
+            row = receipt['rows'][index]
+            require(hashlib.sha256(budget.read(Path(row['input']), 16 * 1024**2)).hexdigest() == row['input_sha256'],
+                    'Sealed packet input changed')
+            return read_packet_proof(Path(row['output']), budget, row['output_sha256'], row['bytes'])
+        original_packets = proof(first)
+        require(len(original_packets[0]) == 6000
+                and original_packets[0][-1][0] + original_packets[0][-1][2] - original_packets[0][0][0] == 600 * 90000,
+                'Original finite HLS source is not exactly600s at10fps')
+        joined = {0: [], 1: []}
+        for index in range(50):
+            packet_rows = proof(first + index + 1)
+            require(packet_rows[0][-1][0] + packet_rows[0][-1][2] - packet_rows[0][0][0] == 12 * 90000,
+                    'Copy-only segment is not exactly12 original video seconds')
+            for stream, collected in joined.items():
+                collected.extend(packet_rows[stream])
+        require(joined == original_packets, 'Copy-only HLS segmentation changed, omitted, duplicated or reset packet timestamps/payloads')
+        timeline_sha = hashlib.sha256(json.dumps(original_packets, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        sources.append({'id': original['id'], 'original_path': original['path'], 'original_bytes': original['bytes'],
+                        'original_sha256': original['sha256'], 'original_packet_timeline_sha256': timeline_sha,
+                        'segmented_packet_timeline_sha256': timeline_sha, 'segments': segments})
+    budget.atomic(driver.evidence / 'production-hls-probe-plan.json', plan_raw, evidence=True)
+    budget.atomic(driver.evidence / 'production-hls-probe-receipt.json', receipt_raw, evidence=True)
+    budget.json_evidence(driver.evidence / 'production-hls-probe-batch.json', {
+        'probes': 153, 'plan_sha256': hashlib.sha256(plan_raw).hexdigest(),
+        'receipt_sha256': hashlib.sha256(receipt_raw).hexdigest(), 'worker_sha256': worker_before,
+        'output_bytes': output_total, 'all_children_reaped': True, 'outer_driver_group_guard_passed': True})
+    manifest = {'schema': 'ottplay.multiview.production-hls-inputs.v1', 'seconds': 600,
+                'target_seconds': 12, 'sources': sources}
+    raw = (json.dumps(manifest, sort_keys=True) + '\n').encode()
+    require(len(raw) <= 131072, 'Bounded live HLS manifest exceeded128KiB')
+    path = inputs / 'HLS-INPUTS.json'
+    budget.atomic(path, raw)
+    path.chmod(0o400)
+    return path, manifest
 
 
 def run_core_rotation_fixture(driver, command, executable, tools, prepared_inputs, output):
@@ -907,17 +1098,32 @@ def run_core_rotation_fixture(driver, command, executable, tools, prepared_input
                 driver.env[key] = value
 
 
-def run_production_fixture(driver, budget, command, executable, tools, result, output,
-                           prepared_inputs=None):
-    """Run the exact ignored normal-server adapter test once under 600 seconds."""
-    name = PRODUCTION_TEST
-    all_names = listed_names(command('production-inventory',
+def run_production_fixture(driver, budget, command, executable, tools, result, output, prepared_inputs=None):
+    staged = {}
+    _run_production_mode(driver, budget, command, executable, tools, staged, output, hls=False, prepared_inputs=prepared_inputs)
+    _run_production_mode(driver, budget, command, executable, tools, staged, output, hls=True)
+    # No terminal admission/media flags publish until BOTH exact modes qualify.
+    result.update(staged)
+
+
+def _run_production_mode(driver, budget, command, executable, tools, result, output, *, hls, prepared_inputs=None):
+    """Run one exact normal-server mode under its unchanged600-second bound."""
+    name = HLS_PRODUCTION_TEST if hls else PRODUCTION_TEST
+    label = 'production-live-hls-server' if hls else 'production-normal-server'
+    scope = ('Normal production HTTPS control/HLS with a private RFC1918 live HLS MPEG-TS adapter, one master level and sliding media windows; no native-player or physical-television qualification'
+             if hls else 'Normal production HTTPS control/HLS with a private RFC1918 HTTP MPEG-TS adapter, all nine advertised slots and private HLS output; no native-player or physical-television qualification')
+    inventory_prefix = 'production-hls' if hls else 'production'
+    all_names = listed_names(command(inventory_prefix + '-inventory',
         [str(executable), '--list', '--format', 'terse']))
-    ignored = listed_names(command('production-ignored-inventory',
+    ignored = listed_names(command(inventory_prefix + '-ignored-inventory',
         [str(executable), '--list', '--ignored', '--format', 'terse']))
-    require(all_names == {name} and ignored == {name},
-            'Production normal-binary fixture must be the one exact ignored test')
-    parent = output / 'production'
+    production_ignored = {PRODUCTION_TEST, HLS_PRODUCTION_TEST}
+    require(all_names == production_ignored | PRODUCTION_ORDINARY_TESTS and ignored == production_ignored,
+            'Production normal-binary fixture must have both exact ignored modes and frozen ordinary support')
+    if not hls:
+        ordinary = command('production-ordinary', [str(executable), '--test-threads=1', '--color=never'], 30)
+        require_suite_pass(ordinary, PRODUCTION_ORDINARY_TESTS, ignored)
+    parent = output / ('production-hls' if hls else 'production')
     if parent.exists():
         require(parent.is_dir() and not parent.is_symlink()
                 and stat.S_IMODE(parent.lstat().st_mode) == 0o700,
@@ -927,21 +1133,24 @@ def run_production_fixture(driver, budget, command, executable, tools, result, o
     inputs = parent / 'inputs'
     case = parent / 'case'
     case.mkdir(mode=0o700)
+    prepare = prepare_hls_production_inputs if hls else prepare_production_inputs
     if prepared_inputs is None:
-        manifest_path, manifest = prepare_production_inputs(driver, budget, command, tools, inputs)
+        manifest_path, manifest = prepare(driver, budget, command, tools, inputs)
     else:
+        require(not hls, 'Raw rotation assets cannot be reused as live HLS')
         manifest_path, manifest = prepared_inputs
         require(manifest_path == inputs / 'INPUTS.json' and inputs.is_dir() and not inputs.is_symlink(),
                 'Reused production fixture inputs are outside their owned directory')
-    manifest_raw = budget.read(manifest_path, 16 * 1024)
+    manifest_limit = 131072 if hls else 16 * 1024
+    manifest_raw = budget.read(manifest_path, manifest_limit)
     require(hashlib.sha256(manifest_raw).hexdigest() == hashlib.sha256(
         (json.dumps(manifest, sort_keys=True) + '\n').encode()).hexdigest(),
         'Production media manifest changed after sealing')
-    budget.json_evidence(driver.evidence / 'production-inputs.json', manifest)
+    budget.json_evidence(driver.evidence / ('production-hls-inputs.json' if hls else 'production-inputs.json'), manifest)
     receipt_path = case / 'CONTROL.json'
     env_keys = ('OTTPLAY_MULTIVIEW_PRODUCTION_INPUTS', 'OTTPLAY_MULTIVIEW_PRODUCTION_RECEIPT',
                 'OTTPLAY_MULTIVIEW_FFMPEG', 'OTTPLAY_MULTIVIEW_FFPROBE', 'OTTPLAY_MULTIVIEW_MKFIFO',
-                'OTTPLAY_MULTIVIEW_OPENSSL')
+                'OTTPLAY_MULTIVIEW_OPENSSL', 'OTTPLAY_MULTIVIEW_PRODUCTION_HLS_INPUTS')
     previous = {key: driver.env.get(key) for key in env_keys}
     try:
         driver.env.update(OTTPLAY_MULTIVIEW_PRODUCTION_INPUTS=str(manifest_path),
@@ -950,7 +1159,9 @@ def run_production_fixture(driver, budget, command, executable, tools, result, o
                           OTTPLAY_MULTIVIEW_FFPROBE=tools['ffprobe']['path'],
                           OTTPLAY_MULTIVIEW_MKFIFO=tools['mkfifo']['path'],
                           OTTPLAY_MULTIVIEW_OPENSSL=tools['openssl']['path'])
-        text = command('production-normal-server', [str(executable), name, '--ignored', '--exact',
+        if hls:
+            driver.env['OTTPLAY_MULTIVIEW_PRODUCTION_HLS_INPUTS'] = str(manifest_path)
+        text = command(label, [str(executable), name, '--ignored', '--exact',
                        '--test-threads=1', '--color=never'], 600)
         require_one_pass(text, name)
         raw = budget.read(receipt_path, 131072)
@@ -960,7 +1171,7 @@ def run_production_fixture(driver, budget, command, executable, tools, result, o
         observed = json.loads(raw)
         require(type(observed) is dict and observed.get('schema') == 'ottplay.multiview.production-binary.v1'
                 and observed.get('pass') is True
-                and observed.get('scope') == 'Normal production HTTPS control/HLS with a private RFC1918 HTTP MPEG-TS adapter, all nine advertised slots and private HLS output; no native-player or physical-television qualification'
+                and observed.get('scope') == scope
                 and type(observed.get('tls')) is dict
                 and observed['tls'].get('configured_api_transport') == 'https'
                 and observed['tls'].get('trust') == 'synthetic_ca_only'
@@ -977,6 +1188,10 @@ def run_production_fixture(driver, budget, command, executable, tools, result, o
                 and observed.get('owned_fixture_root_removed') is True
                 and observed.get('graceful_shutdown') is True
                 and observed.get('shutdown_signal') == 'SIGTERM'
+                and observed.get('active_sigterm') is True
+                and type(observed.get('sequential_contexts')) is int and observed['sequential_contexts'] == 17
+                and type(observed.get('sequential_output_generations')) is int and observed['sequential_output_generations'] == 17
+                and observed.get('input_adapter') == ('http-hls-ts-v1' if hls else 'http-mpegts-v1')
                 and observed.get('output_directory_empty') is True
                 and observed.get('source_replacement') is True
                 and observed.get('nine_slot_grid_rgb') is True
@@ -990,7 +1205,9 @@ def run_production_fixture(driver, budget, command, executable, tools, result, o
                 and type(observed.get('inputs')) is list
                 and type(observed.get('upstream_request_counts')) is dict,
                 'Normal production-server adapter receipt did not qualify its bounded contract')
-        expected = {row['id']: row for row in manifest['inputs']}
+        input_rows = ([{'id': row['id'], 'sha256': row['original_sha256'], 'bytes': row['original_bytes'], 'path': row['original_path']}
+                       for row in manifest['sources']] if hls else manifest['inputs'])
+        expected = {row['id']: row for row in input_rows}
         require(len(observed['inputs']) == 3 and all(type(row) is dict and row.get('id') in expected
                     and row.get('sha256') == expected[row['id']]['sha256']
                     and row.get('bytes') == expected[row['id']]['bytes']
@@ -998,19 +1215,44 @@ def run_production_fixture(driver, budget, command, executable, tools, result, o
                 and {row['id'] for row in observed['inputs']} == set(expected),
                 'Actual test receipt does not bind the three sealed transport sources')
         counts = observed['upstream_request_counts']
-        require(set(counts) == {f'source-{identity}.ts' for identity in (1, 2, 3)}
-                and all(type(value) is int and value >= 2 for value in counts.values()),
-                'Every source must have distinct Probe and Decode subscriptions')
-        budget.atomic(driver.evidence / 'production-control.json', raw, evidence=True)
-        result['normal_server_mpegts_to_hls'] = True
-        result['production_adapter'] = {
-            'passed': True,
-            'scope': 'Actual production binary with protected HTTP-MPEGTS enrollment, all nine advertised slots, decoded grid RGB and selected audio tones, A/V HLS ffprobe, active-credential expiry, source replacement and cleanup; no native-player or physical-television proof',
-            'elapsed_seconds': observed['elapsed_seconds'],
+        if not hls:
+            require(set(counts) == {f'source-{identity}.ts' for identity in (1, 2, 3)}
+                    and all(type(value) is int and value >= 2 for value in counts.values()),
+                    'Every source must have distinct Probe and Decode subscriptions')
+        else:
+            evidence = observed.get('hls_source')
+            require(type(evidence) is dict and evidence.get('stable_retirement_interval_seconds') == 12,
+                    'Live HLS source retirement evidence absent')
+            audit = evidence.get('audit')
+            require(type(audit) is dict and audit.get('future_denied') == 0
+                    and all(type(audit.get(key)) is list and len(audit[key]) == 3
+                            and all(type(value) is int and value >= 2 for value in audit[key]) for key in ('master', 'media'))
+                    and type(audit.get('segments')) is list and len(audit['segments']) == 3
+                    and all(type(row) is list and len(row) == 50 and all(type(value) is int and value >= 0 for value in row)
+                            and sum(value > 0 for value in row) >= 8 for row in audit['segments']),
+                    'Actual master/media/segment fetch or finite-window proof absent')
+            expected_hls = [{'id': row['id'], 'original_sha256': row['original_sha256'],
+                             'packet_timeline_sha256': row['original_packet_timeline_sha256'],
+                             'segments': [{key: segment[key] for key in ('index', 'sha256', 'bytes', 'duration_ns')}
+                                          for segment in row['segments']]} for row in manifest['sources']]
+            require(evidence.get('inputs') == expected_hls, 'Actual HLS receipt does not bind immutable segment bytes/timestamps')
+        require(budget.read(manifest_path, manifest_limit) == manifest_raw
+                and not manifest_path.lstat().st_mode & 0o222, 'Production input manifest changed during execution')
+        sealed_rows = input_rows + ([segment for row in manifest['sources'] for segment in row['segments']] if hls else [])
+        for row in sealed_rows:
+            path = Path(row['path'])
+            require(not path.lstat().st_mode & 0o222
+                    and hashlib.sha256(budget.read(path, 16 * 1024**2)).hexdigest() == row['sha256'],
+                    'Actual production source bytes changed after execution')
+        prefix = 'production-hls' if hls else 'production'
+        budget.atomic(driver.evidence / (prefix + '-control.json'), raw, evidence=True)
+        result['normal_server_hls_to_hls' if hls else 'normal_server_mpegts_to_hls'] = True
+        result['production_hls_adapter' if hls else 'production_adapter'] = {
+            'passed': True, 'scope': scope if hls else 'Actual production binary with protected HTTP-MPEGTS enrollment, all nine advertised slots, decoded grid RGB and selected audio tones, A/V HLS ffprobe, active-credential expiry, source replacement and cleanup; no native-player or physical-television proof', 'elapsed_seconds': observed['elapsed_seconds'],
             'input_manifest_sha256': hashlib.sha256(manifest_raw).hexdigest(),
             'control_sha256': hashlib.sha256(raw).hexdigest(),
-            'input_sha256': {str(row['id']): row['sha256'] for row in manifest['inputs']},
-            'upstream_request_counts': counts,
+            'input_sha256': {str(row['id']): row['sha256'] for row in input_rows},
+            'upstream_request_counts': counts, 'sequential_contexts': 17, 'active_sigterm': True,
         }
     finally:
         for key, value in previous.items():
@@ -1055,7 +1297,7 @@ def main(argv=None):
         driver.env.pop(key, None)
     result = {'status': 'fail', 'qualification': 'Unix source fixtures, broker boundary, zero-capacity activation and protected normal-server HTTP MPEG-TS adapter',
               'sustained_media_e2e': False, 'production_admission': False,
-              'normal_server_mpegts_to_hls': False, 'native_player_or_physical_television_qualified': False,
+              'normal_server_mpegts_to_hls': False, 'normal_server_hls_to_hls': False, 'native_player_or_physical_television_qualified': False,
               'generated_media_hashes_available': False, 'new_dependencies': False}
     success = False
     work_error = None
@@ -1076,9 +1318,16 @@ def main(argv=None):
                 'Source checkout is dirty')
         paths = ('Cargo.toml', 'Cargo.lock', 'src-rs/core/Cargo.toml', 'src-rs/server/Cargo.toml',
                  'src-rs/core/src/multiview/broker/registry.rs',
+                 'src-rs/core/src/multiview/broker/hls_timeline.rs',
+                 'src-rs/core/src/multiview/broker/hls_timeline_tests.rs',
+                 'src-rs/core/src/multiview/broker/stream_hls.rs',
+                 'src-rs/core/src/multiview/broker/stream_hls_tests.rs',
+                 'src-rs/core/src/multiview/broker/stream_hls_factory_tests.rs',
+                 'src-rs/server/src/multiview_media_config.rs',
                  'src-rs/server/tests/multiview_fixtures.rs', 'src-rs/server/tests/multiview_activation.rs',
                  'src-rs/server/tests/multiview_production.rs',
                  'src-rs/server/tests/support/multiview_production_tls.rs',
+                 'src-rs/server/tests/support/hls_production.rs',
                  'src-rs/server/tests/multiview_broker_boundary.rs',
                  'src-rs/server/src/multiview_broker.rs', 'src-rs/server/src/multiview_broker_live.rs',
                  'src-rs/server/src/multiview_broker_live_output_tests.rs', 'src-rs/server/src/media_connection.rs',
@@ -1089,7 +1338,7 @@ def main(argv=None):
                  'src-rs/core/src/multiview/geometry.rs', 'src-rs/core/src/multiview/timing.rs',
                  'scripts/ci-multiview-unix-media.py',
                  'src-rs/server/src/main.rs', 'scripts/ci-native-favorites.py',
-                 'scripts/ci-multiview-unix.py', 'scripts/ci-apt-mirror.py',
+                 'scripts/ci-multiview-unix.py', 'scripts/ci-multiview-hls-probe-batch.py', 'scripts/ci-apt-mirror.py',
                  'tests/test_multiview_unix_ci.py')
         return {'commit': head, 'tree': tree, 'sha256': {p: budget.digest(root / p) for p in paths}}
 
@@ -1190,7 +1439,7 @@ def main(argv=None):
                 'Core multiview ignored test inventory differs from the one reviewed media test')
         ordinary_core = core_all - core_ignored
         require(all(name.startswith('multiview::') and name in ordinary_core for name in
-                    (*CORE_REQUIRED_TESTS, *CORE_REQUIRED_CLOCK_RETIREMENT_TESTS, *args.required_core_test)),
+                    (*CORE_REQUIRED_TESTS, *CORE_REQUIRED_CLOCK_RETIREMENT_TESTS, *CORE_REQUIRED_HLS_TESTS, *args.required_core_test)),
                 'Required ordinary core regression is absent or ignored')
         core_text = command('core-multiview-ordinary', [str(core_executable), 'multiview::',
                             '--test-threads=1', '--color=never'], 300)
@@ -1251,6 +1500,25 @@ def main(argv=None):
         listener_text = command('listener-ordinary',
             [str(listener), LISTENER_TEST_PREFIX, '--test-threads=1', '--color=never'], 180)
         require_suite_pass(listener_text, listener_all, set())
+        policy_all = listed_names(command('hls-item-policy-inventory',
+            [str(listener), HLS_ITEM_ADAPTER_TEST, '--list', '--format', 'terse']))
+        policy_ignored = listed_names(command('hls-item-policy-ignored',
+            [str(listener), HLS_ITEM_ADAPTER_TEST, '--list', '--ignored', '--format', 'terse']))
+        require(policy_all == {HLS_ITEM_ADAPTER_TEST} and not policy_ignored,
+                'Exact ordinary HLS item-adapter policy regression is missing or ignored')
+        policy_text = command('hls-item-policy', [str(listener), HLS_ITEM_ADAPTER_TEST,
+                              '--exact', '--test-threads=1', '--color=never'], 30)
+        require_one_pass(policy_text, HLS_ITEM_ADAPTER_TEST)
+        for index, policy_name in enumerate(PUBLIC_HTTP_POLICY_TESTS):
+            label = f'public-http-policy-{index}'
+            present = listed_names(command(label + '-inventory',
+                [str(listener), policy_name, '--list', '--format', 'terse']))
+            ignored_policy = listed_names(command(label + '-ignored',
+                [str(listener), policy_name, '--list', '--ignored', '--format', 'terse']))
+            require(present == {policy_name} and not ignored_policy,
+                    'Exact public HTTP policy regression is missing or ignored')
+            require_one_pass(command(label, [str(listener), policy_name, '--exact',
+                             '--test-threads=1', '--color=never'], 30), policy_name)
         for index, (name, limit) in enumerate(TESTS):
             if name == PENDING_TEST:
                 run_pending_fixture(driver, budget, command, executable, tools, result)
@@ -1305,7 +1573,7 @@ def main(argv=None):
                       executed_core_ignored_tests=core_ignored_executed,
                       ordinary_server_tests=sorted(ordinary_server),
                       production_test_binary_sha256=production_sha256,
-                      tests=[name for name, _ in TESTS] + [PRODUCTION_TEST], owned_process_cleanup_confirmed=True)
+                      tests=[name for name, _ in TESTS] + [PRODUCTION_TEST, HLS_PRODUCTION_TEST], owned_process_cleanup_confirmed=True)
         result['sustained_media_e2e'] = True
         result['generated_media_hashes_available'] = True
         success = True

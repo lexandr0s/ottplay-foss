@@ -12,14 +12,16 @@ Installing a release does not enroll household sources or enable a public proxy.
 
 ## Supported first profile
 
-- Unix server, explicit `http-mpegts-v1` adapter, server-owned HTTP(S) MPEG-TS inputs.
+- Unix server with explicitly enrolled server-owned HTTP(S) inputs. Direct MPEG-TS
+  uses `http-mpegts-v1`; the additional live HLS-TS input uses `http-hls-ts-v1`.
+  Each adapter needs its own normal-binary qualification receipt before deployment.
 - One composed 640×360 output at 10 FPS, up to nine input slots; grid and PiP geometry.
 - 320×180 decoded slot frames; the existing 16 MiB application-frame reservation,
   64 million input pixels/second and 128 MiB output-directory limits apply.
 - Input pixel rate is measured before downscaling. Nine slots do not imply that
   nine arbitrary high-resolution streams fit the admission budget.
-- HLS inputs, MP4, local filesystem roots, provider allocation APIs and automatic
-  Plex/VPortal profile import are not qualified by this adapter. They must not be
+- Encrypted HLS, fMP4, MP4, local filesystem roots, provider allocation APIs and
+  automatic Plex/VPortal profile import are outside this profile. They must not be
   represented as supported merely because a URL or catalog item exists.
 
 The TV/client must support the private protocol and its source-identity checks.
@@ -78,6 +80,7 @@ The existing top-level fields are `version`, `server_id`, `origin`, `listener`,
       "favorite_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "title": "Example channel",
       "provider": "m3u",
+      "input_adapter": "http-mpegts-v1",
       "url": "https://media.example.net/channel-1.ts"
     }
   ],
@@ -98,13 +101,78 @@ channel identity. A digest matches metadata and never grants network authority.
 Every allowed subject/installation pair must match a top-level control credential.
 The native caller cannot submit an upstream URL, credential, path or config index.
 
+### Choosing the input format
+
+The `media.adapter` envelope remains `http-mpegts-v1` for compatibility. Select
+an individual source with `items[].input_adapter`: omitted or `http-mpegts-v1`
+means a continuous MPEG-TS response; `http-hls-ts-v1` means an HLS playlist with
+MPEG-TS segments. Do not change the envelope to `http-hls-ts-v1` or infer the
+adapter from a URL suffix. For example, an HLS item sets:
+
+```json
+{
+  "input_adapter": "http-hls-ts-v1",
+  "url": "https://media.example.net/channel-2/master.m3u8"
+}
+```
+
+Those two fields supplement the complete item identity shown above. They do not
+replace its favorite digest or grant access to an unlisted origin.
+
+The HLS adapter accepts a media playlist or one same-origin master level. It pins
+one self-contained variant across probe and decode; there is no adaptive bitrate
+switching or separate external audio group. Segments must be complete MPEG-TS,
+with finite `EXTINF` durations and an ordered media sequence. The live cursor
+reloads a sliding window, avoids replaying already delivered sequence numbers and
+fails closed on changed entries, rollback or a lost window. `ENDLIST` ends the
+input. Encryption, discontinuities, byte ranges, fMP4 initialization maps,
+low-latency parts and unsupported playlist extensions are rejected.
+
+The same address, credential, DNS-pinning and redirect rules apply to the root,
+master child and every segment. FFmpeg receives an owned byte pipe, never an
+upstream URL. One segment is bounded to 8 MiB, with one retained 64 KiB delivery
+chunk per stream; these network buffers are separate from frame reservations and
+FFmpeg's process memory. Actual network operations retain their eight-second
+bound. Waiting for a declared 11–12-second segment is a separate cancellable
+presentation wait, not permission for an unlimited network stall.
+
 All source origins must be explicitly enrolled and actually used. Redirects are
-not followed. Private upstream addresses require exact allowed IP entries.
-Plain HTTP is restricted to a literal private IP; a bearer on that origin also
-requires the item's explicit `allow_cleartext_credentials: true`. Otherwise use
-HTTPS. Private credential-bearing DNS origins cannot fall back to an arbitrary
-public address. Provider credentials remain in this protected server document;
-they are not returned in catalog, status, output or diagnostic responses.
+not followed. Private upstream addresses require exact allowed IP entries. Each
+request checks every resolved address, pins that approved set for the request
+and checks the connected peer. This is not a lifetime peer-IP pin. On HTTPS
+origins, adding allowed private addresses does not exclude otherwise approved
+public answers; the HTTPS hostname and certificate remain required.
+
+By default, plain HTTP requires a literal private IP explicitly listed in
+`private_addresses`. To use a public HTTP provider, explicitly opt in on its
+exact origin in the protected `media.network` configuration:
+
+```json
+{
+  "origin": "http://media.example.net",
+  "private_addresses": [],
+  "allow_public_http": true
+}
+```
+
+`allow_public_http` defaults to false. It is rejected for HTTPS or any rule with
+private addresses, including an unused rule. Its empty private-address list means
+**every** resolved address must pass the existing public-address policy. Private,
+loopback, link-local, mapped or mixed public/private answers are denied before
+sending a request. Private HTTP hostnames remain unsupported; use HTTPS or the
+existing explicitly enrolled private-literal form. Public DNS/CDN addresses may
+change between requests, with each new answer checked again.
+
+This opt-in permits the whole stored URL, including its path and query, to travel
+without encryption. HTTP also lacks cryptographic server identity and protection
+against an attacker on the network path. A bearer header additionally requires
+that individual item's `allow_cleartext_credentials: true`; the origin opt-in
+does not waive that consent. Use HTTPS when available. HLS children must still
+stay on the same enrolled origin; no query copying, redirects or additional
+origins are authorized. The private control API itself still requires HTTPS.
+
+Provider credentials remain in this protected server document; they are not
+returned in catalog, status, output or diagnostic responses.
 
 Prepare the source registry before listener binding. The startup-only enrollment
 principal has `SourcesManage`; paired player credentials have only
@@ -134,6 +202,32 @@ to the private host without routing the video through a public tunnel.
 A separate private instance can coexist with the ordinary asset/server instance
 on different ports. Do not silently change the ordinary server's bind address or
 route public client traffic through the private compositor.
+
+## NUC and k3s operation
+
+For the permanent home instance, run the private service on the NUC in k3s,
+independently of here.now and the ordinary player-asset server. Deploy a qualified **player** image
+pinned by digest, with a NUC node selector, explicit resource reservations and a
+private listener. A DNS record can resolve the service hostname to its current
+node address; the player's HTTPS origin, certificate hostname and exposed port
+must agree. Do not route its video through a public tunnel or publish upstream
+provider credentials.
+
+A Kubernetes Secret projection contains symlinks and cannot be used directly as
+the protected operator document. An initialization step must copy the document
+and TLS material into an owner-only volume as regular, single-link files with
+the final service UID and 0600 permissions. Mount only this materialized volume
+in the non-root service container. Keep its 0700 output directory on a separate,
+size-limited ephemeral volume. Configuration and secrets stay outside Git.
+
+The service reads its configuration and certificates at startup. Renewing the
+certificate Secret alone does **not** reload the running listener or a previous
+initialization copy. Before expiry, stop new admissions, close active sessions,
+wait for confirmed source/process/output cleanup, then recreate the pod so it
+copies the renewed certificate. Verify its hostname, chain, validity interval,
+health and authenticated capabilities after restart; provision a fresh server
+epoch on the client. If cleanup fails, retain the existing owner and investigate
+instead of treating a timeout as permission for a second encoder instance.
 
 ## Native provisioning and operation
 
