@@ -130,9 +130,8 @@ CORE_REQUIRED_CLOCK_RETIREMENT_TESTS = frozenset({
     'multiview::broker::registry::tests::refused_renew_commit_does_not_extend_registry_lease',
     'multiview::broker::registry::tests::successful_renew_commit_advances_both_under_one_barrier',
 })
-CORE_IGNORED_TESTS = frozenset({
-    'multiview::persistent::tests::real_stream_output_rotation_preserves_sibling_decoders',
-})
+CORE_ROTATION_TEST = 'multiview::persistent::tests::real_stream_output_rotation_preserves_sibling_decoders'
+CORE_IGNORED_TESTS = frozenset({CORE_ROTATION_TEST})
 LISTENER_TEST_PREFIX = 'listener_tests::'
 LISTENER_REQUIRED_TESTS = frozenset({
     'listener_tests::selected_media_dispatch_preserves_public_request_context_and_response',
@@ -865,7 +864,51 @@ def prepare_production_inputs(driver, budget, command, tools, directory):
     return manifest_path, manifest
 
 
-def run_production_fixture(driver, budget, command, executable, tools, result, output):
+def run_core_rotation_fixture(driver, command, executable, tools, prepared_inputs, output):
+    """Run the exact ignored Core rotation test with only owned synthetic inputs."""
+    manifest_path, manifest = prepared_inputs
+    require(manifest.get('schema') == 'ottplay.multiview.production-inputs.v1'
+            and manifest.get('seconds') == 210 and len(manifest.get('inputs', [])) == 3,
+            'Core rotation fixture inputs differ from the sealed production fixture')
+    inputs = output / 'production' / 'inputs'
+    require(manifest_path == inputs / 'INPUTS.json' and manifest_path.is_file()
+            and not manifest_path.is_symlink(), 'Core rotation manifest is outside its owned input directory')
+    rows = {row.get('id'): row for row in manifest['inputs']}
+    require(set(rows) == {1, 2, 3}, 'Core rotation fixture requires exactly three sealed sources')
+    require(all(Path(row['path']).parent == inputs and Path(row['path']).is_absolute()
+                for row in rows.values()), 'Core rotation source path escaped its owned input directory')
+    root = output / 'core-rotation'
+    root.mkdir(mode=0o700)
+    case = root / 'case'
+    require(not case.exists() and not case.is_symlink(),
+            'Core rotation case directory must be fresh for the test to create')
+    env_keys = ('OTTPLAY_MULTIVIEW_ROTATE_CASE_DIR', 'OTTPLAY_MULTIVIEW_ROTATE_INPUT_A',
+                'OTTPLAY_MULTIVIEW_ROTATE_INPUT_B', 'OTTPLAY_MULTIVIEW_ROTATE_INPUT_C',
+                'OTTPLAY_MULTIVIEW_FFMPEG', 'OTTPLAY_MULTIVIEW_FFPROBE')
+    previous = {key: driver.env.get(key) for key in env_keys}
+    try:
+        driver.env.update({
+            'OTTPLAY_MULTIVIEW_ROTATE_CASE_DIR': str(case),
+            'OTTPLAY_MULTIVIEW_ROTATE_INPUT_A': rows[1]['path'],
+            'OTTPLAY_MULTIVIEW_ROTATE_INPUT_B': rows[2]['path'],
+            'OTTPLAY_MULTIVIEW_ROTATE_INPUT_C': rows[3]['path'],
+            'OTTPLAY_MULTIVIEW_FFMPEG': tools['ffmpeg']['path'],
+            'OTTPLAY_MULTIVIEW_FFPROBE': tools['ffprobe']['path'],
+        })
+        text = command('core-ignored-' + hashlib.sha256(CORE_ROTATION_TEST.encode()).hexdigest()[:12],
+                       [str(executable), CORE_ROTATION_TEST, '--ignored', '--exact',
+                        '--test-threads=1', '--color=never'], 600)
+        require_one_pass(text, CORE_ROTATION_TEST)
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                driver.env.pop(key, None)
+            else:
+                driver.env[key] = value
+
+
+def run_production_fixture(driver, budget, command, executable, tools, result, output,
+                           prepared_inputs=None):
     """Run the exact ignored normal-server adapter test once under 600 seconds."""
     name = PRODUCTION_TEST
     all_names = listed_names(command('production-inventory',
@@ -875,11 +918,21 @@ def run_production_fixture(driver, budget, command, executable, tools, result, o
     require(all_names == {name} and ignored == {name},
             'Production normal-binary fixture must be the one exact ignored test')
     parent = output / 'production'
-    parent.mkdir(mode=0o700)
+    if parent.exists():
+        require(parent.is_dir() and not parent.is_symlink()
+                and stat.S_IMODE(parent.lstat().st_mode) == 0o700,
+                'Reused production fixture parent is not an owned private directory')
+    else:
+        parent.mkdir(mode=0o700)
     inputs = parent / 'inputs'
     case = parent / 'case'
     case.mkdir(mode=0o700)
-    manifest_path, manifest = prepare_production_inputs(driver, budget, command, tools, inputs)
+    if prepared_inputs is None:
+        manifest_path, manifest = prepare_production_inputs(driver, budget, command, tools, inputs)
+    else:
+        manifest_path, manifest = prepared_inputs
+        require(manifest_path == inputs / 'INPUTS.json' and inputs.is_dir() and not inputs.is_symlink(),
+                'Reused production fixture inputs are outside their owned directory')
     manifest_raw = budget.read(manifest_path, 16 * 1024)
     require(hashlib.sha256(manifest_raw).hexdigest() == hashlib.sha256(
         (json.dumps(manifest, sort_keys=True) + '\n').encode()).hexdigest(),
@@ -1143,10 +1196,20 @@ def main(argv=None):
                             '--test-threads=1', '--color=never'], 300)
         require_suite_pass(core_text, ordinary_core, core_ignored)
         core_ignored_executed = []
+        production_inputs = None
         for ignored_name in sorted(CORE_IGNORED_TESTS):
-            text = command('core-ignored-' + hashlib.sha256(ignored_name.encode()).hexdigest()[:12],
-                [str(core_executable), ignored_name, '--ignored', '--exact', '--test-threads=1', '--color=never'], 600)
-            require_one_pass(text, ignored_name)
+            if ignored_name == CORE_ROTATION_TEST:
+                production_parent = output / 'production'
+                production_parent.mkdir(mode=0o700)
+                production_inputs = prepare_production_inputs(
+                    driver, budget, command, tools, production_parent / 'inputs')
+                run_core_rotation_fixture(driver, command, core_executable, tools,
+                                          production_inputs, output)
+            else:
+                text = command('core-ignored-' + hashlib.sha256(ignored_name.encode()).hexdigest()[:12],
+                    [str(core_executable), ignored_name, '--ignored', '--exact',
+                     '--test-threads=1', '--color=never'], 600)
+                require_one_pass(text, ignored_name)
             core_ignored_executed.append(ignored_name)
         ignored = command('ignored-fixtures', [str(executable), '--list', '--ignored', '--format', 'terse'])
         ignored_names = listed_names(ignored)
@@ -1203,7 +1266,8 @@ def main(argv=None):
                 require(count <= 10000, 'Temporary-entry bound exceeded')
                 require(not entry.name.startswith('ottplay-multiview-fixture-'),
                         'Fixture scratch cleanup incomplete')
-        run_production_fixture(driver, budget, command, production, tools, result, output)
+        run_production_fixture(driver, budget, command, production, tools, result, output,
+                               prepared_inputs=production_inputs)
         require(budget.digest(production) == production_sha256,
                 'Production adapter test executable changed')
         require(activation_home_preflight(driver, budget) == activation_home,

@@ -340,9 +340,16 @@ class Attempt:
                                       and not (name == 'listener-ordinary' and attempt.case == 'listener-cleanup-unknown')})
                 if name == 'fixture-pending-clock':
                     attempt.pending_env = dict(self.env)
+                rotation_command = 'core-ignored-' + hashlib.sha256(ci.CORE_ROTATION_TEST.encode()).hexdigest()[:12]
+                if name == rotation_command:
+                    attempt.rotation_env = dict(self.env)
+                    attempt.rotation_case_was_fresh = not Path(
+                        self.env['OTTPLAY_MULTIVIEW_ROTATE_CASE_DIR']).exists()
                 text = attempt.response(name, argv)
                 self.budget.atomic(self.evidence / 'logs' / (name + '.log'),
                                    text.encode(), evidence=True)
+                if name == rotation_command and attempt.case == 'core-rotation-nonzero-exit':
+                    raise RuntimeError('Synthetic Core rotation command exited nonzero')
                 if name == 'broker-ordinary' and attempt.case == 'broker-nonzero-exit':
                     raise RuntimeError('Synthetic broker command exited nonzero after successful stdout')
                 if name == 'listener-ordinary' and attempt.case == 'listener-nonzero-exit':
@@ -688,6 +695,7 @@ class Attempt:
                 return text.replace(CORE_NAMES[0] + ' ... ok', CORE_NAMES[0] + ' ... FAILED')
             return text
         if name.startswith('core-ignored-'):
+            Path(self.driver.env['OTTPLAY_MULTIVIEW_ROTATE_CASE_DIR']).mkdir(mode=0o700)
             return passed(CORE_IGNORED[0])
         if name == 'ignored-fixtures':
             names = list(EXPECTED_TESTS)
@@ -1772,9 +1780,49 @@ class MockMainTests(unittest.TestCase):
             self.assertEqual([(row['color'], row['audio_frequency_hz']) for row in manifest['inputs']],
                              [('red', 330), ('lime', 440), ('blue', 550)])
             self.assertTrue(all(Path(row['path']).stat().st_mode & 0o222 == 0 for row in manifest['inputs']))
+            rotation_env = attempt.rotation_env
+            rotation_names = (
+                'OTTPLAY_MULTIVIEW_ROTATE_CASE_DIR', 'OTTPLAY_MULTIVIEW_ROTATE_INPUT_A',
+                'OTTPLAY_MULTIVIEW_ROTATE_INPUT_B', 'OTTPLAY_MULTIVIEW_ROTATE_INPUT_C',
+                'OTTPLAY_MULTIVIEW_FFMPEG', 'OTTPLAY_MULTIVIEW_FFPROBE')
+            rotation_case = Path(rotation_env['OTTPLAY_MULTIVIEW_ROTATE_CASE_DIR'])
+            self.assertEqual(rotation_case, attempt.output / 'core-rotation/case')
+            self.assertTrue(attempt.rotation_case_was_fresh)
+            self.assertTrue(rotation_case.is_dir() and not rotation_case.is_symlink())
+            self.assertEqual([rotation_env[f'OTTPLAY_MULTIVIEW_ROTATE_INPUT_{name}']
+                              for name in 'ABC'], [row['path'] for row in manifest['inputs']])
+            self.assertEqual(rotation_env['OTTPLAY_MULTIVIEW_FFMPEG'], attempt.supplied['ffmpeg'])
+            self.assertEqual(rotation_env['OTTPLAY_MULTIVIEW_FFPROBE'], attempt.supplied['ffprobe'])
+            self.assertEqual([row['name'] for row in attempt.driver.commands
+                              if row['name'].startswith('production-source-')],
+                             ['production-source-1', 'production-source-2', 'production-source-3'])
+            self.assertEqual([row['argv'][1] for row in attempt.driver.commands
+                              if row['name'] == 'core-ignored-' + hashlib.sha256(
+                                  ci.CORE_ROTATION_TEST.encode()).hexdigest()[:12]],
+                             [ci.CORE_ROTATION_TEST])
+            self.assertTrue(all(key not in attempt.driver.env for key in rotation_names[:4]))
+            self.assertEqual(attempt.driver.env['OTTPLAY_MULTIVIEW_FFMPEG'], attempt.supplied['ffmpeg'])
+            self.assertEqual(attempt.driver.env['OTTPLAY_MULTIVIEW_FFPROBE'], attempt.supplied['ffprobe'])
             receipt = json.loads((attempt.output / 'evidence/production-control.json').read_text())
             self.assertEqual(receipt['schema'], 'ottplay.multiview.production-binary.v1')
             self.assertTrue(receipt['nine_slot_grid_rgb'] and receipt['selected_audio_tone'])
+
+    def test_core_rotation_environment_is_restored_after_command_failure(self):
+        with Attempt('core-rotation-nonzero-exit') as attempt:
+            with self.assertRaisesRegex(RuntimeError, 'Unix fixture qualification failed'):
+                attempt.run()
+            terminal = attempt.terminal()
+            self.assertEqual(terminal['status'], 'fail')
+            self.assertIn('Synthetic Core rotation command exited nonzero', terminal['error'])
+            self.assertIsNotNone(attempt.rotation_env)
+            self.assertNotIn('OTTPLAY_MULTIVIEW_ROTATE_CASE_DIR', attempt.driver.env)
+            for key in ('OTTPLAY_MULTIVIEW_ROTATE_INPUT_A', 'OTTPLAY_MULTIVIEW_ROTATE_INPUT_B',
+                        'OTTPLAY_MULTIVIEW_ROTATE_INPUT_C'):
+                self.assertNotIn(key, attempt.driver.env)
+            self.assertEqual(attempt.driver.env['OTTPLAY_MULTIVIEW_FFMPEG'], attempt.supplied['ffmpeg'])
+            self.assertEqual(attempt.driver.env['OTTPLAY_MULTIVIEW_FFPROBE'], attempt.supplied['ffprobe'])
+            self.assertFalse(any(row['name'] == 'production-normal-server'
+                                 for row in attempt.driver.commands))
 
     def test_production_target_inventory_and_receipt_fail_closed(self):
         cases = {

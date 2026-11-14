@@ -89,7 +89,11 @@ function installPlaybackObservation() {
             const diagnostics = window.__mixedObservedDiagnostics;
             if (diagnostics.length === 64) diagnostics.shift();
             diagnostics.push({
-                assignedSrc: fixturePath(event.target.getAttribute("src")),
+                assignedSrc: fixturePath(
+                    typeof event.target.getAttribute === "function"
+                        ? event.target.getAttribute("src")
+                        : null
+                ),
                 currentSrc: fixturePath(event.target.currentSrc),
                 currentTime: Number.isFinite(event.target.currentTime)
                     ? Number(event.target.currentTime.toFixed(3))
