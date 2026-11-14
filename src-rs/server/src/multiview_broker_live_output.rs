@@ -1,5 +1,5 @@
-//! Test-only custody for actual encoder output, not a production route or fake
-//! fixture body. The parent checks signed authority before/after reads and on
+//! Descriptor-bound custody for actual encoder output.
+//! The parent checks signed authority before/after reads and on
 //! every response chunk. No session/control mutex is needed during filesystem IO.
 use super::BoundaryError;
 use axum::body::Bytes;

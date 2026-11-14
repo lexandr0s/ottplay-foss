@@ -1,18 +1,16 @@
-# Experimental multiview foundation
+# Multiview composition and private service
 
-This is gated source infrastructure, not a delivered player feature. The default
-server does not expose a private multiview listener. Explicit experimental operator
-configuration can register the isolated private router; see the broker runbook
-for the listener and authorization restrictions. Production capabilities remain
-`max_inputs = 0`, `qualified_input_adapters = []`, and `output_profiles = []`.
-Existing public player/controller commands and playback paths are unchanged.
+Multiview is disabled by default. Without a protected operator media plan, the
+private shell advertises `max_inputs = 0`, no input adapters and no output
+profiles. An explicitly configured Unix host can enroll the bounded HTTP MPEG-TS
+profile through the private broker; it does not accept player-supplied URLs or
+turn public asset endpoints into a media proxy.
 
-The core contains pixel geometry, bounded frame queues, owned decoder/encoder
-lifecycles, a persistent compositor, and a private source broker. The server files
-are imported by isolated integration tests; constructing a router does not start
-a listener. See [the broker runbook](broker/README.md) for authority, source
-provisioning, revocation and retirement rules. Never use household credentials,
-profiles or media for these fixtures.
+See the [operator and deployment guide](../../../../docs/multiview-service.md)
+and [broker runbook](broker/README.md) for supported profiles, source authority,
+listener/TLS restrictions, native provisioning, renewal and cleanup. Test-only
+constructors and synthetic inputs are not a substitute for normal-binary or
+native/device qualification. Existing public playback paths remain independent.
 
 ## Local pre-push checks
 

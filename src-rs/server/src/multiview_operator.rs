@@ -12,6 +12,10 @@ use serde::Deserialize;
 
 use crate::multiview_broker::{CredentialConfig, Enrollment, ListenerPolicy, OperatorConfig};
 
+#[path = "multiview_media_config.rs"]
+mod media_config;
+pub(crate) use media_config::{LoadedOperatorConfig, MediaConfig, MediaPlan};
+
 const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 
 // Deliberately no Debug or Serialize on documents containing credentials.
@@ -25,6 +29,8 @@ struct Document {
     allowed_origins: Vec<String>,
     signing_key: String,
     credentials: Vec<CredentialDocument>,
+    #[serde(default)]
+    media: Option<media_config::RawMediaDocument>,
 }
 
 #[derive(Deserialize)]
@@ -51,16 +57,35 @@ fn invalid(reason: &'static str) -> anyhow::Error {
 }
 
 pub(crate) fn load(path: &Path) -> anyhow::Result<OperatorConfig> {
+    let loaded = load_configuration(path)?;
+    if loaded.media.is_some() {
+        return Err(invalid("media opt-in requires configured service startup"));
+    }
+    Ok(loaded.operator)
+}
+
+pub(crate) fn load_configuration(path: &Path) -> anyhow::Result<LoadedOperatorConfig> {
     let public_directory = std::env::current_dir()
         .and_then(std::fs::canonicalize)
         .map_err(|_| invalid("cannot determine public directory"))?;
-    load_for_public_directory(path, &public_directory)
+    load_configuration_for_public_directory(path, &public_directory)
 }
 
 fn load_for_public_directory(
     path: &Path,
     public_directory: &Path,
 ) -> anyhow::Result<OperatorConfig> {
+    let loaded = load_configuration_for_public_directory(path, public_directory)?;
+    if loaded.media.is_some() {
+        return Err(invalid("media opt-in requires configured service startup"));
+    }
+    Ok(loaded.operator)
+}
+
+fn load_configuration_for_public_directory(
+    path: &Path,
+    public_directory: &Path,
+) -> anyhow::Result<LoadedOperatorConfig> {
     let bytes = read_private(path, public_directory)?;
     // Never attach a serde/OS error: it may contain a credential, path or input.
     let document: Document =
@@ -90,7 +115,7 @@ fn load_for_public_directory(
         .collect();
     // Broker::new remains the authority for identity, origin, credential and
     // listener-policy validation. Restarting never restores an old epoch.
-    Ok(OperatorConfig {
+    let operator = OperatorConfig {
         server_id: document.server_id,
         server_epoch: uuid::Uuid::new_v4().to_string(),
         origin: document.origin,
@@ -102,7 +127,13 @@ fn load_for_public_directory(
         allowed_origins: document.allowed_origins,
         signing_key: document.signing_key.into_bytes(),
         credentials,
-    })
+    };
+    let media = document
+        .media
+        .map(media_config::MediaDocument::from_raw)
+        .map(|value| value.validate(&operator))
+        .transpose()?;
+    Ok(LoadedOperatorConfig { operator, media })
 }
 
 #[cfg(not(unix))]

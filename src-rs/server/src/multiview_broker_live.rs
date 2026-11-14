@@ -1,4 +1,4 @@
-//! Explicitly injected fixture host. No production route installs this backend.
+//! Explicitly injected Unix media host; ordinary server startup has no backend.
 //! Long source acquisition/probing runs outside the session control mutex; owned
 //! operations survive a dropped HTTP waiter and retain their cleanup receipts.
 use super::{Authenticated, BoundaryError, Broker};
@@ -32,22 +32,28 @@ use uuid::Uuid;
 
 const MAX_OPERATIONS: usize = 64;
 const MAX_SESSIONS: usize = 16;
+#[cfg(test)]
 const FIXTURE_LIMIT: Duration = Duration::from_secs(60);
 
-pub struct FixtureConfig {
+pub struct BackendConfig {
     pub media: persistent::Config,
     pub profile: OutputProfile,
     pub input_adapters: Vec<String>,
 }
+#[cfg(test)]
+pub type FixtureConfig = BackendConfig;
+
 pub struct LiveBackend {
-    config: FixtureConfig,
+    config: BackendConfig,
     sources: Arc<SourceService>,
     registry: Arc<Registry>,
     host: Mutex<Host>,
+    shutdown_receipt: Mutex<Option<watch::Receiver<Option<Result<(), BoundaryError>>>>>,
 }
 struct Host {
     sessions: BTreeMap<String, Arc<LiveSession>>,
     creating: bool,
+    stopping: bool,
     operations: BTreeMap<String, Operation>,
 }
 struct Operation {
@@ -65,6 +71,7 @@ struct LiveSession {
     scene: String,
     owner: Authenticated,
     end: Instant,
+    soft_end: Arc<Mutex<Instant>>,
     cancel: CancellationToken,
     control: Mutex<Control>,
     close_receipt: Mutex<Option<watch::Receiver<Option<Result<(), BoundaryError>>>>>,
@@ -80,8 +87,8 @@ struct Control {
     uncertain: Vec<Retained>,
     output_removed: bool,
     output: Option<Output>,
-    output_started_ms: u64,
     retired_output: Vec<Output>,
+    retired_output_removed: bool,
     output_fence: Option<u64>,
     awaiting_clean_output: bool,
     closing: bool,
@@ -165,16 +172,14 @@ impl Control {
             && !self.authority_invalid()
     }
 
-    fn reported_output(&self, now_ms: u64) -> Option<Output> {
+    fn reported_output(&self, broker: &Broker) -> Option<Output> {
         self.output.clone().and_then(|mut output| {
-            output.lease_expires_in_ms = u64::from(output.lease_expires_in_ms)
-                .saturating_sub(now_ms.saturating_sub(self.output_started_ms))
-                .min(u32::MAX as u64) as u32;
+            output.lease_expires_in_ms = broker.live_output_remaining(&output);
             (output.lease_expires_in_ms > 0).then_some(output)
         })
     }
 
-    fn session_state(&self, now_ms: u64) -> SessionState {
+    fn session_state(&self, broker: &Broker) -> SessionState {
         if self.closed {
             SessionState::Closed
         } else if self.closing {
@@ -187,7 +192,7 @@ impl Control {
             )
         {
             SessionState::Failed
-        } else if self.composite_ready() && self.reported_output(now_ms).is_some() {
+        } else if self.composite_ready() && self.reported_output(broker).is_some() {
             SessionState::Ready
         } else {
             SessionState::Preparing
@@ -318,13 +323,40 @@ fn native_transition(
 }
 
 impl LiveBackend {
+    #[cfg(test)]
     pub fn new(
-        mut config: FixtureConfig,
+        config: FixtureConfig,
+        sources: Arc<SourceService>,
+        registry: Arc<Registry>,
+    ) -> Result<Arc<Self>, BoundaryError> {
+        if config.media.max_duration > FIXTURE_LIMIT {
+            return Err(BoundaryError::Configuration);
+        }
+        Self::validated(config, sources, registry)
+    }
+
+    pub fn new_production(
+        mut config: BackendConfig,
+        sources: Arc<SourceService>,
+        registry: Arc<Registry>,
+    ) -> Result<Arc<Self>, BoundaryError> {
+        if !cfg!(unix) {
+            return Err(BoundaryError::UnsupportedPlatform);
+        }
+        if config.input_adapters != ["http-mpegts-v1"] {
+            return Err(BoundaryError::Configuration);
+        }
+        config.media.idle_timeout = Duration::from_secs(90);
+        Self::validated(config, sources, registry)
+    }
+
+    fn validated(
+        mut config: BackendConfig,
         sources: Arc<SourceService>,
         registry: Arc<Registry>,
     ) -> Result<Arc<Self>, BoundaryError> {
         if config.media.max_duration.is_zero()
-            || config.media.max_duration > FIXTURE_LIMIT
+            || config.media.max_duration > Duration::from_secs(24 * 60 * 60)
             || !wire::opaque(&config.profile.profile_id)
             || config.profile.max_inputs == 0
             || config.profile.max_inputs > 9
@@ -359,10 +391,107 @@ impl LiveBackend {
             host: Mutex::new(Host {
                 sessions: BTreeMap::new(),
                 creating: false,
+                stopping: false,
                 operations: BTreeMap::new(),
             }),
+            shutdown_receipt: Mutex::new(None),
         }))
     }
+    pub async fn shutdown(self: &Arc<Self>, broker: &Broker) -> Result<(), BoundaryError> {
+        let mut receive = {
+            let mut owner = self
+                .shutdown_receipt
+                .lock()
+                .map_err(|_| BoundaryError::Unavailable)?;
+            if let Some(previous) = owner
+                .as_ref()
+                .filter(|receive| receive.borrow().as_ref().is_none_or(Result::is_ok))
+            {
+                previous.clone()
+            } else {
+                let (completed, receive) = watch::channel(None);
+                *owner = Some(receive.clone());
+                let (operations, sessions) = {
+                    let mut host = self.host.lock().map_err(|_| BoundaryError::Unavailable)?;
+                    host.stopping = true;
+                    (
+                        host.operations
+                            .values()
+                            .map(|operation| operation.completed.subscribe())
+                            .collect::<Vec<_>>(),
+                        host.sessions.values().cloned().collect::<Vec<_>>(),
+                    )
+                };
+                for session in &sessions {
+                    session.cancel.cancel();
+                    if let Ok(state) = session.control.lock() {
+                        for source in state.sources.values() {
+                            source.factory.cancel();
+                        }
+                    }
+                    let _ = broker.revoke_output(&session.id);
+                }
+                let task = self.clone();
+                let boundary = broker.clone();
+                tokio::spawn(async move {
+                    let result = AssertUnwindSafe(async {
+                        // A late create checks stopping before installation. Owned
+                        // operations finish even when their HTTP waiter is gone.
+                        for mut operation in operations {
+                            loop {
+                                if operation.borrow().is_some() {
+                                    break;
+                                }
+                                operation
+                                    .changed()
+                                    .await
+                                    .map_err(|_| BoundaryError::Unavailable)?;
+                            }
+                        }
+                        let sessions = task
+                            .host
+                            .lock()
+                            .map_err(|_| BoundaryError::Unavailable)?
+                            .sessions
+                            .values()
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let mut clean = true;
+                        for session in sessions {
+                            clean &= task.close_owned(&boundary, &session).await.is_ok();
+                        }
+                        let host = task.host.lock().map_err(|_| BoundaryError::Unavailable)?;
+                        if clean && !host.creating {
+                            Ok(())
+                        } else {
+                            Err(BoundaryError::Unavailable)
+                        }
+                    })
+                    .catch_unwind()
+                    .await
+                    .unwrap_or(Err(BoundaryError::Unavailable));
+                    completed.send_replace(Some(result));
+                });
+                receive
+            }
+        };
+        // Expiry does not discard the cleanup owner. A caller may await the same
+        // receipt again; unresolved custody continues blocking future admission.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(result) = *receive.borrow() {
+                    return result;
+                }
+                receive
+                    .changed()
+                    .await
+                    .map_err(|_| BoundaryError::Unavailable)?;
+            }
+        })
+        .await
+        .map_err(|_| BoundaryError::Unavailable)?
+    }
+
     pub fn profile(&self) -> &OutputProfile {
         &self.config.profile
     }
@@ -423,6 +552,9 @@ impl LiveBackend {
     {
         let mut receive = {
             let mut host = self.host.lock().map_err(|_| BoundaryError::Unavailable)?;
+            if host.stopping {
+                return Err(BoundaryError::Revoked);
+            }
             let now = Instant::now();
             host.operations
                 .retain(|_, v| v.expires > now || v.completed.borrow().is_none());
@@ -545,6 +677,9 @@ impl LiveBackend {
         let hard_end = Instant::now() + lifetime;
         {
             let mut host = self.host.lock().map_err(|_| BoundaryError::Unavailable)?;
+            if host.stopping {
+                return Err(BoundaryError::Revoked);
+            }
             if host.creating
                 || host
                     .sessions
@@ -552,6 +687,13 @@ impl LiveBackend {
                     .any(|s| s.control.lock().map_or(true, |c| !c.closed))
             {
                 return Err(BoundaryError::Conflict);
+            }
+            if host.sessions.len() >= MAX_SESSIONS {
+                // Only receipt-confirmed closed sessions are evictable. Cached
+                // operation replies survive; Registry never reuses session IDs.
+                host.sessions.retain(|_, session| {
+                    session.control.lock().map_or(true, |state| !state.closed)
+                });
             }
             if host.sessions.len() >= MAX_SESSIONS {
                 return Err(BoundaryError::Limit);
@@ -574,7 +716,19 @@ impl LiveBackend {
                 });
             }
         };
-        if let Err(error) = broker.credential_remaining_ms(&owner) {
+        let admission = broker.credential_remaining_ms(&owner).and_then(|_| {
+            if self
+                .host
+                .lock()
+                .map_err(|_| BoundaryError::Unavailable)?
+                .stopping
+            {
+                Err(BoundaryError::Revoked)
+            } else {
+                Ok(0)
+            }
+        });
+        if let Err(error) = admission {
             if tokio::task::spawn_blocking(move || core.shutdown())
                 .await
                 .is_ok_and(|r| r.is_ok())
@@ -613,6 +767,9 @@ impl LiveBackend {
             scene,
             owner: owner.clone(),
             end: hard_end,
+            soft_end: Arc::new(Mutex::new(
+                (Instant::now() + Duration::from_secs(90)).min(hard_end),
+            )),
             cancel: CancellationToken::new(),
             control: Mutex::new(Control {
                 core: Some(core),
@@ -625,8 +782,8 @@ impl LiveBackend {
                 uncertain: Vec::new(),
                 output_removed: false,
                 output: None,
-                output_started_ms: 0,
                 retired_output: Vec::new(),
+                retired_output_removed: false,
                 output_fence: None,
                 awaiting_clean_output: false,
                 closing: false,
@@ -635,10 +792,15 @@ impl LiveBackend {
             }),
             close_receipt: Mutex::new(None),
         });
-        {
+        let stopping = {
             let mut host = self.host.lock().map_err(|_| BoundaryError::Unavailable)?;
             host.sessions.insert(id, session.clone());
             host.creating = false;
+            host.stopping
+        };
+        if stopping {
+            self.close_owned(&broker, &session).await?;
+            return Err(BoundaryError::Revoked);
         }
         let task = self.clone();
         let watchdog_session = session.clone();
@@ -648,11 +810,18 @@ impl LiveBackend {
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 let expired = Instant::now() >= watchdog_session.end
+                    || watchdog_session
+                        .soft_end
+                        .lock()
+                        .map_or(true, |end| Instant::now() >= *end)
                     || watchdog_broker
                         .credential_remaining_ms(&watchdog_session.owner)
                         .is_err();
                 let invalid = watchdog_session.control.lock().map_or(true, |c| {
                     c.closed
+                        || c.output.as_ref().is_some_and(|output| {
+                            watchdog_broker.live_output_remaining(output) == 0
+                        })
                         || c.closing
                         || c.cleanup_failed
                         || c.sources.values().any(|s| {
@@ -810,6 +979,9 @@ impl LiveBackend {
         if let Some(core) = &control.core {
             control.snapshot = core.snapshot();
         }
+        if control.retired_output_removed && !control.closing {
+            acknowledge_retired_outputs(broker, &session.id, &mut control.retired_output, true);
+        }
         let ready = control.composite_ready();
         if ready && control.output.is_none() && !control.awaiting_clean_output {
             if let Some(core) = &control.core {
@@ -820,23 +992,22 @@ impl LiveBackend {
                     .min(u32::MAX as u128) as u32;
                 if lifetime > 0 {
                     let issued_ms = broker.0.clock.now_ms();
-                    if let Ok(output) = broker.publish_live_output(
+                    if let Ok(output) = broker.publish_live_output_until(
                         &session.owner,
                         &binding,
                         core.output_directory().to_path_buf(),
-                        lifetime,
+                        issued_ms.saturating_add(u64::from(lifetime)),
+                        session.soft_end.clone(),
                         control.output_fence.map_or(0, |n| n.saturating_add(1)),
                         None,
                     ) {
                         control.output = Some(output);
-                        control.output_started_ms = issued_ms;
                     }
                 }
             }
         }
-        let now_ms = broker.0.clock.now_ms();
-        let reported_output = control.reported_output(now_ms);
-        let state = control.session_state(now_ms);
+        let reported_output = control.reported_output(broker);
+        let state = control.session_state(broker);
         let slots = control
             .snapshot
             .slots
@@ -1038,6 +1209,7 @@ impl LiveBackend {
                 let task = self.clone();
                 let target = session.clone();
                 let context = request.context.clone();
+                let boundary = broker.clone();
                 tokio::task::spawn_blocking(move || {
                     let mut state = target
                         .control
@@ -1050,7 +1222,13 @@ impl LiveBackend {
                         return Err(BoundaryError::Revoked);
                     }
                     if matches!(op, ControlOp::Renew {}) {
-                        return task.registry.renew(&target.owner.principal, &context).map_err(error);
+                        if state.output.as_ref().is_some_and(|output| boundary.live_output_remaining(output) == 0) {
+                            return Err(BoundaryError::Revoked);
+                        }
+                        boundary.renew_live_output(&target.owner, &context, &target.soft_end, target.end)?;
+                        let touched = state.core.as_ref().ok_or(BoundaryError::Revoked)?.touch_output().map_err(media_error);
+                        if touched.is_err() { state.cleanup_failed = true; }
+                        return touched;
                     }
                     let mut next = context.clone();
                     next.native_expected = next_native;
@@ -1118,7 +1296,7 @@ impl LiveBackend {
             context,
             accepted: true,
             operation_id,
-            state: state.session_state(broker.0.clock.now_ms()),
+            state: state.session_state(&broker),
         })
     }
 
@@ -1504,14 +1682,47 @@ impl LiveBackend {
             if let Some(output) = state.output.take() {
                 state.retired_output.push(output);
             }
+            state.retired_output_removed = false;
             state.output_fence = state.snapshot.hls_sequence;
             state.awaiting_clean_output = true;
+            let previous_generation = state.snapshot.output_generation;
+            let previous_runtime = state.snapshot.runtime;
             let reaped = state
                 .core
                 .as_mut()
                 .ok_or(BoundaryError::Revoked)?
                 .stop_slot(slot, issue.backend_slot_revision)
                 .map_err(media_error);
+            let rotated = match &reaped {
+                Ok(_) => state
+                    .core
+                    .as_mut()
+                    .ok_or(BoundaryError::Revoked)?
+                    .rotate_output(previous_generation)
+                    .map_err(media_error)
+                    .and_then(|receipt| {
+                        if receipt.runtime_id == previous_runtime
+                            && receipt.retired_generation == previous_generation
+                            && receipt.new_generation > previous_generation
+                            && receipt.old_output_removed
+                        {
+                            Ok(())
+                        } else {
+                            Err(BoundaryError::Unavailable)
+                        }
+                    }),
+                Err(error) => Err(*error),
+            };
+            if rotated.is_err() {
+                state.cleanup_failed = true;
+            }
+            if rotated.is_ok() {
+                // This receipt belongs to the retired epoch, not the still-live
+                // session. Held HTTP bodies keep their own bounded custody.
+                acknowledge_retired_outputs(&boundary, &target.id, &mut state.retired_output, true);
+                state.output_fence = None;
+                state.retired_output_removed = true;
+            }
             let source = state.sources.remove(&slot);
             refresh(&mut state, &target.scene);
             let mut next = state.bindings[&slot].clone();
@@ -1525,8 +1736,15 @@ impl LiveBackend {
             }
             // Source custody must leave this closure even when authorization
             // expires after the decoder has stopped. Never lose its async join.
-            let worker_reaped = reaped.is_ok();
-            Ok::<_, BoundaryError>((source, pending, worker_reaped, reaped.and(transition)))
+            // Retirement covers the old codec/output epoch as well as the slot
+            // worker. A failed rotation retains uncertainty for full shutdown.
+            let worker_reaped = reaped.is_ok() && rotated.is_ok();
+            Ok::<_, BoundaryError>((
+                source,
+                pending,
+                worker_reaped,
+                reaped.and(rotated).and(transition),
+            ))
         })
         .await
         .map_err(|_| BoundaryError::Unavailable)??;
@@ -1554,12 +1772,27 @@ impl LiveBackend {
                 }
             }
         }
-        // The host will rearm only with core's clean-output watermark, not a
-        // guessed HLS sequence delay. Until that proof exists output is withheld.
         transition?;
         if !reaped || !cleanup_confirmed {
             return Err(BoundaryError::Unavailable);
         }
+        let mut state = session
+            .control
+            .lock()
+            .map_err(|_| BoundaryError::Unavailable)?;
+        if state.closing || state.closed || state.cleanup_failed {
+            return Err(BoundaryError::Revoked);
+        }
+        let binding = state
+            .bindings
+            .get(&context.native_expected.slot_id)
+            .ok_or(BoundaryError::Conflict)?;
+        self.registry
+            .rearm_output(&session.owner.principal, binding)
+            .map_err(error)?;
+        // Only a completed codec/output rotation plus source cleanup can cross
+        // this barrier. The new directory cannot contain old AAC/video samples.
+        state.awaiting_clean_output = false;
         Ok(())
     }
     async fn close_owned(
@@ -2453,6 +2686,68 @@ mod tests {
             key
         );
         assert!(LiveBackend::key(&original, "control", "session", "invalid request").is_err());
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_owned_operation_after_http_waiter_drops() {
+        let backend = host(config()).unwrap();
+        let broker = super::super::production_tests::broker_for_host_test();
+        let (started, running) = oneshot::channel();
+        let (release, held) = oneshot::channel();
+        let task = backend.clone();
+        let waiter = tokio::spawn(async move {
+            task.operation("held-create".into(), [1; 32], async move {
+                let _ = started.send(());
+                let _ = held.await;
+                Err(BoundaryError::Unavailable)
+            })
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .unwrap()
+            .unwrap();
+        waiter.abort();
+        assert!(waiter.await.is_err());
+        let task = backend.clone();
+        let closing = tokio::spawn(async move { task.shutdown(&broker).await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !backend.host.lock().unwrap().stopping {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!closing.is_finished());
+        assert!(matches!(
+            backend
+                .operation("replacement".into(), [2; 32], async {
+                    panic!("must not execute after shutdown")
+                })
+                .await,
+            Err(BoundaryError::Revoked)
+        ));
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), closing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_does_not_claim_unconfirmed_create_custody_is_clean() {
+        let backend = host(config()).unwrap();
+        let broker = super::super::production_tests::broker_for_host_test();
+        backend.host.lock().unwrap().creating = true;
+        assert_eq!(
+            backend.shutdown(&broker).await,
+            Err(BoundaryError::Unavailable)
+        );
+        assert!(backend.host.lock().unwrap().stopping);
+        // Only receipt-equivalent owner completion makes a later drain succeed.
+        backend.host.lock().unwrap().creating = false;
+        backend.shutdown(&broker).await.unwrap();
     }
 
     #[tokio::test]

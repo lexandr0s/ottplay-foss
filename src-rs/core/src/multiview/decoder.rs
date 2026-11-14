@@ -2240,12 +2240,58 @@ fn publish_audio(
 }
 
 struct Process(Option<Child>);
-impl Process {
-    fn stop(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+trait OwnedReap {
+    fn exited(&mut self) -> std::io::Result<bool>;
+    fn kill_owned(&mut self) -> std::io::Result<()>;
+}
+impl OwnedReap for Child {
+    fn exited(&mut self) -> std::io::Result<bool> {
+        self.try_wait().map(|status| status.is_some())
+    }
+    fn kill_owned(&mut self) -> std::io::Result<()> {
+        self.kill()
+    }
+}
+fn reap_confirmed<T: OwnedReap>(
+    owner: &mut Option<T>,
+    deadline: Instant,
+) -> Result<(), DecoderError> {
+    let Some(child) = owner.as_mut() else {
+        return Ok(());
+    };
+    // A failed ownership probe must never be followed by a PID-based signal.
+    match child.exited() {
+        Ok(true) => {
+            owner.take();
+            return Ok(());
         }
+        Ok(false) => {}
+        Err(_) => return Err(DecoderError::Io),
+    }
+    // Kill failure can mean an already exited child. Only a successful reap,
+    // not the kill result, proves retirement and permits dropping the owner.
+    let _ = child.kill_owned();
+    loop {
+        match child.exited() {
+            Ok(true) => {
+                owner.take();
+                return Ok(());
+            }
+            Err(_) => return Err(DecoderError::Io),
+            Ok(false) => {}
+        }
+        if Instant::now() >= deadline {
+            return Err(DecoderError::Stalled);
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+impl Process {
+    fn stop_confirmed(&mut self, deadline: Instant) -> Result<(), DecoderError> {
+        reap_confirmed(&mut self.0, deadline)
+    }
+    fn stop(&mut self) {
+        let _ = self.stop_confirmed(Instant::now() + Duration::from_secs(5));
     }
 }
 impl Drop for Process {
@@ -2957,10 +3003,27 @@ pub struct Decoder {
     process: Arc<Mutex<Process>>,
     cancelled: Arc<AtomicBool>,
     readers: Vec<JoinHandle<()>>,
+    reader_join_failed: bool,
     audio: Arc<AudioQueue>,
     generation: u64,
     #[cfg(unix)]
     metadata_pipes: Option<timed_io::MetadataPipes>,
+}
+pub(crate) struct DecoderStartFailure {
+    pub(crate) cause: DecoderError,
+    pub(crate) owner: Option<Decoder>,
+}
+#[cfg_attr(not(unix), allow(dead_code))]
+struct DecoderStartup<'a> {
+    owner: Option<Decoder>,
+    failed: &'a mut Option<Decoder>,
+}
+impl Drop for DecoderStartup<'_> {
+    fn drop(&mut self) {
+        if let Some(owner) = self.owner.take() {
+            *self.failed = Some(owner);
+        }
+    }
 }
 impl Decoder {
     pub fn start(
@@ -3008,6 +3071,54 @@ impl Decoder {
             config, source, prepared, input, generation, video, audio, None,
         )
     }
+    pub(crate) fn start_stream_with_clock_owned(
+        config: &DecoderConfig,
+        source: &GrantedStream,
+        prepared: PreparedStreamInfo,
+        input: StreamInput,
+        generation: u64,
+        video: Arc<LatestFrame>,
+        audio: Arc<AudioQueue>,
+        presentation: Arc<PresentationClock>,
+    ) -> Result<Self, DecoderStartFailure> {
+        let mut failed = None;
+        let result = (|| {
+            if presentation.current()?.is_none() {
+                return Err(DecoderError::Unsupported);
+            }
+            validate_stream_preparation(config, source, &prepared, &input)?;
+            if source.binding.context.source_revision.checked_add(1) != Some(generation)
+                || video.generation() != generation
+            {
+                return Err(DecoderError::StaleGeneration);
+            }
+            audio.check_generation(generation)?;
+            {
+                let mut state = source.identity.0.lock().map_err(|_| DecoderError::Io)?;
+                if state.started {
+                    return Err(DecoderError::StaleGeneration);
+                }
+                state.started = true;
+            }
+            Self::start_clocked_owned(
+                config,
+                input.reader,
+                Some(source.binding.clone()),
+                prepared.information,
+                prepared.ffmpeg,
+                generation,
+                video,
+                audio,
+                Some(presentation),
+                &mut failed,
+            )
+        })();
+        result.map_err(|cause| DecoderStartFailure {
+            cause,
+            owner: failed,
+        })
+    }
+    #[allow(dead_code)] // Kept as a source-compatible private legacy wrapper.
     pub(crate) fn start_stream_with_clock(
         config: &DecoderConfig,
         source: &GrantedStream,
@@ -3190,6 +3301,7 @@ impl Decoder {
             process: Arc::new(Mutex::new(process)),
             cancelled: Arc::new(AtomicBool::new(false)),
             readers: Vec::new(),
+            reader_join_failed: false,
             audio: audio.clone(),
             generation,
             #[cfg(unix)]
@@ -3387,6 +3499,23 @@ impl Decoder {
         Err(DecoderError::Unsupported)
     }
 
+    #[cfg(not(unix))]
+    #[allow(clippy::too_many_arguments)]
+    fn start_clocked_owned(
+        _config: &DecoderConfig,
+        _input: File,
+        _publication: Option<Arc<Binding>>,
+        _information: MediaInfo,
+        _ffmpeg: PathBuf,
+        _generation: u64,
+        _video: Arc<LatestFrame>,
+        _audio: Arc<AudioQueue>,
+        _presentation: Option<Arc<PresentationClock>>,
+        _failed: &mut Option<Decoder>,
+    ) -> Result<Self, DecoderError> {
+        Err(DecoderError::Unsupported)
+    }
+
     #[cfg(unix)]
     #[allow(clippy::too_many_arguments)]
     fn start_clocked(
@@ -3399,6 +3528,35 @@ impl Decoder {
         video: Arc<LatestFrame>,
         audio: Arc<AudioQueue>,
         presentation: Option<Arc<PresentationClock>>,
+    ) -> Result<Self, DecoderError> {
+        let mut failed = None;
+        Self::start_clocked_owned(
+            config,
+            input,
+            publication,
+            information,
+            ffmpeg,
+            generation,
+            video,
+            audio,
+            presentation,
+            &mut failed,
+        )
+    }
+
+    #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)]
+    fn start_clocked_owned(
+        config: &DecoderConfig,
+        input: File,
+        publication: Option<Arc<Binding>>,
+        information: MediaInfo,
+        ffmpeg: PathBuf,
+        generation: u64,
+        video: Arc<LatestFrame>,
+        audio: Arc<AudioQueue>,
+        presentation: Option<Arc<PresentationClock>>,
+        failed: &mut Option<Decoder>,
     ) -> Result<Self, DecoderError> {
         use std::os::fd::AsFd;
         let frame_bytes = checked_frame_bytes(config)?;
@@ -3529,16 +3687,29 @@ impl Decoder {
             })
             .spawn()
             .map_err(|_| DecoderError::Unsupported)?;
-        let mut process = Process(Some(child));
-        let pid = process.0.as_ref().unwrap().id();
-        let mut stdout = process
-            .0
-            .as_mut()
-            .unwrap()
-            .stdout
-            .take()
-            .ok_or(DecoderError::Io)?;
-        let stderr = process.0.as_mut().unwrap().stderr.take();
+        let pid = child.id();
+        let mut startup = DecoderStartup {
+            owner: Some(Self {
+                pid,
+                process: Arc::new(Mutex::new(Process(Some(child)))),
+                cancelled: Arc::new(AtomicBool::new(false)),
+                readers: Vec::new(),
+                reader_join_failed: false,
+                audio: audio.clone(),
+                generation,
+                metadata_pipes: Some(pipes),
+            }),
+            failed,
+        };
+        let decoder = startup.owner.as_mut().unwrap();
+        let (mut stdout, stderr) = {
+            let mut process = decoder.process.lock().map_err(|_| DecoderError::Io)?;
+            let child = process.0.as_mut().ok_or(DecoderError::Io)?;
+            (
+                child.stdout.take().ok_or(DecoderError::Io)?,
+                child.stderr.take(),
+            )
+        };
         timed_io::nonblocking(stdout.as_fd())?;
         if let Some(s) = &stderr {
             timed_io::nonblocking(s.as_fd())?;
@@ -3552,15 +3723,6 @@ impl Decoder {
         let audio_pending = Arc::new(AtomicBool::new(!information.has_audio));
         let video_complete = Arc::new(AtomicBool::new(false));
         let audio_complete = Arc::new(AtomicBool::new(!information.has_audio));
-        let mut decoder = Self {
-            pid,
-            process: Arc::new(Mutex::new(process)),
-            cancelled: Arc::new(AtomicBool::new(false)),
-            readers: Vec::new(),
-            audio: audio.clone(),
-            generation,
-            metadata_pipes: Some(pipes),
-        };
         if information.has_audio {
             audio.available(generation)?;
             audio.timed(generation, clock.clone())?;
@@ -3920,7 +4082,7 @@ impl Decoder {
                 .map_err(|_| DecoderError::Io)?;
             decoder.readers.push(handle);
         }
-        Ok(decoder)
+        Ok(startup.owner.take().unwrap())
     }
 
     #[cfg(test)]
@@ -3963,31 +4125,242 @@ impl Decoder {
         self.pid
     }
 
-    pub fn stop(&mut self) {
+    /// Signal every owned decoder promptly before waiting for any one child.
+    pub(crate) fn request_stop(&self) {
         self.cancelled.store(true, Ordering::Release);
+    }
+
+    /// Only this confirmed path is an ownership/reaping receipt. All waits share
+    /// the caller's absolute cleanup deadline; a failure retains the real owner.
+    pub fn stop_confirmed(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<DecoderRetirementReceipt, DecoderError> {
+        self.request_stop();
         self.audio.mark_unavailable(self.generation);
-        self.process
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .stop();
-        for reader in self.readers.drain(..) {
-            let _ = reader.join();
+        loop {
+            match self.process.try_lock() {
+                Ok(mut process) => {
+                    process.stop_confirmed(deadline)?;
+                    break;
+                }
+                Err(std::sync::TryLockError::Poisoned(error)) => {
+                    error.into_inner().stop_confirmed(deadline)?;
+                    break;
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if Instant::now() >= deadline {
+                        return Err(DecoderError::Stalled);
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                }
+            }
+        }
+        while !self.readers.is_empty() {
+            if let Some(index) = self.readers.iter().position(JoinHandle::is_finished) {
+                self.reader_join_failed |= self.readers.swap_remove(index).join().is_err();
+            } else {
+                if Instant::now() >= deadline {
+                    return Err(DecoderError::Stalled);
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+        if self.reader_join_failed {
+            return Err(DecoderError::Io);
         }
         #[cfg(unix)]
         {
             self.metadata_pipes.take();
         }
+        Ok(DecoderRetirementReceipt {
+            pid: self.pid,
+            _confirmed: (),
+        })
+    }
+    /// Compatibility API: callers needing cleanup proof use stop_confirmed.
+    pub fn stop(&mut self) {
+        let _ = self.stop_confirmed(Instant::now() + Duration::from_secs(5));
+    }
+    fn take_quarantine(&mut self) -> Self {
+        Self {
+            pid: self.pid,
+            process: self.process.clone(),
+            cancelled: self.cancelled.clone(),
+            readers: std::mem::take(&mut self.readers),
+            reader_join_failed: self.reader_join_failed,
+            audio: self.audio.clone(),
+            generation: self.generation,
+            #[cfg(unix)]
+            metadata_pipes: self.metadata_pipes.take(),
+        }
     }
 }
+/// Constructed only after the owned child is reaped and every reader joined.
+#[derive(Clone, Copy, Debug)]
+pub struct DecoderRetirementReceipt {
+    pub pid: u32,
+    _confirmed: (),
+}
+
 impl Drop for Decoder {
     fn drop(&mut self) {
-        self.stop();
+        if self
+            .stop_confirmed(Instant::now() + Duration::from_secs(5))
+            .is_err()
+        {
+            // Session normally retains/retries this owner with its capacity.
+            // Final Drop cannot turn an uncertain owned child into proof.
+            eprintln!("multiview decoder cleanup uncertain; process-group recovery required");
+            std::mem::forget(self.take_quarantine());
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn confirmed_reap_keeps_owner_on_explicit_error_and_accepts_reaped_kill_race() {
+        use std::collections::VecDeque;
+        struct Fake {
+            outcomes: VecDeque<Result<bool, std::io::ErrorKind>>,
+            killed: Arc<std::sync::atomic::AtomicUsize>,
+            kill_error: bool,
+        }
+        impl OwnedReap for Fake {
+            fn exited(&mut self) -> std::io::Result<bool> {
+                self.outcomes
+                    .pop_front()
+                    .unwrap_or(Ok(false))
+                    .map_err(std::io::Error::from)
+            }
+            fn kill_owned(&mut self) -> std::io::Result<()> {
+                self.killed.fetch_add(1, Ordering::Relaxed);
+                if self.kill_error {
+                    Err(std::io::ErrorKind::InvalidInput.into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let expired = Instant::now() - Duration::from_nanos(1);
+        for (outcomes, kill_error, expected, kills) in [
+            (
+                vec![Err(std::io::ErrorKind::Other)],
+                false,
+                Err(DecoderError::Io),
+                0,
+            ),
+            (vec![Ok(false), Ok(true)], true, Ok(()), 1),
+            (
+                vec![Ok(false), Err(std::io::ErrorKind::Other)],
+                false,
+                Err(DecoderError::Io),
+                1,
+            ),
+            (
+                vec![Ok(false), Ok(false)],
+                false,
+                Err(DecoderError::Stalled),
+                1,
+            ),
+        ] {
+            let killed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut owner = Some(Fake {
+                outcomes: outcomes.into(),
+                killed: killed.clone(),
+                kill_error,
+            });
+            assert_eq!(reap_confirmed(&mut owner, expired), expected);
+            assert_eq!(owner.is_some(), expected.is_err());
+            assert_eq!(killed.load(Ordering::Relaxed), kills);
+        }
+    }
+    #[test]
+    fn confirmed_decoder_retirement_retains_pending_reader_and_sticky_join_failure() {
+        fn fake(readers: Vec<JoinHandle<()>>) -> Decoder {
+            Decoder {
+                pid: 0,
+                process: Arc::new(Mutex::new(Process(None))),
+                cancelled: Arc::new(AtomicBool::new(false)),
+                readers,
+                reader_join_failed: false,
+                audio: Arc::new(AudioQueue::new(0)),
+                generation: 0,
+                #[cfg(unix)]
+                metadata_pipes: None,
+            }
+        }
+        let (release, waiting) = std::sync::mpsc::channel();
+        let mut pending = fake(vec![thread::spawn(move || {
+            let _ = waiting.recv();
+        })]);
+        assert_eq!(
+            pending
+                .stop_confirmed(Instant::now() - Duration::from_nanos(1))
+                .err(),
+            Some(DecoderError::Stalled)
+        );
+        assert_eq!(pending.readers.len(), 1);
+        release.send(()).unwrap();
+        pending
+            .stop_confirmed(Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        assert!(pending.readers.is_empty());
+        let mut failed = fake(vec![thread::spawn(|| panic!("injected reader failure"))]);
+        assert_eq!(
+            failed
+                .stop_confirmed(Instant::now() + Duration::from_secs(1))
+                .err(),
+            Some(DecoderError::Io)
+        );
+        assert_eq!(
+            failed
+                .stop_confirmed(Instant::now() + Duration::from_secs(1))
+                .err(),
+            Some(DecoderError::Io)
+        );
+        assert!(failed.reader_join_failed);
+        // Remove only the injected test fault after proving retries cannot
+        // clear it; no production API can reset a failed reader receipt.
+        failed.reader_join_failed = false;
+    }
+    #[test]
+    fn failed_stream_startup_returns_partial_decoder_without_dropping_its_reader() {
+        let (release, waiting) = std::sync::mpsc::channel();
+        let mut failed = None;
+        {
+            let _startup = DecoderStartup {
+                owner: Some(Decoder {
+                    pid: 0,
+                    process: Arc::new(Mutex::new(Process(None))),
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                    readers: vec![thread::spawn(move || {
+                        let _ = waiting.recv();
+                    })],
+                    reader_join_failed: false,
+                    audio: Arc::new(AudioQueue::new(0)),
+                    generation: 0,
+                    #[cfg(unix)]
+                    metadata_pipes: None,
+                }),
+                failed: &mut failed,
+            };
+            // The same guard runs for each fallible descriptor/thread operation
+            // after spawn in the production owned-stream constructor.
+        }
+        let mut owner = failed.expect("partial startup owner must be returned");
+        assert_eq!(owner.readers.len(), 1);
+        assert!(
+            !owner.cancelled.load(Ordering::Acquire),
+            "legacy Drop must not consume the owner"
+        );
+        release.send(()).unwrap();
+        owner
+            .stop_confirmed(Instant::now() + Duration::from_secs(1))
+            .unwrap();
+    }
 
     fn sar_info(width: u32, height: u32, sar: Option<&str>) -> MediaInfo {
         let sar = sar
@@ -5606,6 +5979,56 @@ mod tests {
             ),
             Ok(())
         );
+    }
+    #[test]
+    fn session_clock_keeps_waiting_decoder_live_through_output_gap_longer_than_five_seconds() {
+        fn waiting_source(master: Arc<PresentationClock>, base: Instant) -> SourceClock {
+            let clock = SourceClock::with_presentation(false, Some(master));
+            clock.state.lock().unwrap().origin = Some(ClockOrigin {
+                pts: rational(0, 1),
+                presentation: base,
+            });
+            clock
+        }
+        let cancelled = AtomicBool::new(false);
+        // Exact old failure condition: no encoder callback advances the master.
+        // Exercise the real, unchanged five-second wait, not an injected timeout.
+        let frozen = Arc::new(PresentationClock::new());
+        let base = Instant::now();
+        frozen.publish(base).unwrap();
+        let source = waiting_source(frozen, base);
+        let began = Instant::now();
+        assert_eq!(
+            source.wait(rational(1, 1), Duration::ZERO, &cancelled, None, began),
+            Err(DecoderError::Stalled)
+        );
+        assert!(began.elapsed() >= Duration::from_secs(5));
+
+        let master = Arc::new(PresentationClock::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut driver =
+            super::super::persistent::SessionClockDriver::start(master.clone(), stop.clone())
+                .unwrap();
+        let source = waiting_source(master.clone(), master.current().unwrap().unwrap());
+        let gap = Instant::now();
+        // There is no encoder, audio callback or synthetic output tick in this
+        // entire interval. Each decoder wait retains its original five-second
+        // real deadline while the same Session clock continues to advance.
+        for second in 1..=7 {
+            source
+                .wait(
+                    rational(second, 1),
+                    Duration::ZERO,
+                    &cancelled,
+                    None,
+                    Instant::now(),
+                )
+                .unwrap();
+        }
+        assert!(gap.elapsed() > Duration::from_secs(6));
+        assert!(!source.fault.load(Ordering::Acquire));
+        driver.stop().unwrap();
+        assert!(stop.load(Ordering::Acquire));
     }
     #[test]
     fn shared_clock_eof_tail_and_final_video_interval_use_logical_ticks() {

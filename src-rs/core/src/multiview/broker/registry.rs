@@ -1195,11 +1195,32 @@ impl Registry {
     fn renew_at(&self, p: &Principal, context: &Binding, now: Instant) -> Result<()> {
         self.renew_with_time(p, context, Some(now))
     }
+    /// Commit a bounded host-side lease update under the same authority barrier.
+    /// The callback must not block, perform I/O, or re-enter this registry. Lock
+    /// order is registry -> host output state. A refused callback leaves the
+    /// session expiry unchanged; neither side may revive expired authority.
+    pub fn renew_with_commit(
+        &self,
+        p: &Principal,
+        context: &Binding,
+        operation: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        self.renew_with_time_and_commit(p, context, None, operation)
+    }
     fn renew_with_time(
         &self,
         p: &Principal,
         context: &Binding,
         admission_time: Option<Instant>,
+    ) -> Result<()> {
+        self.renew_with_time_and_commit(p, context, admission_time, &mut || Ok(()))
+    }
+    fn renew_with_time_and_commit(
+        &self,
+        p: &Principal,
+        context: &Binding,
+        admission_time: Option<Instant>,
+        operation: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
         let mut s = self.lock()?;
         let now = admission_time.unwrap_or_else(Instant::now);
@@ -1212,6 +1233,7 @@ impl Registry {
         }) {
             return Err(RegistryError::Revoked);
         }
+        operation()?;
         s.sessions.get_mut(&context.session_id).unwrap().expires = now + SESSION_TTL;
         Ok(())
     }

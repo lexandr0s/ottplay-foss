@@ -1,4 +1,4 @@
-"""Explicit Unix fixture CI; never a production or sustained-playback oracle."""
+"""Bounded Unix synthetic qualification of the selected multiview profile and adapters."""
 import argparse
 import hashlib
 import importlib.util
@@ -18,6 +18,7 @@ sys.dont_write_bytecode = True
 GUARD_SHA256 = '6f623bb7234b3619ff859dec0afe9c1ad938f29d606f0836b69434312867e020'
 STREAM_MEDIA_SHA256 = '97703a705a2c33a1536893eeca2d11e65022d44fa1189ff59f300e2040cdf4e9'
 STREAM_TEST = 'streamed_session_two_owner_continuity'
+PRODUCTION_TEST = 'normal_server_private_http_mpegts_renew_replace_and_cleanup'
 PENDING_TEST = 'streamed_decoder_short_track_pending_and_failure'
 MKFIFO = Path('/usr/bin/mkfifo')
 TESTS = (
@@ -99,6 +100,23 @@ CORE_REQUIRED_TESTS = frozenset({
     'multiview::broker::registry::try_authority_tests::try_session_authority_returns_busy_without_callback_then_recovers',
     'multiview::broker::registry::try_authority_tests::try_session_authority_maps_poison_to_unavailable_without_callback',
     'multiview::broker::registry::try_authority_tests::try_session_authority_preserves_authorization_and_output_block',
+})
+CORE_REQUIRED_CLOCK_RETIREMENT_TESTS = frozenset({
+    'multiview::decoder::tests::session_clock_keeps_waiting_decoder_live_through_output_gap_longer_than_five_seconds',
+    'multiview::decoder::tests::confirmed_decoder_retirement_retains_pending_reader_and_sticky_join_failure',
+    'multiview::decoder::tests::failed_stream_startup_returns_partial_decoder_without_dropping_its_reader',
+    'multiview::encoder::runtime::transport_tests::session_constructor_returns_same_capacity_before_and_after_ticket_transfer',
+    'multiview::encoder::runtime::transport_tests::uncertain_child_ticket_cannot_return_capacity_to_a_constructor',
+    'multiview::encoder::runtime::transport_tests::uncertain_constructor_cleanup_quarantine_keeps_the_actual_capacity_owner',
+    'multiview::persistent::tests::audio_callback_never_competes_with_the_session_clock_publisher',
+    'multiview::persistent::tests::failed_retirement_retains_real_owner_and_feed_until_cleanup_retry',
+    'multiview::persistent::tests::compositor_panic_overrides_planned_retirement_and_releases_inner_guards_first',
+    'multiview::broker::registry::tests::expired_renew_commit_never_calls_host_or_revives_session',
+    'multiview::broker::registry::tests::refused_renew_commit_does_not_extend_registry_lease',
+    'multiview::broker::registry::tests::successful_renew_commit_advances_both_under_one_barrier',
+})
+CORE_IGNORED_TESTS = frozenset({
+    'multiview::persistent::tests::real_stream_output_rotation_preserves_sibling_decoders',
 })
 LISTENER_TEST_PREFIX = 'listener_tests::'
 LISTENER_REQUIRED_TESTS = frozenset({
@@ -788,6 +806,152 @@ def run_pending_fixture(driver, budget, command, executable, tools, result):
                 driver.env[key] = value
 
 
+def prepare_production_inputs(driver, budget, command, tools, directory):
+    """Create three sealed 210-second MPEG-TS sources for the normal binary test."""
+    inputs = Path(directory)
+    require(not inputs.exists() and not inputs.is_symlink(), 'Fresh production-input directory required')
+    inputs.mkdir(mode=0o700)
+    rows = []
+    for identity, color, frequency in ((1, 'red', 330), (2, 'lime', 440), (3, 'blue', 550)):
+        budget.tick()
+        observed = system_tool_identity(Path(tools['ffmpeg']['requested_path']), budget)
+        require(all(tools['ffmpeg'][key] == value for key, value in observed.items()),
+                'Production fixture generator identity changed')
+        path = inputs / f'source-{identity}.ts'
+        command('production-source-' + str(identity), [tools['ffmpeg']['path'], '-nostdin', '-hide_banner',
+                '-loglevel', 'error', '-n', '-f', 'lavfi', '-i',
+                f'color=c={color}:s=96x64:r=10:d=210', '-f', 'lavfi', '-i',
+                f'sine=frequency={frequency}:sample_rate=48000:duration=210',
+                '-map', '0:v:0', '-map', '1:a:0', '-t', '210',
+                '-c:v', 'libx264', '-threads:v', '1', '-preset', 'ultrafast', '-tune', 'zerolatency',
+                '-b:v', '160k', '-g', '10', '-keyint_min', '10', '-sc_threshold', '0', '-pix_fmt', 'yuv420p',
+                '-c:a', 'aac', '-threads:a', '1', '-ar', '48000', '-ac', '2', '-b:a', '64k',
+                '-f', 'mpegts', str(path)], 120)
+        metadata = path.lstat()
+        require(stat.S_ISREG(metadata.st_mode) and not path.is_symlink()
+                and 188 <= metadata.st_size <= 16 * 1024**2,
+                'Production source is not a bounded regular MPEG-TS-sized file')
+        raw = budget.read(path, 16 * 1024**2)
+        require(raw and len(raw) == metadata.st_size and len(raw) % 188 == 0
+                and all(raw[offset] == 0x47 for offset in (0, 188, 376)),
+                'Production source failed MPEG-TS sync/size checks')
+        path.chmod(0o400)
+        rows.append({'id': identity, 'path': str(path), 'bytes': len(raw),
+                     'sha256': hashlib.sha256(raw).hexdigest(),
+                     'color': color, 'audio_frequency_hz': frequency})
+    manifest = {'schema': 'ottplay.multiview.production-inputs.v1', 'seconds': 210,
+                'fps': 10, 'width': 96, 'height': 64, 'inputs': rows}
+    manifest_path = inputs / 'INPUTS.json'
+    budget.atomic(manifest_path, (json.dumps(manifest, sort_keys=True) + '\n').encode())
+    manifest_path.chmod(0o400)
+    observed = system_tool_identity(Path(tools['ffmpeg']['requested_path']), budget)
+    require(all(tools['ffmpeg'][key] == value for key, value in observed.items()),
+            'Production fixture generator changed after generation')
+    return manifest_path, manifest
+
+
+def run_production_fixture(driver, budget, command, executable, tools, result, output):
+    """Run the exact ignored normal-server adapter test once under 600 seconds."""
+    name = PRODUCTION_TEST
+    all_names = listed_names(command('production-inventory',
+        [str(executable), '--list', '--format', 'terse']))
+    ignored = listed_names(command('production-ignored-inventory',
+        [str(executable), '--list', '--ignored', '--format', 'terse']))
+    require(all_names == {name} and ignored == {name},
+            'Production normal-binary fixture must be the one exact ignored test')
+    parent = output / 'production'
+    parent.mkdir(mode=0o700)
+    inputs = parent / 'inputs'
+    case = parent / 'case'
+    case.mkdir(mode=0o700)
+    manifest_path, manifest = prepare_production_inputs(driver, budget, command, tools, inputs)
+    manifest_raw = budget.read(manifest_path, 16 * 1024)
+    require(hashlib.sha256(manifest_raw).hexdigest() == hashlib.sha256(
+        (json.dumps(manifest, sort_keys=True) + '\n').encode()).hexdigest(),
+        'Production media manifest changed after sealing')
+    budget.json_evidence(driver.evidence / 'production-inputs.json', manifest)
+    receipt_path = case / 'CONTROL.json'
+    env_keys = ('OTTPLAY_MULTIVIEW_PRODUCTION_INPUTS', 'OTTPLAY_MULTIVIEW_PRODUCTION_RECEIPT',
+                'OTTPLAY_MULTIVIEW_FFMPEG', 'OTTPLAY_MULTIVIEW_FFPROBE', 'OTTPLAY_MULTIVIEW_MKFIFO',
+                'OTTPLAY_MULTIVIEW_OPENSSL')
+    previous = {key: driver.env.get(key) for key in env_keys}
+    try:
+        driver.env.update(OTTPLAY_MULTIVIEW_PRODUCTION_INPUTS=str(manifest_path),
+                          OTTPLAY_MULTIVIEW_PRODUCTION_RECEIPT=str(receipt_path),
+                          OTTPLAY_MULTIVIEW_FFMPEG=tools['ffmpeg']['path'],
+                          OTTPLAY_MULTIVIEW_FFPROBE=tools['ffprobe']['path'],
+                          OTTPLAY_MULTIVIEW_MKFIFO=tools['mkfifo']['path'],
+                          OTTPLAY_MULTIVIEW_OPENSSL=tools['openssl']['path'])
+        text = command('production-normal-server', [str(executable), name, '--ignored', '--exact',
+                       '--test-threads=1', '--color=never'], 600)
+        require_one_pass(text, name)
+        raw = budget.read(receipt_path, 131072)
+        require(0 < len(raw) <= 131072 and not receipt_path.is_symlink()
+                and stat.S_ISREG(receipt_path.lstat().st_mode),
+                'Production test receipt is not an owned regular file')
+        observed = json.loads(raw)
+        require(type(observed) is dict and observed.get('schema') == 'ottplay.multiview.production-binary.v1'
+                and observed.get('pass') is True
+                and observed.get('scope') == 'Normal production HTTPS control/HLS with a private RFC1918 HTTP MPEG-TS adapter, all nine advertised slots and private HLS output; no native-player or physical-television qualification'
+                and type(observed.get('tls')) is dict
+                and observed['tls'].get('configured_api_transport') == 'https'
+                and observed['tls'].get('trust') == 'synthetic_ca_only'
+                and observed['tls'].get('untrusted_ca_rejected') is True
+                and observed['tls'].get('wrong_hostname_rejected') is True
+                and all(re.fullmatch(r'[0-9a-f]{64}', observed['tls'].get(key, ''))
+                        for key in ('ca_sha256', 'leaf_sha256', 'openssl_sha256'))
+                and type(observed.get('https_control_requests')) is int and observed['https_control_requests'] > 0
+                and type(observed.get('https_media_requests')) is int and observed['https_media_requests'] > 0
+                and observed.get('credential_expiry_rejected') is True
+                and observed.get('expiry_output_was_active') is True
+                and observed.get('expired_source_connections_closed') is True
+                and observed.get('expired_output_cleanup') is True
+                and observed.get('owned_fixture_root_removed') is True
+                and observed.get('graceful_shutdown') is True
+                and observed.get('shutdown_signal') == 'SIGTERM'
+                and observed.get('output_directory_empty') is True
+                and observed.get('source_replacement') is True
+                and observed.get('nine_slot_grid_rgb') is True
+                and observed.get('selected_audio_tone') is True
+                and observed.get('replacement_audio_tone') is True
+                and observed.get('replacement_late_segment') is True
+                and observed.get('sibling_frames_recent_at_end') is True
+                and observed.get('hls_segment_audio_video') is True
+                and type(observed.get('elapsed_seconds')) is int and 1 <= observed['elapsed_seconds'] <= 600
+                and type(observed.get('sustained_seconds')) is int and 185 <= observed['sustained_seconds'] <= 600
+                and type(observed.get('inputs')) is list
+                and type(observed.get('upstream_request_counts')) is dict,
+                'Normal production-server adapter receipt did not qualify its bounded contract')
+        expected = {row['id']: row for row in manifest['inputs']}
+        require(len(observed['inputs']) == 3 and all(type(row) is dict and row.get('id') in expected
+                    and row.get('sha256') == expected[row['id']]['sha256']
+                    and row.get('bytes') == expected[row['id']]['bytes']
+                    for row in observed['inputs'])
+                and {row['id'] for row in observed['inputs']} == set(expected),
+                'Actual test receipt does not bind the three sealed transport sources')
+        counts = observed['upstream_request_counts']
+        require(set(counts) == {f'source-{identity}.ts' for identity in (1, 2, 3)}
+                and all(type(value) is int and value >= 2 for value in counts.values()),
+                'Every source must have distinct Probe and Decode subscriptions')
+        budget.atomic(driver.evidence / 'production-control.json', raw, evidence=True)
+        result['normal_server_mpegts_to_hls'] = True
+        result['production_adapter'] = {
+            'passed': True,
+            'scope': 'Actual production binary with protected HTTP-MPEGTS enrollment, all nine advertised slots, decoded grid RGB and selected audio tones, A/V HLS ffprobe, active-credential expiry, source replacement and cleanup; no native-player or physical-television proof',
+            'elapsed_seconds': observed['elapsed_seconds'],
+            'input_manifest_sha256': hashlib.sha256(manifest_raw).hexdigest(),
+            'control_sha256': hashlib.sha256(raw).hexdigest(),
+            'input_sha256': {str(row['id']): row['sha256'] for row in manifest['inputs']},
+            'upstream_request_counts': counts,
+        }
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                driver.env.pop(key, None)
+            else:
+                driver.env[key] = value
+
+
 def main(argv=None):
     started = time.monotonic()
     guard = load_guard()  # Import only; its WK main is never called.
@@ -821,8 +985,9 @@ def main(argv=None):
     # No rustc wrapper, external target directory, or user Cargo config overrides.
     for key in ('RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS'):
         driver.env.pop(key, None)
-    result = {'status': 'fail', 'qualification': 'five isolated Unix fixtures, mandatory stream analyzer, broker boundary and zero-capacity activation',
+    result = {'status': 'fail', 'qualification': 'Unix source fixtures, broker boundary, zero-capacity activation and protected normal-server HTTP MPEG-TS adapter',
               'sustained_media_e2e': False, 'production_admission': False,
+              'normal_server_mpegts_to_hls': False, 'native_player_or_physical_television_qualified': False,
               'generated_media_hashes_available': False, 'new_dependencies': False}
     success = False
     work_error = None
@@ -844,6 +1009,8 @@ def main(argv=None):
         paths = ('Cargo.toml', 'Cargo.lock', 'src-rs/core/Cargo.toml', 'src-rs/server/Cargo.toml',
                  'src-rs/core/src/multiview/broker/registry.rs',
                  'src-rs/server/tests/multiview_fixtures.rs', 'src-rs/server/tests/multiview_activation.rs',
+                 'src-rs/server/tests/multiview_production.rs',
+                 'src-rs/server/tests/support/multiview_production_tls.rs',
                  'src-rs/server/tests/multiview_broker_boundary.rs',
                  'src-rs/server/src/multiview_broker.rs', 'src-rs/server/src/multiview_broker_live.rs',
                  'src-rs/server/src/multiview_broker_live_output_tests.rs', 'src-rs/server/src/media_connection.rs',
@@ -854,7 +1021,8 @@ def main(argv=None):
                  'src-rs/core/src/multiview/geometry.rs', 'src-rs/core/src/multiview/timing.rs',
                  'scripts/ci-multiview-unix-media.py',
                  'src-rs/server/src/main.rs', 'scripts/ci-native-favorites.py',
-                 'scripts/ci-multiview-unix.py', 'scripts/ci-apt-mirror.py')
+                 'scripts/ci-multiview-unix.py', 'scripts/ci-apt-mirror.py',
+                 'tests/test_multiview_unix_ci.py')
         return {'commit': head, 'tree': tree, 'sha256': {p: budget.digest(root / p) for p in paths}}
 
     try:
@@ -908,6 +1076,7 @@ def main(argv=None):
         compiled = command('fixture-build', ['cargo', 'test', '--manifest-path', str(root / 'Cargo.toml'),
                           '--locked', '-p', 'ottplay-server', '--test', 'multiview_fixtures',
                           '--test', 'multiview_activation', '--test', 'multiview_broker_boundary',
+                          '--test', 'multiview_production',
                           '--no-run', '--message-format=json'], 900)
         executable = test_executable(compiled, output / 'target', root / 'src-rs/server/Cargo.toml')
         binary_before = budget.digest(executable)
@@ -929,6 +1098,9 @@ def main(argv=None):
         # target-validated executable with stable identity, not an evidence-file guard.
         normal_server_identity = system_tool_identity(normal_server, budget)
         server_sha256 = normal_server_identity['sha256']
+        production = test_executable(compiled, output / 'target', root / 'src-rs/server/Cargo.toml',
+                                     name='multiview_production')
+        production_sha256 = budget.digest(production)
         budget.json_evidence(driver.evidence / 'fixture-binary.json', {
             'path': str(executable.relative_to(output)), 'sha256': binary_before,
             'core_path': str(core_executable.relative_to(output)), 'core_sha256': core_sha256,
@@ -936,20 +1108,31 @@ def main(argv=None):
             'broker_path': str(broker.relative_to(output)), 'broker_sha256': broker_sha256,
             'listener_path': str(listener.relative_to(output)), 'listener_sha256': listener_sha256,
             'normal_server_path': str(normal_server.relative_to(output)), 'normal_server_sha256': server_sha256,
+            'production_test_path': str(production.relative_to(output)),
+            'production_test_sha256': production_sha256,
             'normal_server_identity': normal_server_identity,
             'source_commit': before['commit'], 'root_lock_sha256': before['sha256']['Cargo.lock']})
         core_all = listed_names(command('core-multiview-inventory',
             [str(core_executable), 'multiview::', '--list', '--format', 'terse']))
         core_ignored = listed_names(command('core-multiview-ignored-inventory',
             [str(core_executable), 'multiview::', '--list', '--ignored', '--format', 'terse']))
-        require(core_all and all(name.startswith('multiview::') for name in core_all)
-                and core_ignored <= core_all, 'Core multiview test inventory differs')
+        require(core_all and all(name.startswith('multiview::') for name in core_all),
+                'Core multiview test inventory differs')
+        require(core_ignored == CORE_IGNORED_TESTS and core_ignored <= core_all,
+                'Core multiview ignored test inventory differs from the one reviewed media test')
         ordinary_core = core_all - core_ignored
-        require(all(name.startswith('multiview::') and name in ordinary_core for name in (*CORE_REQUIRED_TESTS, *args.required_core_test)),
+        require(all(name.startswith('multiview::') and name in ordinary_core for name in
+                    (*CORE_REQUIRED_TESTS, *CORE_REQUIRED_CLOCK_RETIREMENT_TESTS, *args.required_core_test)),
                 'Required ordinary core regression is absent or ignored')
         core_text = command('core-multiview-ordinary', [str(core_executable), 'multiview::',
                             '--test-threads=1', '--color=never'], 300)
         require_suite_pass(core_text, ordinary_core, core_ignored)
+        core_ignored_executed = []
+        for ignored_name in sorted(CORE_IGNORED_TESTS):
+            text = command('core-ignored-' + hashlib.sha256(ignored_name.encode()).hexdigest()[:12],
+                [str(core_executable), ignored_name, '--ignored', '--exact', '--test-threads=1', '--color=never'], 600)
+            require_one_pass(text, ignored_name)
+            core_ignored_executed.append(ignored_name)
         ignored = command('ignored-fixtures', [str(executable), '--list', '--ignored', '--format', 'terse'])
         ignored_names = listed_names(ignored)
         require(ignored_names == {name for name, _ in TESTS}, 'Exact ignored fixture inventory changed')
@@ -1005,6 +1188,9 @@ def main(argv=None):
                 require(count <= 10000, 'Temporary-entry bound exceeded')
                 require(not entry.name.startswith('ottplay-multiview-fixture-'),
                         'Fixture scratch cleanup incomplete')
+        run_production_fixture(driver, budget, command, production, tools, result, output)
+        require(budget.digest(production) == production_sha256,
+                'Production adapter test executable changed')
         require(activation_home_preflight(driver, budget) == activation_home,
                 'Activation fixture HOME ancestor identity changed')
         activation_home_after = activation_home_snapshot(Path(activation_home['parent']), budget)
@@ -1014,6 +1200,7 @@ def main(argv=None):
         require(budget.digest(activation) == activation_sha256, 'Activation test executable changed')
         require(budget.digest(broker) == broker_sha256, 'Broker test executable changed')
         require(budget.digest(listener) == listener_sha256, 'Listener test executable changed')
+        require(budget.digest(production) == production_sha256, 'Production adapter test executable changed')
         require(system_tool_identity(normal_server, budget) == normal_server_identity,
                 'Normal server executable changed')
         require(budget.digest(executable) == binary_before, 'Fixture executable changed')
@@ -1036,8 +1223,12 @@ def main(argv=None):
                       activation_scope='Actual owned HTTP/TLS normal server; zero-capacity control shell only',
                       activation_fixture_parent=activation_home, activation_fixture_cleanup_confirmed=True,
                       ordinary_core_tests=sorted(ordinary_core),
+                      executed_core_ignored_tests=core_ignored_executed,
                       ordinary_server_tests=sorted(ordinary_server),
-                      tests=[name for name, _ in TESTS], owned_process_cleanup_confirmed=True)
+                      production_test_binary_sha256=production_sha256,
+                      tests=[name for name, _ in TESTS] + [PRODUCTION_TEST], owned_process_cleanup_confirmed=True)
+        result['sustained_media_e2e'] = True
+        result['generated_media_hashes_available'] = True
         success = True
     except BaseException as error:
         work_error = error
@@ -1057,7 +1248,7 @@ def main(argv=None):
                 success = False
         result['elapsed_seconds'] = budget.clock() - budget.started
         result['commands'] = driver.commands
-        result['hls_scope'] = 'Actual HLS playlist/custody/revocation; no TS GET/decode or sustained pixel/audio claim'
+        result['hls_scope'] = 'Production normal-server HTTP MPEG-TS source decoded into private HLS; one generated output segment was probed for audio/video. No native-client, desktop compositor, physical-device, or visual-presentation qualification.'
     try:
         accepted = driver.terminal(result, success)
     except BaseException as finalization_error:

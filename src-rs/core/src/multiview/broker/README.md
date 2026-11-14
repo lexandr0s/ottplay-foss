@@ -4,10 +4,13 @@ This module is an experimental server component. The private routes are disabled
 by default. Explicit `--multiview-config` activation loads the protected operator
 configuration and mounts the private router only on its selected, validated
 listener. Other listeners and an unconfigured server return 404 for the private
-namespace. Activation does not install anything on a player or enable production
-media admission: the ordinary service advertises zero input capacity and creates
-no media backend or source service. Checked source fetching does not qualify a
-live media decoder. Existing public controller commands are unchanged.
+namespace. Without an explicit protected `media` plan, the service advertises
+zero input capacity and creates no media host. The plan connects the admitted
+Unix HTTP MPEG-TS adapter to the production broker and source registry before
+listener binding. See the [service guide](../../../../../docs/multiview-service.md)
+for the closed configuration, fixed profile and deployment requirements. Checked
+source fetching alone does not qualify a live decoder. Existing ordinary playback
+and public controller commands remain independent.
 
 ## Server configuration and pairing
 
@@ -81,24 +84,29 @@ the owner, installation, session and immutable native runtime/scene/slot; it ret
 stored authoritative state without rebinding it. The canonical JSON describes the
 field allowlist and concrete before/after examples.
 
-### Fixture-only live HTTP host
+### Explicit production and fixture hosts
 
-`Broker::new_fixture` is available only in test builds and injects an actual Session,
-SourceService and stream factory behind the same private-v1 handlers. It starts no
-listener. The ordinary constructor retains zero capacity; the production binary
-mounts its private shell only with the explicit operator configuration described
-above. That shell has no fixture media backend. The fixture admits one compositor
-with at most a 60-second
-hard lifetime. Its signed output path stays stable while bounded, checked reads
-refresh the actual encoder playlist and segments.
+`Broker::new_live` constructs the production Session host and its exact
+SourceService/Registry pair. Trusted startup enrollment must finish before the
+listener binds. A dedicated `--multiview-only` process serves the private namespace
+and health without public assets, EPG fetching or other media sidecars.
+`Broker::new` without this plan still has zero capacity.
+
+`Broker::new_fixture` remains test-only and loopback-only, with a maximum 60-second
+hard lifetime. The production plan has a separately bounded hard lifetime of at
+most 24 hours, independent of the renewable owner/output lease. Within an output
+epoch the signed HLS path stays stable; checked reads refresh the actual encoder
+playlist/segments but never renew control authority.
 
 Composite Ready requires actual closed HLS and may include slates for empty or
 preparing slots. Slot Playing reports decoded frames; end-to-end image/audio
 acceptance remains separate. Occupied-target replacement is currently refused
-before source intent changes. In this initial fixture, Stop cleans up its input
-and withholds output until Off; that is an explicit temporary limit. Stable ordinary
-Stop/switch and a fresh codec epoch after security revocation require separate
-qualification. A video-only watermark cannot certify that old PCM/AAC is gone.
+before source intent changes. Stop revokes the old output, retires the selected
+input and rotates the encoder/H.264/AAC epoch before admitting a fresh output.
+Other input runtimes/decoders remain owned by the same session. Request a fresh
+grant and Play into the empty slot; occupied replacement is not silently retried.
+A video-only watermark cannot certify that old PCM/AAC is gone: codec retirement,
+body custody and the new output generation require their separate proofs.
 
 Slot source/item references identify the current redeemed registry selection,
 checked against the owner, complete binding and the core's observed source
@@ -189,9 +197,10 @@ transport retains at most one inbound frame up to 512 KiB while splitting it,
 plus the bounded output and 940-byte sniff prefix. These are application buffer
 bounds, separate from the HTTP parser's own bounded buffers.
 
-This bridge is an internal integration surface. Production capacity remains zero
-until actual broker-to-core media, native lifecycle, and output renewal are jointly
-qualified. Adjacent owned fixtures are not evidence of television playback.
+This bridge is an internal integration surface. Only an explicitly configured,
+admitted host can advertise the matching profile. Source, normal-binary lifecycle,
+output renewal and native playback are distinct qualification surfaces. Adjacent
+owned fixtures are not evidence of television playback or another adapter.
 
 Output HMAC leases live in the private path, allowing native HLS clients to fetch
 children without custom headers. Every resource and body chunk rechecks its lease,

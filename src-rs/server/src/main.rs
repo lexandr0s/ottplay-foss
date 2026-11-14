@@ -131,9 +131,12 @@ struct Cli {
     /// Private JSON configuration for --stalker-relay-only.
     #[arg(long, requires = "stalker_relay_only")]
     stalker_relay_config: Option<std::path::PathBuf>,
-    /// Private operator configuration for the zero-capacity multiview shell.
+    /// Protected operator configuration for private multiview and optional media.
     #[arg(long)]
     multiview_config: Option<std::path::PathBuf>,
+    /// Serve only the private compositor API and health; no assets or EPG fetches.
+    #[arg(long, requires = "multiview_config")]
+    multiview_only: bool,
     /// HTTP listen ports. Repeat --port; defaults to 8080 only when omitted.
     #[arg(long, action = clap::ArgAction::Append, default_value = "8080")]
     port: Vec<u16>,
@@ -159,6 +162,13 @@ impl Cli {
                 && !hosted_epg::enabled()?,
             "Private multiview cannot be combined with a dedicated service mode"
         );
+        anyhow::ensure!(
+            !self.multiview_only
+                || (!companion::configured()
+                    && std::env::var_os("OTT_NORMALIZATION_CONFIG").is_none()
+                    && !self.allow_lan_local_media),
+            "Private-only multiview cannot be combined with another media service"
+        );
         let bind_ip = self
             .host
             .parse::<std::net::IpAddr>()
@@ -175,8 +185,8 @@ impl Cli {
                     })
             })
             .collect::<Vec<_>>();
-        let config = multiview_operator::load(path)?;
-        Ok(Some(Arc::new(multiview_service::Service::new(
+        let config = multiview_operator::load_configuration(path)?;
+        Ok(Some(Arc::new(multiview_service::Service::configured(
             config, &planned,
         )?)))
     }
@@ -503,7 +513,7 @@ async fn serve_listeners_with_private(
                 .with_context(|| format!("HTTPS listener {address} failed"))
         });
     }
-    if normalization::configured() {
+    if normalization::configured() || private.is_some() {
         let result = tokio::select! {
             result = supervise_listeners(tasks) => result,
             _ = normalization::stop_signal() => Ok(())
@@ -566,6 +576,14 @@ async fn main() -> anyhow::Result<()> {
         _ => None,
     };
     let listeners = bind_listeners(&cli.host, &http_ports, &https_ports).await?;
+    if cli.multiview_only {
+        let owner = private_multiview.context("Private multiview configuration is required")?;
+        let app = Router::new().route("/health", get(health));
+        let result =
+            serve_listeners_with_private(listeners, app, tls_config, Some(owner.clone())).await;
+        owner.shutdown().await?;
+        return result;
+    }
     if let Some(app) = stalker_relay {
         return serve_listeners(listeners, app, tls_config).await;
     }
@@ -638,7 +656,10 @@ async fn main() -> anyhow::Result<()> {
         .merge(control_discovery::routes())
         .merge(offline_media_routes(None).await?);
 
-    if let Some(companion) = companion {
+    // Keep the private backend owner outside every serving future: an early
+    // companion/listener return or a dropped serving future must still drain it.
+    let private_owner = private_multiview.clone();
+    let result = if let Some(companion) = companion {
         let service = companion.service();
         let result = tokio::select! {
             result = serve_listeners_with_private(
@@ -652,7 +673,11 @@ async fn main() -> anyhow::Result<()> {
         result
     } else {
         serve_listeners_with_private(listeners, app, tls_config, private_multiview).await
+    };
+    if let Some(private) = private_owner {
+        private.shutdown().await?;
     }
+    result
 }
 
 /// Media import is disabled unless an operator configures both storage and a secret.

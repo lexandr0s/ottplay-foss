@@ -1,7 +1,7 @@
 //! Private broker boundary, constructed only by a trusted in-process owner.
 //!
-//! This module is deliberately not registered by main.rs. A catalog/grant is not
-//! a decoder qualification: production control remains unavailable and caps=0.
+//! The ordinary constructor is a zero-capacity shell. Live Unix media requires
+//! explicit trusted construction and source enrollment before listener admission.
 //! Credentials and source enrollment have separate authorities. No HTTP request
 //! provisions a credential, supplies a source URL, or acquires sources-manage.
 use axum::{
@@ -35,15 +35,13 @@ use uuid::Uuid;
 use crate::media_connection::{ConnectionControl, MediaAuthority};
 use ottplay_core::multiview::broker::registry::{Registry, RegistryError, SourcePrincipal};
 
-#[cfg(test)]
 #[path = "multiview_broker_live.rs"]
 mod live;
-#[cfg(test)]
 #[path = "multiview_broker_live_output.rs"]
 mod live_output;
+pub use live::BackendConfig;
 #[cfg(test)]
 pub use live::FixtureConfig;
-#[cfg(test)]
 pub(super) type LiveWatermark = Arc<dyn Fn() -> Result<u64, BoundaryError> + Send + Sync>;
 
 const PREFIX: &str = "/multiview/v1";
@@ -129,6 +127,7 @@ pub struct OperatorConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundaryError {
     Configuration,
+    UnsupportedPlatform,
     Unauthorized,
     Forbidden,
     Invalid,
@@ -143,6 +142,7 @@ impl BoundaryError {
             Self::Configuration | Self::Unavailable => {
                 (StatusCode::SERVICE_UNAVAILABLE, "backend_unavailable")
             }
+            Self::UnsupportedPlatform => (StatusCode::SERVICE_UNAVAILABLE, "unsupported_platform"),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
             Self::Invalid => (StatusCode::BAD_REQUEST, "invalid_request"),
@@ -194,11 +194,37 @@ struct OutputRecord {
     expires: u64,
     files: BTreeMap<String, Bytes>,
     token: String,
-    #[cfg(test)]
+    // Signed hard end remains immutable; only authenticated Renew changes this deadline.
+    live_lease: Option<LiveLease>,
     live: Option<Arc<live_output::LiveOutput>>,
-    #[cfg(test)]
     live_watermark: Option<LiveWatermark>,
 }
+struct LiveLease {
+    valid_until: std::sync::atomic::AtomicU64,
+    owner_end: Arc<Mutex<Instant>>,
+}
+impl OutputRecord {
+    fn effective_expiry(&self) -> u64 {
+        self.live_lease.as_ref().map_or(self.expires, |lease| {
+            self.expires
+                .min(lease.valid_until.load(std::sync::atomic::Ordering::Acquire))
+        })
+    }
+    fn lease_remaining(&self, now: u64) -> u32 {
+        let wall = self.effective_expiry().saturating_sub(now);
+        let remaining = self.live_lease.as_ref().map_or(wall, |lease| {
+            lease.owner_end.try_lock().map_or(0, |end| {
+                wall.min(
+                    end.saturating_duration_since(Instant::now())
+                        .as_millis()
+                        .min(u64::MAX as u128) as u64,
+                )
+            })
+        });
+        remaining.min(u32::MAX as u64) as u32
+    }
+}
+
 struct Mutable {
     credentials: HashMap<String, Credential>,
     cache: HashMap<CacheKey, Cached>,
@@ -217,9 +243,7 @@ struct Inner {
     mutable: Mutex<Mutable>,
     mutations: tokio::sync::Mutex<()>,
     streams: Arc<Semaphore>,
-    #[cfg(test)]
     live: Option<Arc<live::LiveBackend>>,
-    #[cfg(test)]
     live_bytes: Arc<Semaphore>,
 }
 #[derive(Clone)]
@@ -367,11 +391,47 @@ impl Broker {
             }),
             mutations: tokio::sync::Mutex::new(()),
             streams: Arc::new(Semaphore::new(8)),
-            #[cfg(test)]
             live: None,
-            #[cfg(test)]
             live_bytes: Arc::new(Semaphore::new(OUTPUT_BYTES)),
         })))
+    }
+
+    /// Explicit Unix media opt-in. Enrollment uses the exact registry returned
+    /// through this service; the ordinary constructor remains a zero-capacity shell.
+    pub fn new_live(
+        config: OperatorConfig,
+        registry: Arc<Registry>,
+        clock: Arc<dyn Clock>,
+        backend: BackendConfig,
+    ) -> Result<
+        (
+            Self,
+            Arc<ottplay_core::multiview::broker::runtime::SourceService>,
+        ),
+        BoundaryError,
+    > {
+        if !cfg!(unix) {
+            return Err(BoundaryError::UnsupportedPlatform);
+        }
+        let service = Arc::new(
+            ottplay_core::multiview::broker::runtime::SourceService::new(registry.clone()),
+        );
+        let backend =
+            live::LiveBackend::new_production(backend, service.clone(), registry.clone())?;
+        let mut broker = Self::new(config, Some(registry), clock)?;
+        Arc::get_mut(&mut broker.0)
+            .ok_or(BoundaryError::Configuration)?
+            .live = Some(backend);
+        Ok((broker, service))
+    }
+
+    /// Marks admission stopped before draining owned work. A failure is retained;
+    /// callers must not report clean shutdown or release failed resource custody.
+    pub async fn shutdown(&self) -> Result<(), BoundaryError> {
+        match &self.0.live {
+            Some(live) => live.shutdown(self).await,
+            None => Ok(()),
+        }
     }
 
     /// Test-only, explicitly owned live fixture. This neither starts a listener
@@ -771,9 +831,8 @@ impl Broker {
                 expires,
                 files: BTreeMap::new(),
                 token: String::new(),
-                #[cfg(test)]
+                live_lease: None,
                 live: None,
-                #[cfg(test)]
                 live_watermark: None,
             };
             record.token = self.sign(&record)?;
@@ -829,8 +888,6 @@ impl Broker {
         })
     }
 
-    /// One stable signed path for an owned fixture encoder. Playlist/segments
-    /// are reread through bounded file custody; status must not republish it.
     #[cfg(test)]
     pub(super) fn publish_live_output(
         &self,
@@ -841,15 +898,44 @@ impl Broker {
         minimum_sequence: u64,
         watermark: Option<LiveWatermark>,
     ) -> Result<Output, BoundaryError> {
-        if lifetime_ms == 0 || lifetime_ms as u64 > OUTPUT_TTL_MS || self.0.live.is_none() {
+        if lifetime_ms == 0 || u64::from(lifetime_ms) > OUTPUT_TTL_MS {
+            return Err(BoundaryError::Invalid);
+        }
+        self.publish_live_output_until(
+            owner,
+            binding,
+            directory,
+            self.0.clock.now_ms().saturating_add(u64::from(lifetime_ms)),
+            Arc::new(Mutex::new(
+                Instant::now() + std::time::Duration::from_millis(u64::from(lifetime_ms)),
+            )),
+            minimum_sequence,
+            watermark,
+        )
+    }
+
+    /// One stable signed path for an owned encoder. Playlist/segments
+    /// are reread through bounded file custody; status must not republish it.
+    pub(super) fn publish_live_output_until(
+        &self,
+        owner: &Authenticated,
+        binding: &Binding,
+        directory: std::path::PathBuf,
+        hard_end_ms: u64,
+        owner_end: Arc<Mutex<Instant>>,
+        minimum_sequence: u64,
+        watermark: Option<LiveWatermark>,
+    ) -> Result<Output, BoundaryError> {
+        let now = self.0.clock.now_ms();
+        if hard_end_ms <= now
+            || hard_end_ms.saturating_sub(now) > 86_400_000
+            || self.0.live.is_none()
+        {
             return Err(BoundaryError::Invalid);
         }
         let remaining = self.credential_remaining_ms(owner)?;
-        let expires = self
-            .0
-            .clock
-            .now_ms()
-            .saturating_add(u64::from(lifetime_ms).min(remaining));
+        let expires = hard_end_ms.min(now.saturating_add(remaining));
+        let valid_until = expires.min(now.saturating_add(OUTPUT_TTL_MS));
         let mut record = OutputRecord {
             authenticated: owner.clone(),
             binding: binding.clone(),
@@ -858,6 +944,10 @@ impl Broker {
             expires,
             files: BTreeMap::new(),
             token: String::new(),
+            live_lease: Some(LiveLease {
+                valid_until: std::sync::atomic::AtomicU64::new(valid_until),
+                owner_end,
+            }),
             live: None,
             live_watermark: watermark,
         };
@@ -871,6 +961,9 @@ impl Broker {
             minimum_sequence,
         )?));
         self.authorized(owner, binding, |state| {
+            if self.0.clock.now_ms() >= valid_until {
+                return Err(BoundaryError::Revoked);
+            }
             if state.outputs.len() >= OUTPUTS {
                 return Err(BoundaryError::Limit);
             }
@@ -884,16 +977,112 @@ impl Broker {
                 server_epoch: binding.server_epoch.clone(),
                 output_generation: record.generation.clone(),
                 playlist_path: format!("{prefix}/index.m3u8"),
-                lease_expires_in_ms: expires.saturating_sub(self.0.clock.now_ms()) as u32,
+                lease_expires_in_ms: valid_until.saturating_sub(self.0.clock.now_ms()) as u32,
             };
             state.outputs.insert(record.nonce.clone(), Arc::new(record));
             Ok(output)
         })
     }
 
-    #[cfg(test)]
     fn check_live_output(&self, record: &OutputRecord, token: &str) -> Result<(), BoundaryError> {
         self.with_output_authority(record, token, || Ok(()))
+    }
+
+    /// Fresh authenticated Renew only. Registry, credential, output and monotonic
+    /// owner deadline commit under the same registry -> output publication order.
+    pub(super) fn renew_live_output(
+        &self,
+        owner: &Authenticated,
+        binding: &Binding,
+        soft_end: &Mutex<Instant>,
+        hard_end: Instant,
+    ) -> Result<(), BoundaryError> {
+        let registry = self.0.registry.as_ref().ok_or(BoundaryError::Unavailable)?;
+        let mut rejected = None;
+        registry
+            .renew_with_commit(&owner.principal, binding, &mut || {
+                let update = || -> Result<(), BoundaryError> {
+                    // Registry holds its publication barrier: never wait for
+                    // host state or its monotonic deadline inside this callback.
+                    let state = self
+                        .0
+                        .mutable
+                        .try_lock()
+                        .map_err(|_| BoundaryError::Unavailable)?;
+                    let mut soft = soft_end
+                        .try_lock()
+                        .map_err(|_| BoundaryError::Unavailable)?;
+                    let monotonic = Instant::now();
+                    if !self.current_credential(&state, owner) {
+                        return Err(BoundaryError::Unauthorized);
+                    }
+                    if monotonic >= *soft || monotonic >= hard_end {
+                        return Err(BoundaryError::Revoked);
+                    }
+                    let now = self.0.clock.now_ms();
+                    let records: Vec<_> = state
+                        .outputs
+                        .values()
+                        .filter(|record| {
+                            record.binding.session_id == binding.session_id
+                                && !state.revoked_outputs.contains(&record.nonce)
+                        })
+                        .collect();
+                    if records.iter().any(|record| {
+                        record.effective_expiry() <= now
+                            || !self.current_credential(&state, &record.authenticated)
+                    }) {
+                        return Err(BoundaryError::Revoked);
+                    }
+                    let credential_end = state.credentials[&owner.principal.subject].expires_at_ms;
+                    let remaining_ms = OUTPUT_TTL_MS.min(credential_end.saturating_sub(now));
+                    // The credential can expire between its admission sample and
+                    // this commit sample. Refuse before either lease is mutated.
+                    if remaining_ms == 0 {
+                        return Err(BoundaryError::Unauthorized);
+                    }
+                    for record in records {
+                        if let Some(lease) = &record.live_lease {
+                            lease.valid_until.store(
+                                now.saturating_add(remaining_ms).min(record.expires),
+                                std::sync::atomic::Ordering::Release,
+                            );
+                        }
+                    }
+                    *soft =
+                        (monotonic + std::time::Duration::from_millis(remaining_ms)).min(hard_end);
+                    Ok(())
+                };
+                update().map_err(|failure| {
+                    rejected = Some(failure);
+                    RegistryError::Unavailable
+                })
+            })
+            .map_err(|failure| {
+                rejected.unwrap_or(match failure {
+                    RegistryError::Busy | RegistryError::Unavailable => BoundaryError::Unavailable,
+                    _ => BoundaryError::Revoked,
+                })
+            })
+    }
+
+    pub(super) fn live_output_remaining(&self, output: &Output) -> u32 {
+        self.0
+            .mutable
+            .lock()
+            .ok()
+            .and_then(|state| {
+                state
+                    .outputs
+                    .values()
+                    .find(|record| {
+                        record.generation == output.output_generation
+                            && record.binding.session_id == output.session_id
+                            && !state.revoked_outputs.contains(&record.nonce)
+                    })
+                    .map(|record| record.lease_remaining(self.0.clock.now_ms()))
+            })
+            .unwrap_or(0)
     }
 
     fn signed_message(&self, record: &OutputRecord) -> Result<Vec<u8>, BoundaryError> {
@@ -1012,7 +1201,7 @@ impl Broker {
         // Focus/audio/layout CAS changes do not tear down an unchanged encoder
         // generation. Source revocation blocks this session's output in Registry.
         self.try_session_media(&record.authenticated, &record.binding.session_id, |state| {
-            if self.0.clock.now_ms() >= record.expires
+            if record.lease_remaining(self.0.clock.now_ms()) == 0
                 || state.revoked_outputs.contains(&record.nonce)
                 || !state
                     .outputs
@@ -1043,6 +1232,10 @@ impl Broker {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "multiview_broker_production_tests.rs"]
+mod production_tests;
 
 fn segment_name(name: &str) -> bool {
     name.len() == 17
@@ -1242,7 +1435,6 @@ async fn capabilities(
             None => "unavailable".into(),
         };
         let (max_inputs, qualified_input_adapters, output_profiles) = (0, vec![], vec![]);
-        #[cfg(test)]
         let (max_inputs, qualified_input_adapters, output_profiles) = match &broker.0.live {
             Some(live) => (
                 live.profile().max_inputs,
@@ -1276,7 +1468,6 @@ async fn sources(
         if request.version != wire::VERSION {
             return Err(BoundaryError::Invalid);
         }
-        #[cfg(test)]
         if let Some(live) = &broker.0.live {
             live.ensure_context(&owner, &request.context)?;
         }
@@ -1319,7 +1510,6 @@ async fn input_grants(
                 broker.grant_reply(&owner, &request, &response)?,
             ));
         }
-        #[cfg(test)]
         if let Some(live) = &broker.0.live {
             live.ensure_context(&owner, &request.context)?;
         }
@@ -1364,7 +1554,6 @@ async fn control(
             return Err(BoundaryError::Invalid);
         }
         let key = broker.cache_key(&owner, &request.context, "control", &headers)?;
-        #[cfg(test)]
         if let Some(live) = &broker.0.live {
             let response = live
                 .control(
@@ -1399,7 +1588,6 @@ async fn sessions(
         if ids.len() != 1 || !ids[0].to_str().is_ok_and(wire::opaque) {
             return Err(BoundaryError::Invalid);
         }
-        #[cfg(test)]
         if let Some(live) = &broker.0.live {
             let response = live
                 .create(
@@ -1436,7 +1624,6 @@ async fn status(
         {
             return Err(BoundaryError::Invalid);
         }
-        #[cfg(test)]
         if let Some(live) = &broker.0.live {
             let response = live.status(broker.clone(), owner, request).await?;
             return Ok(json_response(json_bytes(&response)?));
@@ -1458,7 +1645,6 @@ struct MediaCustody {
 }
 impl MediaAuthority for MediaCustody {
     fn authorized(&self) -> bool {
-        #[cfg(test)]
         if self.record.live.is_some() {
             return self
                 .broker
@@ -1476,7 +1662,6 @@ struct GuardedBody {
     file: String,
     offset: usize,
     failed: bool,
-    #[cfg(test)]
     live_bytes: Option<Bytes>,
 }
 impl Stream for GuardedBody {
@@ -1485,7 +1670,6 @@ impl Stream for GuardedBody {
         if self.failed {
             return Poll::Ready(None);
         }
-        #[cfg(test)]
         if let Some(bytes) = self.live_bytes.as_ref() {
             if self
                 .custody
@@ -1565,14 +1749,11 @@ async fn media(
             .cloned()
             .ok_or(BoundaryError::Unauthorized)?;
         // Admission only; bytes are copied after the body acquires its permit.
-        #[cfg(test)]
         if record.live.is_some() {
             broker.check_live_output(&record, &token)?;
         } else {
             broker.output_chunk(&record, &token, &file, usize::MAX)?;
         }
-        #[cfg(not(test))]
-        broker.output_chunk(&record, &token, &file, usize::MAX)?;
         // Private media needs its own supervised HTTP/1 connection. Reject before
         // stream admission; an HTTP/2 request must never arm or cancel its peers.
         if !matches!(version, Version::HTTP_10 | Version::HTTP_11) {
@@ -1585,7 +1766,6 @@ async fn media(
             .clone()
             .try_acquire_owned()
             .map_err(|_| BoundaryError::Limit)?;
-        #[cfg(test)]
         let live_bytes = if let Some(live) = record.live.as_ref() {
             // A short core provenance query precedes filesystem I/O. Neither
             // the control mutex nor publication barrier covers the awaited read.
@@ -1616,7 +1796,6 @@ async fn media(
             file,
             offset: 0,
             failed: false,
-            #[cfg(test)]
             live_bytes,
         };
         let mut response =

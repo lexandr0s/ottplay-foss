@@ -37,6 +37,8 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci --ignore-scripts
+      - name: Audit committed media before test preparation
+        run: node scripts/check-committed-media.cjs
       - run: npm run check:test-inventory
       - run: npm test
       - run: node tests/test_release_envelope_size.cjs
@@ -317,6 +319,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
+      - name: Verify Alpine multiview tool compatibility
+        if: runner.os == 'Linux'
+        run: |
+          python3 scripts/check-multiview-alpine-tools.py \
+            --output "$RUNNER_TEMP/ottplay-multiview-alpine-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/alpine-tools.json"
       - name: Run bounded isolated Unix multiview fixtures
         run: |
           python3 scripts/ci-multiview-unix.py \
@@ -324,6 +331,14 @@ jobs:
             --required-core-test multiview::encoder::runtime::transport_tests::failed_output_directory_cleanup_can_be_retried \
             --required-server-test fixture_http_rejects_lease_shorter_than_startup_before_session_start \
             --required-server-test worker_rejects_ungranted_files_modified_plans_and_pre_cancelled_work
+      - name: Preserve Alpine multiview tool evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: multiview-alpine-tools-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ottplay-multiview-alpine-${{ github.run_id }}-${{ github.run_attempt }}/alpine-tools.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Preserve Unix multiview qualification evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

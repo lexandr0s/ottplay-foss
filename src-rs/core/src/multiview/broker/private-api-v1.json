@@ -14,7 +14,7 @@
     },
     "provisioning": "Operator provisions a separate credential out of band. Never reuse control-server bearer or trust discovery as enrollment. Origin is exact verified HTTPS for LAN. server_epoch is learned only after authenticated capabilities; a changed epoch invalidates sessions.",
     "server_record": "Server owns subject, installation_id, credential revision, expiry, exact permissions and allowed sources. Native cannot supply those authority fields. Native credentials have multiview-control only; source enrollment requires separate sources-manage operator.",
-    "bind": "Disabled by default. --multiview-config loads protected operator configuration and mounts the zero-capacity private service only on the selected validated listener. Default loopback; explicit private LAN bind requires trusted HTTPS origin/TLS and paired credentials. This opt-in activates private routes, not production media admission.",
+    "bind": "Disabled by default. --multiview-config loads protected operator configuration and mounts private routes only on the selected validated listener. Without an explicitly validated media plan capacity stays zero. The optional Unix http-mpegts-v1 media plan enrolls server-owned sources before binding and admits only its fixed bounded output profile. Explicit private LAN binding requires verified HTTPS and dedicated credentials. --multiview-only omits public player, guide and companion services.",
     "output_admission": "Session output_profile_id must be a currently admitted profile and geometry.canvas must match exactly. Profile governs max inputs/geometry modes. Examples are synthetic, not operational capability."
   },
   "transport": {
@@ -522,7 +522,7 @@
         }
       ],
       "rules": [
-        "Closed operation union. Focus/audio-slot use context slot. Create and status have separate endpoints to avoid bootstrap/stale-CAS deadlock. Accepted/preparing never means decoded. Public controller semantics unaffected. Production create/play denied until decoder/output gate qualified.",
+        "Closed operation union. Focus/audio-slot use context slot. Create and status have separate endpoints to avoid bootstrap/stale-CAS deadlock. Accepted/preparing never means decoded. Public controller semantics unaffected. Production deployment remains unqualified until decoder/output gates qualify; disabled/default hosts deny create/play.",
         "Optional next_native follows the operation-specific native_transitions allowlist. Play uses the returned grant context with no second transition. Focus/audio/layout publish backend and native revisions atomically; no probe, network I/O or worker joining under that barrier."
       ],
       "response": {
@@ -560,7 +560,10 @@
       "method": "GET",
       "path": "/media/{signed_opaque_lease}/{file}",
       "authentication": "Path contains dedicated opaque media-only HMAC lease, not a control/provider credential. HMAC plus server-held lease binds epoch/session/output generation/absolute expiry. Every resource and every body chunk checks current authority/revocation/expiry.",
-      "allowed_files": ["index.m3u8", "segment-[0-9]{6}.ts"],
+      "allowed_files": [
+        "index.m3u8",
+        "segment-[0-9]{6}.ts"
+      ],
       "private_output": {
         "session_id": "session_A",
         "server_epoch": "epoch_A",
@@ -599,7 +602,7 @@
     "output_chunk_bytes": 65536
   },
   "production_gate": "max_inputs=0 until server-owned enrollment + exact auth/source CAS + nested transport + decoder integration + lifecycle/revocation + native output authority + actual independent source E2E qualify. Finite fetch/parser tests do not establish live adapter or TV capacity.",
-  "amendment": "Unreleased v1 explicit prior/next native transition, original grant binding, recovery and real HMAC path grammar. Public controller wire is unchanged; production admission remains disabled.",
+  "amendment": "Unreleased v1 explicit prior/next native transition, original grant binding, recovery and real HMAC path grammar. Public controller wire is unchanged. An optional protected Unix media host is implemented; normal-binary, native and deployment qualification are separate gates. Ordinary unconfigured servers retain zero capacity.",
   "errors": {
     "schema": {
       "version": 1,
@@ -708,6 +711,6 @@
         "state": "preparing"
       }
     },
-    "fixture_limits": "Initial live fixture: one compositor, at most60s hard lifetime, no occupied-target replacement. Stop retires its source and withholds output until Off; ordinary stable Stop and security-specific fresh codec epochs are separate qualification work."
+    "fixture_limits": "Initial loopback-only live fixtures keep their original short limits and do not qualify production. The optional protected http-mpegts-v1 host supports one fixed 640x360@10 H.264/AAC output, at most nine admitted inputs, a renewable 90s owner lease and a separately configured hard ceiling of at most24h/original credential expiry. Occupied Play is refused. Stop revokes the old output, confirms retirement and rotates to a fresh codec epoch before rearming; sibling source runtimes survive. Failed cleanup retains ownership and capacity."
   }
 }

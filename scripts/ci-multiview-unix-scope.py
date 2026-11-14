@@ -33,6 +33,9 @@ PREFIXES = (
     ".github/workflow-tests/test_multiview",
 )
 EXACT = frozenset({
+    "Dockerfile",
+    "scripts/check-multiview-alpine-tools.py",
+    "tests/test_multiview_alpine_tools.py",
     "Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml",
     ".release-policy.json",
     ".github/workflows/windows-validation.yml",

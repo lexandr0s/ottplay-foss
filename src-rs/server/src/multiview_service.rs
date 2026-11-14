@@ -1,7 +1,11 @@
-//! Explicit operator activation of the private, zero-capacity broker shell.
+//! Explicit operator activation of the private broker and optional media host.
 //! Endpoint selection uses trusted listener metadata, never request headers.
-//! This service creates no media backend, source service, task or listener.
-use crate::multiview_broker::{Broker, OperatorConfig, SystemClock};
+//! Media admission requires a validated protected operator plan; no listener is
+//! created by this module. Unconfigured operation retains zero media capacity.
+use crate::{
+    multiview_broker::{Broker, OperatorConfig, SystemClock},
+    multiview_operator::{LoadedOperatorConfig, MediaConfig, MediaPlan},
+};
 use anyhow::{ensure, Result};
 use axum::{
     extract::Request,
@@ -71,6 +75,24 @@ impl Service {
     /// A DNS origin is allowed for TLS identity; its address is not resolved or
     /// used to replace the explicitly configured listener IP.
     pub(crate) fn new(config: OperatorConfig, planned: &[ListenerEndpoint]) -> Result<Self> {
+        Self::with_media(config, None, planned)
+    }
+
+    pub(crate) fn configured(
+        loaded: LoadedOperatorConfig,
+        planned: &[ListenerEndpoint],
+    ) -> Result<Self> {
+        match loaded.media {
+            Some(media) => Self::with_media(loaded.operator, Some(media), planned),
+            None => Self::new(loaded.operator, planned),
+        }
+    }
+
+    fn with_media(
+        config: OperatorConfig,
+        media: Option<MediaConfig>,
+        planned: &[ListenerEndpoint],
+    ) -> Result<Self> {
         let origin = reqwest::Url::parse(&config.origin)
             .map_err(|_| anyhow::anyhow!("Invalid private multiview origin"))?;
         let tls = match origin.scheme() {
@@ -108,11 +130,31 @@ impl Service {
                 == 1,
             "Private multiview must match exactly one configured listener"
         );
-        // Dedicated credentials and origin policy are validated by the broker.
-        // None deliberately preserves zero capacity and unavailable controls.
-        let broker = Broker::new(config, None, Arc::new(SystemClock::default()))
-            .map_err(|_| anyhow::anyhow!("Invalid private multiview configuration"))?;
+        // Validate and enroll all source authority before any listener binds.
+        // No source URL or credential is accepted from the private wire API.
+        let clock = Arc::new(SystemClock::default());
+        let broker = if let Some(media) = media {
+            let mut plan: MediaPlan = media.prepare(&config)?;
+            let registry = plan.registry();
+            let backend = plan.take_backend()?;
+            let (broker, sources) = Broker::new_live(config, registry, clock, backend)
+                .map_err(|_| anyhow::anyhow!("Invalid private multiview media configuration"))?;
+            plan.apply(&sources)?;
+            broker
+        } else {
+            Broker::new(config, None, clock)
+                .map_err(|_| anyhow::anyhow!("Invalid private multiview configuration"))?
+        };
         Ok(Self { selected, broker })
+    }
+
+    /// Retained backend cleanup is idempotent and survives a dropped waiter.
+    /// A timeout/failure is not a successful process-reaping receipt.
+    pub(crate) async fn shutdown(&self) -> Result<()> {
+        self.broker
+            .shutdown()
+            .await
+            .map_err(|_| anyhow::anyhow!("Private multiview cleanup is unconfirmed"))
     }
 
     /// Call after all existing listeners are bound and before starting any of
@@ -146,7 +188,6 @@ mod tests {
         routing::get,
     };
     use ottplay_core::multiview::broker::wire::{self, Permission};
-    use tower::Service as _;
     use tower_http::cors::{Any, CorsLayer};
 
     const ORIGIN: &str = "https://fixture.example.test";

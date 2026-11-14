@@ -25,6 +25,7 @@ EXPECTED_TESTS = (
     'streamed_decoder_short_track_pending_and_failure',
     'streamed_session_two_owner_continuity',
 )
+EXPECTED_PRODUCTION_TEST = 'normal_server_private_http_mpegts_renew_replace_and_cleanup'
 
 
 def load(name, path):
@@ -74,9 +75,10 @@ CORE_REQUIRED_NAMES = (
     'multiview::broker::registry::try_authority_tests::try_session_authority_maps_poison_to_unavailable_without_callback',
     'multiview::broker::registry::try_authority_tests::try_session_authority_preserves_authorization_and_output_block',
 )
+CORE_CLOCK_RETIREMENT_NAMES = tuple(sorted(ci.CORE_REQUIRED_CLOCK_RETIREMENT_TESTS))
 CORE_NAMES = ('multiview::frames::synthetic_contract', 'multiview::encoder::synthetic_stop_contract',
-              *CORE_REQUIRED_NAMES)
-CORE_IGNORED = ('multiview::synthetic_ignored',)
+              *CORE_REQUIRED_NAMES, *CORE_CLOCK_RETIREMENT_NAMES)
+CORE_IGNORED = tuple(ci.CORE_IGNORED_TESTS)
 SERVER_NAMES = ('geometry_and_fixture_success_do_not_grant_production_admission',
                 'worker_rejects_ungranted_files_modified_plans_and_pre_cancelled_work')
 
@@ -290,6 +292,7 @@ class Attempt:
         for name in ('Cargo.toml', 'Cargo.lock', 'src-rs/core/Cargo.toml',
                      'src-rs/core/src/multiview/broker/registry.rs',
                      'src-rs/server/Cargo.toml', 'src-rs/server/tests/multiview_fixtures.rs',
+                     'src-rs/server/tests/multiview_production.rs',
                      'src-rs/server/tests/multiview_activation.rs', 'src-rs/server/src/main.rs',
                      'src-rs/server/src/multiview_broker.rs',
                      'src-rs/server/src/multiview_broker_live.rs',
@@ -300,10 +303,12 @@ class Attempt:
                      'src-rs/server/tests/support/streamed_transport.rs',
                      'src-rs/server/tests/support/streamed_archive.rs',
                      'src-rs/server/tests/support/streamed_decoder.rs',
+                     'src-rs/server/tests/support/multiview_production_tls.rs',
                      'src-rs/core/src/multiview/decoder.rs', 'src-rs/core/src/multiview/frames.rs',
                      'src-rs/core/src/multiview/geometry.rs', 'src-rs/core/src/multiview/timing.rs',
                      'scripts/ci-multiview-unix-media.py',
                      'scripts/ci-native-favorites.py', 'scripts/ci-multiview-unix.py',
+                     'tests/test_multiview_unix_ci.py',
                      'scripts/ci-apt-mirror.py'):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -325,6 +330,7 @@ class Attempt:
             def __init__(self, root, output, budget):
                 super().__init__(root, output, budget)
                 attempt.driver = self
+                attempt.initial_env = dict(self.env)
 
             def run(self, name, argv, limit=1500):
                 # Deliberately no subprocess, shell or native-runtime access.
@@ -359,6 +365,7 @@ class Attempt:
         self.stack.enter_context(mock.patch.object(ci, 'load_guard', return_value=fake_guard))
         self.stack.enter_context(mock.patch.object(ci, 'load_stream_media', return_value=self.media))
         self.stack.enter_context(mock.patch.object(ci, 'BROKER_TESTS', frozenset(BROKER_NAMES)))
+        self.stack.enter_context(mock.patch.object(ci, 'CORE_IGNORED_TESTS', frozenset(CORE_IGNORED)))
         self.stack.enter_context(mock.patch.object(ci, 'provision_tools', return_value=(self.supplied, 'synthetic mock supplier')))
         self.stack.enter_context(mock.patch.object(ci, 'activation_home_preflight',
             return_value={'parent': str(self.home), 'ancestors': [],
@@ -377,6 +384,9 @@ class Attempt:
             if self.case != 'pending-missing-input':
                 Path(argv[-1]).write_bytes(b'synthetic pending TS payload: ' + name.encode())
             return ''
+        if name.startswith('production-source-'):
+            Path(argv[-1]).write_bytes((b'\x47' + b'\0' * 187) * 3)
+            return 'synthetic MPEG-TS payload; no media process\n'
         if name == 'fixture-pending-clock':
             case = Path(self.driver.env['OTTPLAY_MULTIVIEW_PENDING_CASE_DIR'])
             case.mkdir(mode=0o700)
@@ -506,6 +516,54 @@ class Attempt:
             elif self.case == 'listener-conflicting-summary':
                 text += 'test result: FAILED. 0 passed; 1 failed; 0 ignored;\n'
             return text
+        if name in ('production-inventory', 'production-ignored-inventory'):
+            if self.case == 'production-missing-inventory' and name == 'production-inventory':
+                return ''
+            if self.case == 'production-extra-inventory' and name == 'production-inventory':
+                return EXPECTED_PRODUCTION_TEST + ': test\nunreviewed_test: test\n'
+            if self.case == 'production-not-ignored' and name == 'production-ignored-inventory':
+                return ''
+            return EXPECTED_PRODUCTION_TEST + ': test\n'
+        if name == 'production-normal-server':
+            manifest_path = Path(self.driver.env['OTTPLAY_MULTIVIEW_PRODUCTION_INPUTS'])
+            manifest = json.loads(manifest_path.read_text())
+            receipt = {'schema': 'ottplay.multiview.production-binary.v1', 'pass': True,
+                       'scope': 'Normal production HTTPS control/HLS with a private RFC1918 HTTP MPEG-TS adapter, all nine advertised slots and private HLS output; no native-player or physical-television qualification',
+                       'tls': {'configured_api_transport':'https','trust':'synthetic_ca_only',
+                               'untrusted_ca_rejected':True,'wrong_hostname_rejected':True,
+                               'ca_sha256':'a'*64,'leaf_sha256':'b'*64,'openssl_sha256':'c'*64},
+                       'https_control_requests':20,'https_media_requests':30,
+                       'elapsed_seconds': 240, 'credential_expiry_rejected': True,
+                       'sustained_seconds': 220,
+                       'expiry_output_was_active': True, 'expired_source_connections_closed': True,
+                       'expired_output_cleanup': True, 'owned_fixture_root_removed': True, 'graceful_shutdown': True,
+                       'shutdown_signal': 'SIGTERM',
+                       'output_directory_empty': True, 'source_replacement': True,
+                       'nine_slot_grid_rgb': True, 'selected_audio_tone': True,
+                       'replacement_audio_tone': True,
+                       'replacement_late_segment': True, 'sibling_frames_recent_at_end': True,
+                       'sibling_frames_before_replace': 100, 'sibling_frames_after_replace': 200,
+                       'hls_segment_audio_video': True,
+                       'upstream_request_counts': {f"source-{row['id']}.ts": 2 for row in manifest['inputs']},
+                       'inputs': [{'id': row['id'], 'sha256': row['sha256'], 'bytes': row['bytes']}
+                                  for row in manifest['inputs']]}
+            if self.case == 'production-bad-receipt':
+                receipt['pass'] = False
+            elif self.case == 'production-missing-source':
+                receipt['inputs'].pop()
+            elif self.case == 'production-no-hls-av':
+                receipt['hls_segment_audio_video'] = False
+            elif self.case == 'production-no-tls':
+                receipt['tls']['wrong_hostname_rejected'] = False
+            elif self.case == 'production-incomplete-probe':
+                receipt['upstream_request_counts']['source-1.ts'] = 1
+            if self.case != 'production-missing-receipt':
+                Path(self.driver.env['OTTPLAY_MULTIVIEW_PRODUCTION_RECEIPT']).write_text(json.dumps(receipt))
+            if self.case == 'production-nonzero-exit':
+                raise RuntimeError('Synthetic production command exited nonzero')
+            if self.case == 'production-zero-tests':
+                return 'running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n'
+            return passed(EXPECTED_PRODUCTION_TEST)
         if name in ('fixture-build', 'core-fixture-build'):
             core = name == 'core-fixture-build'
             path = self.output / ('target/debug/deps/' + ('ottplay_core' if core else 'multiview_fixtures') + '-synthetic')
@@ -526,7 +584,8 @@ class Attempt:
             self.activation = self.output / 'target/debug/deps/multiview_activation-synthetic'
             self.broker_executable = self.output / 'target/debug/deps/multiview_broker_boundary-synthetic'
             self.normal_server = self.output / 'target/debug/ottplay-server'
-            for executable in (self.activation, self.broker_executable, self.normal_server):
+            self.production_executable = self.output / 'target/debug/deps/multiview_production-synthetic'
+            for executable in (self.activation, self.broker_executable, self.normal_server, self.production_executable):
                 executable.write_text('synthetic executable bytes; never executed')
                 executable.chmod(0o700)
             if self.case == 'hardlinked-normal-server':
@@ -535,6 +594,7 @@ class Attempt:
             normal = artifact(self.normal_server, manifest, name='ottplay-server', kind='bin',
                               test_profile=self.case == 'normal-server-test-profile')
             broker = artifact(self.broker_executable, manifest, name='multiview_broker_boundary')
+            production = artifact(self.production_executable, manifest, name='multiview_production')
             if self.case == 'broker-cargo-wrong-manifest':
                 broker = artifact(self.broker_executable, self.root / 'src-rs/core/Cargo.toml',
                                   name='multiview_broker_boundary')
@@ -562,7 +622,7 @@ class Attempt:
                 activation += activation
             if self.case == 'escaped-activation-target':
                 activation = artifact(Path(self.supplied['ffmpeg']), manifest, name='multiview_activation')
-            return 'synthetic cargo diagnostic\n' + text + activation + broker + normal
+            return 'synthetic cargo diagnostic\n' + text + activation + broker + normal + production
         if name == 'broker-inventory':
             names = list(BROKER_NAMES)
             if self.case == 'broker-inventory-empty':
@@ -615,6 +675,10 @@ class Attempt:
                 names[0] = 'other::synthetic_contract'
             return ''.join(value + ': test\n' for value in names)
         if name == 'core-multiview-ignored-inventory':
+            if self.case == 'core-ignored-missing':
+                return ''
+            if self.case == 'core-ignored-extra':
+                return ''.join(value + ': test\n' for value in (*CORE_IGNORED, 'multiview::unexpected_ignored'))
             return ''.join(value + ': test\n' for value in CORE_IGNORED)
         if name == 'core-multiview-ordinary':
             text = suite_passed(CORE_NAMES, CORE_IGNORED)
@@ -623,6 +687,8 @@ class Attempt:
             if self.case == 'core-failed-ordinary':
                 return text.replace(CORE_NAMES[0] + ' ... ok', CORE_NAMES[0] + ' ... FAILED')
             return text
+        if name.startswith('core-ignored-'):
+            return passed(CORE_IGNORED[0])
         if name == 'ignored-fixtures':
             names = list(EXPECTED_TESTS)
             if self.case == 'changed-inventory':
@@ -825,7 +891,7 @@ class BoundaryContracts(unittest.TestCase):
                 self.assertTrue(ci.LISTENER_REQUIRED_TESTS <= set(LISTENER_NAMES))
                 self.assertNotEqual(attempt.listener_executable, attempt.normal_server)
                 self.assertEqual(result['ordinary_activation_tests'], sorted(ACTIVATION_NAMES))
-                self.assertEqual(result['tests'], list(EXPECTED_TESTS))
+                self.assertEqual(result['tests'], list(EXPECTED_TESTS) + [EXPECTED_PRODUCTION_TEST])
                 self.assertTrue(result['streamed_media']['pass'])
                 self.assertEqual(attempt.driver.budget.deadline, attempt.driver.budget.started + 1800)
                 self.assertEqual(attempt.driver.budget.work_deadline, attempt.driver.budget.started + 1680)
@@ -938,7 +1004,9 @@ class CoreRequiredContracts(unittest.TestCase):
                             attempt.run()
                     result = attempt.terminal()
                     self.assertEqual(result['status'], 'fail')
-                    self.assertIn('Required ordinary core regression is absent or ignored', result['error'])
+                    expected_error = ('Core multiview ignored test inventory differs from the one reviewed media test'
+                                      if state == 'ignored' else 'Required ordinary core regression is absent or ignored')
+                    self.assertIn(expected_error, result['error'])
                     names = [row['name'] for row in attempt.driver.commands]
                     self.assertIn('core-multiview-inventory', names)
                     self.assertIn('core-multiview-ignored-inventory', names)
@@ -1640,6 +1708,69 @@ class ProvisionTests(unittest.TestCase):
 
 
 class MockMainTests(unittest.TestCase):
+    def failed(self, attempt, reason):
+        with self.assertRaises(RuntimeError):
+            attempt.run()
+        result = attempt.terminal()
+        self.assertEqual(result['status'], 'fail')
+        self.assertIn(reason, result['error'])
+        self.assertFalse(result['production_admission'])
+        self.assertFalse(result['sustained_media_e2e'])
+        return result
+
+    def test_normal_server_mpegts_fixture_is_exact_bounded_and_receipt_backed(self):
+        with Attempt() as attempt:
+            attempt.run()
+            result = attempt.terminal()
+            build = next(row for row in attempt.driver.commands if row['name'] == 'fixture-build')
+            self.assertEqual(build['argv'].count('multiview_production'), 1)
+            run = next(row for row in attempt.driver.commands if row['name'] == 'production-normal-server')
+            self.assertEqual(run['argv'], [str(attempt.production_executable), EXPECTED_PRODUCTION_TEST,
+                '--ignored', '--exact', '--test-threads=1', '--color=never'])
+            self.assertEqual(run['limit'], 600)
+            self.assertEqual([row['name'] for row in attempt.driver.commands if row['name'].startswith('production-source-')],
+                             ['production-source-1', 'production-source-2', 'production-source-3'])
+            self.assertTrue(result['normal_server_mpegts_to_hls'])
+            self.assertTrue(result['sustained_media_e2e'])
+            self.assertFalse(result['native_player_or_physical_television_qualified'])
+            self.assertFalse(result['production_admission'])
+            self.assertNotIn('OTTPLAY_MULTIVIEW_PRODUCTION_INPUTS', attempt.driver.env)
+            self.assertNotIn('OTTPLAY_MULTIVIEW_PRODUCTION_RECEIPT', attempt.driver.env)
+            for key, tool in (('OTTPLAY_MULTIVIEW_FFMPEG', 'ffmpeg'),
+                              ('OTTPLAY_MULTIVIEW_FFPROBE', 'ffprobe')):
+                self.assertEqual(attempt.driver.env.get(key), attempt.supplied[tool],
+                                 f'production fixture changed provisioned {key}')
+            self.assertNotIn('OTTPLAY_MULTIVIEW_MKFIFO', attempt.driver.env)
+            self.assertNotIn('OTTPLAY_MULTIVIEW_OPENSSL', attempt.driver.env)
+            manifest = json.loads((attempt.output / 'production/inputs/INPUTS.json').read_text())
+            self.assertEqual([(row['color'], row['audio_frequency_hz']) for row in manifest['inputs']],
+                             [('red', 330), ('lime', 440), ('blue', 550)])
+            self.assertTrue(all(Path(row['path']).stat().st_mode & 0o222 == 0 for row in manifest['inputs']))
+            receipt = json.loads((attempt.output / 'evidence/production-control.json').read_text())
+            self.assertEqual(receipt['schema'], 'ottplay.multiview.production-binary.v1')
+            self.assertTrue(receipt['nine_slot_grid_rgb'] and receipt['selected_audio_tone'])
+
+    def test_production_target_inventory_and_receipt_fail_closed(self):
+        cases = {
+            'production-missing-inventory': 'Production normal-binary fixture must be the one exact ignored test',
+            'production-extra-inventory': 'Production normal-binary fixture must be the one exact ignored test',
+            'production-not-ignored': 'Production normal-binary fixture must be the one exact ignored test',
+            'production-bad-receipt': 'Normal production-server adapter receipt did not qualify its bounded contract',
+            'production-missing-source': 'Actual test receipt does not bind the three sealed transport sources',
+            'production-no-hls-av': 'Normal production-server adapter receipt did not qualify its bounded contract',
+            'production-no-tls': 'Normal production-server adapter receipt did not qualify its bounded contract',
+            'production-incomplete-probe': 'Every source must have distinct Probe and Decode subscriptions',
+            'production-missing-receipt': 'No such file or directory',
+            'production-nonzero-exit': 'Synthetic production command exited nonzero',
+            'production-zero-tests': 'Expected exactly one executed test',
+        }
+        for case, reason in cases.items():
+            with self.subTest(case=case), Attempt(case) as attempt:
+                result = self.failed(attempt, reason)
+                self.assertFalse(result['normal_server_mpegts_to_hls'])
+                self.assertFalse(result['sustained_media_e2e'])
+                self.assertFalse(result['production_admission'])
+
     def test_home_fixtures_are_never_deleted_and_new_leaks_fail_even_when_tests_fail(self):
         with Attempt('preexisting-home-fixture') as attempt:
             attempt.run()
@@ -1683,9 +1814,9 @@ class MockMainTests(unittest.TestCase):
                 if case == 'hardlinked-normal-server':
                     with self.assertRaisesRegex(RuntimeError, 'Hash input not bounded regular file'):
                         guard.Budget().digest(attempt.normal_server)
-                self.assertEqual(result['tests'], list(EXPECTED_TESTS))
+                self.assertEqual(result['tests'], list(EXPECTED_TESTS) + [EXPECTED_PRODUCTION_TEST])
                 self.assertFalse(result['production_admission'])
-                self.assertFalse(result['sustained_media_e2e'])
+                self.assertTrue(result['sustained_media_e2e'])
 
     def test_activation_zero_missing_extra_ignored_failed_or_unbound_cannot_pass(self):
         cases = {'unsupported-openssl': 'Expected installed OpenSSL or LibreSSL version identity',
@@ -1775,10 +1906,15 @@ class MockMainTests(unittest.TestCase):
                 result = attempt.terminal()
                 self.assertEqual(result['status'], 'pass')
                 self.assertFalse(result['production_admission'])
-                self.assertFalse(result['sustained_media_e2e'])
-                self.assertFalse(result['generated_media_hashes_available'])
-                self.assertEqual(result['tests'], list(EXPECTED_TESTS))
+                self.assertTrue(result['sustained_media_e2e'])
+                self.assertTrue(result['generated_media_hashes_available'])
+                self.assertTrue(result['normal_server_mpegts_to_hls'])
+                self.assertEqual(result['tests'], list(EXPECTED_TESTS) + [EXPECTED_PRODUCTION_TEST])
+                self.assertTrue(result['production_adapter']['passed'])
+                self.assertEqual(result['production_adapter']['scope'],
+                    'Actual production binary with protected HTTP-MPEGTS enrollment, all nine advertised slots, decoded grid RGB and selected audio tones, A/V HLS ffprobe, active-credential expiry, source replacement and cleanup; no native-player or physical-television proof')
                 self.assertEqual(result['ordinary_core_tests'], sorted(CORE_NAMES))
+                self.assertEqual(result['executed_core_ignored_tests'], list(CORE_IGNORED))
                 self.assertEqual(result['ordinary_server_tests'], sorted(SERVER_NAMES))
                 for key in ('RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS'):
                     self.assertNotIn(key, attempt.driver.env)
@@ -1820,6 +1956,8 @@ class MockMainTests(unittest.TestCase):
                  'retargeted-system-tool': 'Tool executable identity changed',
                  'duplicate-core-target': 'exactly one fixture executable',
                  'core-zero-inventory': 'Core multiview test inventory differs',
+                 'core-ignored-missing': 'Core multiview ignored test inventory differs',
+                 'core-ignored-extra': 'Core multiview ignored test inventory differs',
                  'core-wrong-prefix': 'Core multiview test inventory differs',
                  'core-zero-executed': 'Ordinary suite count differs',
                  'core-failed-ordinary': 'Ordinary suite execution/status differs',

@@ -1,10 +1,9 @@
-//! Experimental composition primitives with explicit fixture-only integration.
+//! Composition primitives and an explicitly configured private media host.
 //!
-//! `worker::run_fixture` proves finite local-file composition only. Its fixed
-//! filtergraph does not provide independently replaceable live slot decoders.
-//! Production admission remains disabled. The private fixture router exercises
-//! the source broker, persistent per-input lifecycle and output transport without
-//! registering a production service or enabling a player capability.
+//! Ordinary playback and unconfigured servers do not enable multiview. The
+//! protected operator plan enrolls server-owned sources and selects the admitted
+//! production profile; fixture constructors retain their separate test limits.
+//! See the broker runbook for authority, retirement and qualification boundaries.
 
 pub mod broker;
 pub mod decoder;

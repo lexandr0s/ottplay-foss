@@ -2484,3 +2484,63 @@ fn slot_refs_refuse_ambiguous_duplicate_target_leases() {
         None
     );
 }
+
+#[test]
+fn refused_renew_commit_does_not_extend_registry_lease() {
+    let (registry, _) = fixture();
+    let original = registry.lock().unwrap().sessions["session"].expires;
+    let now = original - Duration::from_secs(70);
+    let mut called = 0;
+    let result = registry.renew_with_time_and_commit(&player(), &binding(), Some(now), &mut || {
+        called += 1;
+        Err(RegistryError::Busy)
+    });
+    assert_eq!(result, Err(RegistryError::Busy));
+    assert_eq!(called, 1);
+    assert_eq!(
+        registry.lock().unwrap().sessions["session"].expires,
+        original
+    );
+}
+
+#[test]
+fn successful_renew_commit_advances_both_under_one_barrier() {
+    let (registry, _) = fixture();
+    let original = registry.lock().unwrap().sessions["session"].expires;
+    let now = original - Duration::from_secs(70);
+    let mut host_deadline = original;
+    registry
+        .renew_with_time_and_commit(&player(), &binding(), Some(now), &mut || {
+            host_deadline = now + SESSION_TTL;
+            Ok(())
+        })
+        .unwrap();
+    assert!(host_deadline > original);
+    assert_eq!(
+        registry.lock().unwrap().sessions["session"].expires,
+        host_deadline
+    );
+}
+
+#[test]
+fn expired_renew_commit_never_calls_host_or_revives_session() {
+    let (registry, _) = fixture();
+    let original = registry.lock().unwrap().sessions["session"].expires;
+    let mut called = false;
+    let result =
+        registry.renew_with_time_and_commit(&player(), &binding(), Some(original), &mut || {
+            called = true;
+            Ok(())
+        });
+    assert!(matches!(
+        result,
+        Err(RegistryError::Expired | RegistryError::Revoked)
+    ));
+    assert!(!called);
+    assert!(registry
+        .lock()
+        .unwrap()
+        .sessions
+        .get("session")
+        .is_none_or(|s| s.expires <= original));
+}

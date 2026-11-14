@@ -811,6 +811,15 @@ pub struct EncoderConfig {
     pub max_disk_bytes: u64,
 }
 
+// Grant policy cannot extend a Session's original absolute end; Session also
+// enforces that deadline independently in its compositor supervisor.
+pub(super) fn valid_lifetime(duration: Duration, idle: Duration, granted_service: bool) -> bool {
+    !duration.is_zero()
+        && !idle.is_zero()
+        && duration <= Duration::from_secs(if granted_service { 24 * 60 * 60 } else { 300 })
+        && idle <= Duration::from_secs(if granted_service { 90 } else { 60 })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EncoderState {
     Starting,
@@ -939,6 +948,7 @@ mod runtime {
     use std::io::{self, Read, Write};
     use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
     use std::os::unix::fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt};
+    use std::os::unix::process::CommandExt;
     use std::process::{Child, Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread::{self, JoinHandle};
@@ -981,21 +991,111 @@ mod runtime {
             ACTIVE.store(false, Ordering::Release);
         }
     }
-    struct ChildGuard(Child);
+    /// Move-only custody of the one existing global encoder admission.
+    pub(crate) struct EncoderCapacity(Permit);
+    pub(crate) struct SessionStartFailure {
+        pub(crate) error: EncoderError,
+        // None means an uncertain partial encoder already quarantined it.
+        pub(crate) capacity: Option<EncoderCapacity>,
+    }
+    struct PermitTicket {
+        permit: Option<Permit>,
+        return_to: Option<Arc<Mutex<Option<Permit>>>>,
+        cleanup_uncertain: Arc<AtomicBool>,
+    }
+    impl PermitTicket {
+        fn direct(permit: Permit) -> Self {
+            Self {
+                permit: Some(permit),
+                return_to: None,
+                cleanup_uncertain: Arc::new(AtomicBool::new(false)),
+            }
+        }
+        fn returning(slot: &Arc<Mutex<Option<Permit>>>) -> Result<Self, EncoderError> {
+            let permit = lock(slot).take().ok_or(EncoderError::Busy)?;
+            Ok(Self {
+                permit: Some(permit),
+                return_to: Some(slot.clone()),
+                cleanup_uncertain: Arc::new(AtomicBool::new(false)),
+            })
+        }
+    }
+    impl Drop for PermitTicket {
+        fn drop(&mut self) {
+            if self.cleanup_uncertain.load(Ordering::Acquire) {
+                if let Some(permit) = self.permit.take() {
+                    std::mem::forget(permit);
+                }
+                return;
+            }
+            if let (Some(permit), Some(slot)) = (self.permit.take(), self.return_to.take()) {
+                // The private constructor exclusively owns this move-only slot.
+                *lock(&slot) = Some(permit);
+            }
+        }
+    }
+    #[cfg(test)]
+    static CAPACITY_TEST_LOCK: Mutex<()> = Mutex::new(());
+    struct ChildGuard(Option<Child>, Arc<AtomicBool>);
     impl Drop for ChildGuard {
         fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
+            let Some(mut child) = self.0.take() else {
+                return;
+            };
+            let mut confirmed = false;
+            match child.try_wait() {
+                Ok(Some(_)) => confirmed = true,
+                Ok(None) => {
+                    let _ = child.kill();
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(_)) => {
+                                confirmed = true;
+                                break;
+                            }
+                            Err(_) => break,
+                            Ok(None) => {}
+                        }
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                }
+                Err(_) => {}
+            }
+            if !confirmed {
+                self.1.store(true, Ordering::Release);
+                eprintln!(
+                    "multiview encoder child retirement uncertain; process-group recovery required"
+                );
+                std::mem::forget(child);
+            }
         }
     }
     struct Directory {
         path: PathBuf,
         keep: bool,
+        cleanup_uncertain: Arc<AtomicBool>,
     }
     impl Drop for Directory {
         fn drop(&mut self) {
             if !self.keep {
-                let _ = fs::remove_dir_all(&self.path);
+                if let Err(error) = fs::remove_dir_all(&self.path) {
+                    if error.kind() != io::ErrorKind::NotFound {
+                        self.cleanup_uncertain.store(true, Ordering::Release);
+                        eprintln!(
+                            "multiview constructor directory cleanup uncertain; recovery required"
+                        );
+                        let retained = Self {
+                            path: std::mem::take(&mut self.path),
+                            keep: true,
+                            cleanup_uncertain: self.cleanup_uncertain.clone(),
+                        };
+                        std::mem::forget(retained);
+                    }
+                }
             }
         }
     }
@@ -2301,7 +2401,12 @@ mod runtime {
                     break;
                 }
             }
-            match child.0.try_wait() {
+            match child
+                .0
+                .as_mut()
+                .ok_or(EncoderError::Io)
+                .and_then(|child| child.try_wait().map_err(|_| EncoderError::Io))
+            {
                 Ok(None) => {}
                 Ok(Some(_)) => {
                     fail(&shared, EncoderError::ProcessFailed);
@@ -2339,8 +2444,8 @@ mod runtime {
             }
             thread::sleep(Duration::from_millis(20));
         }
-        // ChildGuard kills and reaps before this monitor returns. Keeper closes
-        // afterwards; every writer already checks stop and uses nonblocking IO.
+        // ChildGuard confirms reaping or marks capacity quarantined before the
+        // monitor returns. Every writer checks stop and uses nonblocking IO.
         drop(child);
     }
 
@@ -2350,10 +2455,54 @@ mod runtime {
         monitor: Option<JoinHandle<()>>,
         video: Option<JoinHandle<()>>,
         audio: Option<JoinHandle<()>>,
-        permit: Option<Permit>,
+        permit: Option<PermitTicket>,
         cleaned: bool,
+        join_failed: bool,
     }
     impl Encoder {
+        // Real filesystem cleanup-failure injection with no child, permit or
+        // external media tools. Only unit tests can construct this owner.
+        #[cfg(test)]
+        pub(crate) fn capacity_test_lock() -> std::sync::MutexGuard<'static, ()> {
+            lock(&CAPACITY_TEST_LOCK)
+        }
+        #[cfg(test)]
+        pub(crate) fn give_test_capacity(&mut self) {
+            self.permit = Some(PermitTicket::direct(Permit::acquire().unwrap()));
+        }
+        #[cfg(test)]
+        pub(crate) fn cleanup_test_encoder(directory: PathBuf) -> Self {
+            let now = Instant::now();
+            Self {
+                shared: Arc::new(Shared {
+                    stop: Arc::new(AtomicBool::new(false)),
+                    started: now,
+                    touched: Mutex::new(now),
+                    snapshot: Mutex::new(EncoderSnapshot {
+                        pid: 0,
+                        generation: 71,
+                        frames: 0,
+                        state: EncoderState::Stopped,
+                        monotonic_millis: 0,
+                        hls_sequence: None,
+                        hls_last_update_millis: 0,
+                        audio_samples_written: 0,
+                        video_frames_written: 0,
+                    }),
+                    error: Mutex::new(None),
+                    audio_samples_written: AtomicU64::new(0),
+                    video_frames_written: AtomicU64::new(0),
+                    capture_startup: None,
+                }),
+                directory,
+                monitor: None,
+                video: None,
+                audio: None,
+                permit: None,
+                cleaned: false,
+                join_failed: false,
+            }
+        }
         pub fn start(
             config: EncoderConfig,
             video: VideoFeed,
@@ -2365,6 +2514,8 @@ mod runtime {
                 VideoInput::Legacy(video),
                 AudioInput::Legacy(audio),
                 stop,
+                false,
+                None,
             )
         }
         pub fn start_timed_audio(
@@ -2378,6 +2529,8 @@ mod runtime {
                 VideoInput::Legacy(video),
                 AudioInput::Timed(audio),
                 stop,
+                false,
+                None,
             )
         }
         pub fn start_capture_av(
@@ -2391,13 +2544,53 @@ mod runtime {
                 VideoInput::Capture(video),
                 AudioInput::Timed(audio),
                 stop,
+                false,
+                None,
             )
+        }
+        // Only persistent Session's broker-granted path may select this policy.
+        // Public/direct encoders retain their original finite fixture limits.
+        pub(crate) fn reserve_output_capacity() -> Result<EncoderCapacity, EncoderError> {
+            Permit::acquire().map(EncoderCapacity)
+        }
+        pub(crate) fn start_session_capture_av(
+            config: EncoderConfig,
+            video: Arc<CaptureVideoFeed>,
+            audio: TimedAudioFeed,
+            stop: Arc<AtomicBool>,
+            capacity: EncoderCapacity,
+            granted_service: bool,
+        ) -> Result<Self, SessionStartFailure> {
+            let returned = Arc::new(Mutex::new(Some(capacity.0)));
+            match Self::start_audio(
+                config,
+                VideoInput::Capture(video),
+                AudioInput::Timed(audio),
+                stop,
+                granted_service,
+                Some(&returned),
+            ) {
+                Ok(mut encoder) => {
+                    // A successful encoder owns its token directly until
+                    // confirmed retirement moves it back into Session.
+                    if let Some(ticket) = &mut encoder.permit {
+                        ticket.return_to = None;
+                    }
+                    Ok(encoder)
+                }
+                Err(error) => {
+                    let capacity = lock(&returned).take().map(EncoderCapacity);
+                    Err(SessionStartFailure { error, capacity })
+                }
+            }
         }
         fn start_audio(
             config: EncoderConfig,
             video: VideoInput,
             audio: AudioInput,
             stop: Arc<AtomicBool>,
+            granted_service: bool,
+            returned_capacity: Option<&Arc<Mutex<Option<Permit>>>>,
         ) -> Result<Self, EncoderError> {
             if stop.load(Ordering::Acquire) {
                 return Err(EncoderError::Cancelled);
@@ -2414,9 +2607,8 @@ mod runtime {
                 || config.startup_timeout.is_zero()
                 || config.stall_timeout.is_zero()
                 || config.max_duration.is_zero()
-                || config.max_duration > Duration::from_secs(300)
+                || !valid_lifetime(config.max_duration, config.idle_timeout, granted_service)
                 || config.idle_timeout.is_zero()
-                || config.idle_timeout > Duration::from_secs(60)
                 || config.startup_timeout > config.max_duration
                 || config.stall_timeout > config.max_duration
                 || config.max_disk_bytes == 0
@@ -2451,7 +2643,10 @@ mod runtime {
                 VideoInput::Capture(video) if video.bytes == expected => {}
                 _ => return Err(EncoderError::InvalidConfig),
             }
-            let permit = Permit::acquire()?;
+            let permit = match returned_capacity {
+                Some(slot) => PermitTicket::returning(slot)?,
+                None => PermitTicket::direct(Permit::acquire()?),
+            };
             let generation = GENERATION
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                     value.checked_add(1)
@@ -2473,18 +2668,23 @@ mod runtime {
             let mut owned = Directory {
                 path: directory.clone(),
                 keep: false,
+                cleanup_uncertain: permit.cleanup_uncertain.clone(),
             };
             let fifo = directory.join("audio.pcm");
             let progress_fifo = directory.join("progress.pipe");
             let mut maker = ChildGuard(
-                Command::new(mkfifo)
-                    .arg(&fifo)
-                    .arg(&progress_fifo)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .map_err(|_| EncoderError::Unsupported)?,
+                Some(
+                    Command::new(mkfifo)
+                        .arg0("mkfifo")
+                        .arg(&fifo)
+                        .arg(&progress_fifo)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .map_err(|_| EncoderError::Unsupported)?,
+                ),
+                permit.cleanup_uncertain.clone(),
             );
             let began = Instant::now();
             loop {
@@ -2494,7 +2694,13 @@ mod runtime {
                 if began.elapsed() >= Duration::from_secs(2) {
                     return Err(EncoderError::Unsupported);
                 }
-                if let Some(status) = maker.0.try_wait().map_err(|_| EncoderError::Io)? {
+                if let Some(status) = maker
+                    .0
+                    .as_mut()
+                    .ok_or(EncoderError::Io)?
+                    .try_wait()
+                    .map_err(|_| EncoderError::Io)?
+                {
                     if !status.success() {
                         return Err(EncoderError::Unsupported);
                     }
@@ -2611,8 +2817,17 @@ mod runtime {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            let mut child = ChildGuard(command.spawn().map_err(|_| EncoderError::Unsupported)?);
-            let video_writer = child.0.stdin.take().ok_or(EncoderError::Io)?;
+            let mut child = ChildGuard(
+                Some(command.spawn().map_err(|_| EncoderError::Unsupported)?),
+                permit.cleanup_uncertain.clone(),
+            );
+            let video_writer = child
+                .0
+                .as_mut()
+                .ok_or(EncoderError::Io)?
+                .stdin
+                .take()
+                .ok_or(EncoderError::Io)?;
             nonblocking(video_writer.as_fd()).map_err(|_| EncoderError::Io)?;
             let started = Instant::now();
             let capture_startup = match &video {
@@ -2632,7 +2847,7 @@ mod runtime {
                 started,
                 touched: Mutex::new(started),
                 snapshot: Mutex::new(EncoderSnapshot {
-                    pid: child.0.id(),
+                    pid: child.0.as_ref().ok_or(EncoderError::Io)?.id(),
                     generation,
                     frames: 0,
                     state: EncoderState::Starting,
@@ -2654,6 +2869,7 @@ mod runtime {
                 audio: None,
                 permit: Some(permit),
                 cleaned: false,
+                join_failed: false,
             };
             owned.keep = true;
             let stall = config.stall_timeout;
@@ -2764,11 +2980,36 @@ mod runtime {
             *lock(&self.shared.touched) = Instant::now();
         }
         pub fn stop(&mut self) -> Result<(), EncoderError> {
+            self.stop_inner(true)
+        }
+        pub(crate) fn stop_retaining_capacity(&mut self) -> Result<(), EncoderError> {
+            self.stop_inner(false)
+        }
+        pub(crate) fn take_retired_capacity(&mut self) -> Result<EncoderCapacity, EncoderError> {
+            if !self.cleaned
+                || self.join_failed
+                || self.monitor.is_some()
+                || self.video.is_some()
+                || self.audio.is_some()
+                || self
+                    .permit
+                    .as_ref()
+                    .is_some_and(|ticket| ticket.cleanup_uncertain.load(Ordering::Acquire))
+                || !self.shared.stop.load(Ordering::Acquire)
+            {
+                return Err(EncoderError::Io);
+            }
+            let mut ticket = self.permit.take().ok_or(EncoderError::Io)?;
+            let permit = ticket.permit.take().ok_or(EncoderError::Io)?;
+            Ok(EncoderCapacity(permit))
+        }
+        fn stop_inner(&mut self, release_capacity: bool) -> Result<(), EncoderError> {
             self.shared.stop.store(true, Ordering::Release);
-            let mut failed = false;
+            let mut failed = self.join_failed;
             for handle in [&mut self.monitor, &mut self.video, &mut self.audio] {
                 if let Some(handle) = handle.take() {
                     if handle.join().is_err() {
+                        self.join_failed = true;
                         failed = true;
                     }
                 }
@@ -2780,7 +3021,13 @@ mod runtime {
                     Err(_) => failed = true,
                 }
             }
-            self.permit.take();
+            failed |= self
+                .permit
+                .as_ref()
+                .is_some_and(|ticket| ticket.cleanup_uncertain.load(Ordering::Acquire));
+            if !failed && release_capacity {
+                self.permit.take();
+            }
             if lock(&self.shared.snapshot).state != EncoderState::Failed {
                 lock(&self.shared.snapshot).state = EncoderState::Stopped;
             }
@@ -2790,16 +3037,186 @@ mod runtime {
                 Ok(())
             }
         }
+        fn take_quarantine(&mut self) -> Self {
+            let owner = Self {
+                shared: self.shared.clone(),
+                directory: std::mem::take(&mut self.directory),
+                monitor: self.monitor.take(),
+                video: self.video.take(),
+                audio: self.audio.take(),
+                permit: self.permit.take(),
+                cleaned: self.cleaned,
+                join_failed: self.join_failed,
+            };
+            // The moved-from shell no longer owns a directory, worker or
+            // permit. Dropping it must not retry IO or quarantine a second
+            // owner; all original failure flags remain with the real owner.
+            self.cleaned = true;
+            self.join_failed = false;
+            owner
+        }
     }
     impl Drop for Encoder {
         fn drop(&mut self) {
-            let _ = self.stop();
+            if self.stop().is_err() {
+                // One admitted encoder already owns the global permit. Keep
+                // that exact owner/feed/capacity rather than admit a successor
+                // after uncertain constructor cleanup. Recovery requires the
+                // operator's process-group recovery/restart; no detached reaper
+                // or unbounded global owner collection is created here.
+                eprintln!("multiview encoder cleanup uncertain; process-group recovery required");
+                std::mem::forget(self.take_quarantine());
+            }
         }
     }
 
     #[cfg(test)]
     mod transport_tests {
         use super::*;
+        #[test]
+        fn uncertain_child_ticket_cannot_return_capacity_to_a_constructor() {
+            const FLAG: &str = "OTTPLAY_CAPACITY_QUARANTINE_TEST_CHILD";
+            if std::env::var_os(FLAG).is_some() {
+                let slot = Arc::new(Mutex::new(Some(Permit::acquire().unwrap())));
+                let ticket = PermitTicket::returning(&slot).unwrap();
+                ticket.cleanup_uncertain.store(true, Ordering::Release);
+                drop(ticket);
+                assert!(lock(&slot).is_none());
+                assert!(ACTIVE.load(Ordering::Acquire));
+                assert!(matches!(Permit::acquire(), Err(EncoderError::Busy)));
+                // This isolated test process is the recovery boundary. Never
+                // reset the production quarantine bit/permit to pass a test.
+                return;
+            }
+            let test_name = thread::current().name().unwrap().to_owned();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--nocapture"])
+                .env(FLAG, "1")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    let output = child.wait_with_output().unwrap();
+                    assert!(status.success(), "isolated capacity control failed");
+                    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("isolated capacity control exceeded its deadline");
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+        #[test]
+        fn session_constructor_returns_same_capacity_before_and_after_ticket_transfer() {
+            let _serial = Encoder::capacity_test_lock();
+            for prebound in [false, true] {
+                let capacity = Encoder::reserve_output_capacity().unwrap();
+                let feed = Arc::new(CaptureVideoFeed::new(
+                    vec![0; 12].into(),
+                    fence(0),
+                    Instant::now(),
+                ));
+                if prebound {
+                    feed.bind(55).unwrap();
+                }
+                let executable = std::env::current_exe().unwrap();
+                let config = EncoderConfig {
+                    ffmpeg: executable.clone(),
+                    mkfifo: executable,
+                    output_root: std::env::temp_dir(),
+                    canvas: CanvasSpec {
+                        width: if prebound { 2 } else { 0 },
+                        height: 2,
+                        fps: 10,
+                    },
+                    startup_timeout: Duration::from_secs(1),
+                    stall_timeout: Duration::from_secs(1),
+                    max_duration: Duration::from_secs(30),
+                    idle_timeout: Duration::from_secs(30),
+                    max_disk_bytes: 1024,
+                };
+                // Invalid canvas fails before ticket transfer; an already-bound
+                // capture fails after transfer but BEFORE any child spawn.
+                let failure = match Encoder::start_session_capture_av(
+                    config,
+                    feed,
+                    Arc::new(|_| vec![0; 1920]),
+                    Arc::new(AtomicBool::new(false)),
+                    capacity,
+                    false,
+                ) {
+                    Err(failure) => failure,
+                    Ok(_) => panic!("invalid constructor unexpectedly started"),
+                };
+                assert_eq!(failure.error, EncoderError::InvalidConfig);
+                let returned = failure
+                    .capacity
+                    .expect("safe constructor failure returns actual custody");
+                assert!(ACTIVE.load(Ordering::Acquire));
+                assert!(matches!(Permit::acquire(), Err(EncoderError::Busy)));
+                drop(returned);
+                assert!(!ACTIVE.load(Ordering::Acquire));
+            }
+        }
+        #[test]
+        fn failed_join_cannot_become_a_successful_retirement_on_retry() {
+            let mut encoder = Encoder::cleanup_test_encoder(PathBuf::new());
+            encoder.cleaned = true;
+            encoder.video = Some(thread::spawn(|| panic!("injected writer panic")));
+            assert_eq!(encoder.stop_retaining_capacity(), Err(EncoderError::Io));
+            assert!(encoder.join_failed);
+            assert_eq!(encoder.stop_retaining_capacity(), Err(EncoderError::Io));
+            assert_eq!(
+                encoder.take_retired_capacity().map(|_| ()),
+                Err(EncoderError::Io)
+            );
+        }
+        #[test]
+        fn uncertain_constructor_cleanup_quarantine_keeps_the_actual_capacity_owner() {
+            let _serial = Encoder::capacity_test_lock();
+            let directory = std::env::temp_dir().join(format!(
+                "ottplay-encoder-quarantine-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::write(&directory, b"injected non-directory cleanup failure").unwrap();
+            struct Cleanup(PathBuf);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    let _ = fs::remove_file(&self.0);
+                    let _ = fs::remove_dir_all(&self.0);
+                }
+            }
+            let _cleanup = Cleanup(directory.clone());
+            let mut encoder = Encoder::cleanup_test_encoder(directory.clone());
+            encoder.permit = Some(PermitTicket::direct(
+                Permit::acquire().expect("ordinary tests do not start native encoders"),
+            ));
+            assert_eq!(encoder.stop(), Err(EncoderError::Io));
+            assert!(encoder.permit.is_some());
+            // This is the same transfer used by Drop before it deliberately
+            // forgets the quarantine. Retain it here solely to repair this
+            // owned test path and release global test state after assertions.
+            let mut quarantine = encoder.take_quarantine();
+            assert!(quarantine.permit.is_some());
+            assert!(matches!(Permit::acquire(), Err(EncoderError::Busy)));
+            drop(encoder);
+            assert!(ACTIVE.load(Ordering::Acquire));
+            fs::remove_file(&directory).unwrap();
+            fs::create_dir(&directory).unwrap();
+            quarantine.stop().unwrap();
+            assert!(quarantine.permit.is_none());
+            assert!(!ACTIVE.load(Ordering::Acquire));
+        }
         #[test]
         fn timed_audio_receives_fixed_ticks_while_legacy_callback_remains_compatible() {
             let first = Instant::now();
@@ -3257,6 +3674,7 @@ mod runtime {
                 audio: None,
                 permit: None,
                 cleaned: true,
+                join_failed: false,
             };
             let snapshot = *lock(&shared.snapshot);
             let stop = shared.stop.load(Ordering::Acquire);
@@ -3529,6 +3947,7 @@ mod runtime {
                 audio: None,
                 permit: None,
                 cleaned: true,
+                join_failed: false,
             };
             let before = {
                 let state = feed.state.lock().unwrap();
@@ -4926,6 +5345,7 @@ mod runtime {
                 audio: None,
                 permit: None,
                 cleaned: true,
+                join_failed: false,
             };
             // Read the stored snapshot directly. Encoder::snapshot() computes
             // elapsed wall time, which is unrelated to getter mutation.
@@ -5033,6 +5453,7 @@ mod runtime {
                 audio: None,
                 permit: None,
                 cleaned: false,
+                join_failed: false,
             };
 
             assert_eq!(encoder.stop(), Err(EncoderError::Io));
@@ -5102,7 +5523,16 @@ mod runtime {
 }
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use runtime::Encoder;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use runtime::EncoderCapacity;
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) struct EncoderCapacity;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) struct SessionStartFailure {
+    pub(crate) error: EncoderError,
+    pub(crate) capacity: Option<EncoderCapacity>,
+}
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub struct Encoder;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -5131,6 +5561,22 @@ impl Encoder {
     ) -> Result<Self, EncoderError> {
         Err(EncoderError::Unsupported)
     }
+    pub(crate) fn reserve_output_capacity() -> Result<EncoderCapacity, EncoderError> {
+        Err(EncoderError::Unsupported)
+    }
+    pub(crate) fn start_session_capture_av(
+        _: EncoderConfig,
+        _: Arc<CaptureVideoFeed>,
+        _: TimedAudioFeed,
+        _: Arc<AtomicBool>,
+        capacity: EncoderCapacity,
+        _: bool,
+    ) -> Result<Self, SessionStartFailure> {
+        Err(SessionStartFailure {
+            error: EncoderError::Unsupported,
+            capacity: Some(capacity),
+        })
+    }
     pub fn failure(&self) -> Option<EncoderError> {
         None
     }
@@ -5157,10 +5603,35 @@ impl Encoder {
     pub fn stop(&mut self) -> Result<(), EncoderError> {
         Ok(())
     }
+    pub(crate) fn stop_retaining_capacity(&mut self) -> Result<(), EncoderError> {
+        Ok(())
+    }
+    pub(crate) fn take_retired_capacity(&mut self) -> Result<EncoderCapacity, EncoderError> {
+        Err(EncoderError::Unsupported)
+    }
 }
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl Drop for Encoder {
     fn drop(&mut self) {
         let _ = self.stop();
+    }
+}
+
+#[cfg(test)]
+mod lifetime_policy_tests {
+    use super::*;
+    #[test]
+    fn direct_encoder_limits_remain_finite_and_granted_limits_are_bounded() {
+        let seconds = Duration::from_secs;
+        assert!(valid_lifetime(seconds(300), seconds(60), false));
+        assert!(!valid_lifetime(seconds(301), seconds(60), false));
+        assert!(!valid_lifetime(seconds(300), seconds(61), false));
+        assert!(valid_lifetime(seconds(86_400), seconds(90), true));
+        assert!(!valid_lifetime(seconds(86_401), seconds(90), true));
+        assert!(!valid_lifetime(seconds(86_400), seconds(91), true));
+        for granted in [false, true] {
+            assert!(!valid_lifetime(Duration::ZERO, seconds(1), granted));
+            assert!(!valid_lifetime(seconds(1), Duration::ZERO, granted));
+        }
     }
 }

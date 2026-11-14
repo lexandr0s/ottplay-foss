@@ -10,6 +10,7 @@
     ["tests/test_mobile_orientation.py"],
     ["tests/test_multiview_unix_scope.py"],
     ["tests/test_multiview_unix_ci.py"],
+    ["tests/test_multiview_alpine_tools.py"],
     ["tests/test_python_suite_inventory.py"],
     ["tests/test_local_player_install.py"],
     ["tests/test_macos_instance_apps.py"],
