@@ -9,7 +9,8 @@
         tcpTimer = null,
         tcpGeneration = 0,
         rememberedFocus = null,
-        lastProbe = null;
+        lastProbe = null,
+        closeFeedback = "";
     var platform = window.OTTHomeWebOS.create(window);
     platform.installClose();
     function byId(id) {
@@ -89,15 +90,16 @@
         );
         text(
             "home-message",
-            ready
-                ? model.entities.length
-                    ? "Status from your configured home devices."
-                    : "No status devices configured on your gateway."
-                : state.status === "loading"
-                  ? "Loading home status…"
-                  : state.status === "acting"
-                    ? "Waiting for the gateway…"
-                    : "Home status unavailable. Check the Connection tab."
+            closeFeedback ||
+                (ready
+                    ? model.entities.length
+                        ? "Status from your configured home devices."
+                        : "No status devices configured on your gateway."
+                    : state.status === "loading"
+                      ? "Loading home status…"
+                      : state.status === "acting"
+                        ? "Waiting for the gateway…"
+                        : "Home status unavailable. Check the Connection tab.")
         );
         clear(elements);
         clear(actions);
@@ -251,6 +253,12 @@
     }
     function visible() {
         return !document.hidden && navigator.onLine !== false;
+    }
+    function closeUnavailable() {
+        closeFeedback =
+            "Return to OTT is unavailable. Open OTT from the TV launcher.";
+        text("home-message", closeFeedback);
+        syncVisibility();
     }
     function syncVisibility() {
         if (!visible()) cancelWork();
@@ -461,15 +469,11 @@
                 try {
                     window.OTTHomeHost.close(function (ok) {
                         if (ok === false) {
-                            text(
-                                "home-message",
-                                "Return to OTT is unavailable. Open OTT from the TV launcher."
-                            );
-                            syncVisibility();
+                            closeUnavailable();
                         }
                     });
                 } catch (ignored) {
-                    syncVisibility();
+                    closeUnavailable();
                 }
                 return;
             }

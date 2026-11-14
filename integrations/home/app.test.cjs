@@ -4,7 +4,7 @@ const test = require("node:test"),
     fs = require("node:fs"),
     vm = require("node:vm");
 const api = require("./core.js");
-function ui(overrides) {
+function ui(overrides, realClient = false) {
     const html = fs.readFileSync(__dirname + "/index.html", "utf8"),
         elements = {},
         windowEvents = {},
@@ -115,6 +115,20 @@ function ui(overrides) {
             ...api,
             createClient(options) {
                 render = options.onState;
+                if (realClient)
+                    return api.createClient({
+                        ...options,
+                        clock: {
+                            set(fn, ms) {
+                                const id = ++serial;
+                                timers.set(id, { fn, ms });
+                                return id;
+                            },
+                            clear(id) {
+                                timers.delete(id);
+                            },
+                        },
+                    });
                 return client;
             },
             xhrTransport() {
@@ -486,4 +500,45 @@ test("select keeps native option arrows and uses horizontal arrows to leave the 
     assert.equal(u.doc.activeElement, select);
     assert.equal(press(u, 461), true);
     assert.equal(u.doc.activeElement, u.nav[3]);
+});
+
+test("real client refresh cannot overwrite failed or throwing host-close feedback", () => {
+    for (const close of [
+        (done) => done(false),
+        () => {
+            throw new Error("host unavailable");
+        },
+    ]) {
+        const u = ui({ OTTHomeHost: { close } }, true);
+        u.elements.base.value = "https://gateway.example";
+        u.elements.key.value = "x".repeat(32);
+        u.elements["connection-form"].onsubmit({ preventDefault() {} });
+        const reply = () =>
+            u.requests.at(-1).done(null, {
+                text: JSON.stringify({
+                    version: 1,
+                    entities: [],
+                    actions: [],
+                    apps: [],
+                }),
+            });
+        reply();
+        assert.equal(u.elements.connection.textContent, "Home connected");
+        u.windowEvents.keydown({ keyCode: 461, preventDefault() {} });
+        const message =
+            "Return to OTT is unavailable. Open OTT from the TV launcher.";
+        assert.equal(u.elements.connection.textContent, "Connecting…");
+        assert.equal(u.elements["home-message"].textContent, message);
+        reply();
+        assert.equal(u.elements.connection.textContent, "Home connected");
+        assert.equal(u.elements["home-message"].textContent, message);
+        u.nav[2].onclick();
+        u.nav[0].onclick();
+        assert.equal(u.elements.connection.textContent, "Connecting…");
+        assert.equal(u.elements["home-message"].textContent, message);
+        reply();
+        assert.equal(u.elements["home-message"].textContent, message);
+        u.windowEvents.pagehide();
+        assert.equal(u.timers.size, 0);
+    }
 });
