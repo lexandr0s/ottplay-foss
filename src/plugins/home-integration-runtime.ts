@@ -156,11 +156,11 @@ export function installHomeIntegrationRuntime(w: any): any {
         };
         api = {
             active: owns,
-            focus: function (): void {
-                if (owns() && frame.focus) frame.focus();
-            },
             close: function (): void {
                 teardown(true);
+            },
+            focus: function (): void {
+                if (owns() && frame.focus) frame.focus();
             },
         };
         w.saveListPanelState();
@@ -180,9 +180,9 @@ export function installHomeIntegrationRuntime(w: any): any {
         if (w.MutationObserver) {
             observer = new w.MutationObserver(check);
             observer.observe(panel, {
-                childList: true,
-                attributes: true,
                 attributeFilter: ["style"],
+                attributes: true,
+                childList: true,
             });
         }
         // Retire even on legacy hosts without MutationObserver or a screen port.
@@ -191,9 +191,9 @@ export function installHomeIntegrationRuntime(w: any): any {
         return true;
     }
     return (w.__ottHomeRuntime = {
-        open: open,
         close: function (): void {
             if (current) current.close();
         },
+        open: open,
     });
 }

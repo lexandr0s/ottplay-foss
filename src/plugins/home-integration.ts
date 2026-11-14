@@ -76,7 +76,7 @@ export function installHomeIntegration(w: any): any {
         (d.head || d.documentElement).appendChild(script);
         return true;
     }
-    return (w.__ottHomeIntegration = { open: open, close: close });
+    return (w.__ottHomeIntegration = { close: close, open: open });
 }
 export function showHomeIntegration(w: any): boolean {
     return installHomeIntegration(w).open();
