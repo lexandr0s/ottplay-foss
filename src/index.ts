@@ -358,8 +358,8 @@ import {
     ottBandViewportHeight,
     ottBottomInfoBandStart,
 } from "./key-handler";
-import { createKiosk } from "./plugins/kiosk";
 import { showHomeIntegration } from "./plugins/home-integration";
+import { createKiosk } from "./plugins/kiosk";
 import { bindKioskScreen } from "./plugins/kiosk-screen";
 import { installRemoteInspection } from "./plugins/remote-inspect";
 // Provider — only import what actually exists
@@ -7723,8 +7723,10 @@ optionsArr.length = 0;
 var _o = window as any;
 optionsArr.push({ action: _o.settingsInterface, name: "Interface settings" });
 optionsArr.push({
-    action: function () { showHomeIntegration(window); },
-    name: "Home & network",
+    action: function () {
+        showHomeIntegration(window);
+    },
+    name: "Home",
 });
 optionsArr.push({ action: _o.settingsLists, name: "Lists settings" });
 optionsArr.push({ action: _o.settingsChannels, name: "Channel list settings" });
