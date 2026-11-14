@@ -359,6 +359,7 @@ import {
     ottBottomInfoBandStart,
 } from "./key-handler";
 import { createKiosk } from "./plugins/kiosk";
+import { showHomeIntegration } from "./plugins/home-integration";
 import { bindKioskScreen } from "./plugins/kiosk-screen";
 import { installRemoteInspection } from "./plugins/remote-inspect";
 // Provider — only import what actually exists
@@ -7721,6 +7722,10 @@ window.settingsCommands = function (): void {
 optionsArr.length = 0;
 var _o = window as any;
 optionsArr.push({ action: _o.settingsInterface, name: "Interface settings" });
+optionsArr.push({
+    action: function () { showHomeIntegration(window); },
+    name: "Home & network",
+});
 optionsArr.push({ action: _o.settingsLists, name: "Lists settings" });
 optionsArr.push({ action: _o.settingsChannels, name: "Channel list settings" });
 optionsArr.push({ action: _o.settingsInfobar, name: "Infobar settings" });

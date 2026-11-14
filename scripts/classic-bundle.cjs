@@ -188,6 +188,7 @@ const CLASSIC_MODULES = [
     "build/app/init.js",
     "build/app/device.js",
     "build/settings/sleep-timer.js",
+    "build/plugins/home-integration.js",
     "build/plugins/native-bridge.js",
     "build/plugins/native-memory.js",
     "build/plugins/web-fallback.js",
