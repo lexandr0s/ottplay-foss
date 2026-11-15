@@ -520,6 +520,52 @@ fn http(
     })
 }
 
+fn api_error_diagnostic(endpoint: &str, request_id: &str, bytes: &[u8]) -> String {
+    // Error responses are closed; never print arbitrary response authority fields.
+    let parsed = if bytes.len() <= 8192 {
+        serde_json::from_slice::<Value>(bytes).ok()
+    } else {
+        None
+    };
+    let code = parsed
+        .as_ref()
+        .filter(|value| value["version"] == 1)
+        .and_then(|value| value["error"].as_str())
+        .filter(|code| {
+            matches!(
+                *code,
+                "backend_unavailable"
+                    | "unsupported_platform"
+                    | "unauthorized"
+                    | "forbidden"
+                    | "invalid_request"
+                    | "revision_conflict"
+                    | "resource_limit"
+                    | "authority_revoked"
+            )
+        })
+        .unwrap_or("unrecognized_or_oversized_error");
+    let projected = serde_json::to_vec(&json!({"version":1,"error":code})).unwrap();
+    format!("operation={endpoint:?} request_id_sha256={:x} response_bytes={} response_sha256={:x} response={:?}",
+        Sha256::digest(request_id.as_bytes()),bytes.len(),Sha256::digest(bytes),
+        redacted_startup_tail(&projected,Path::new("/fixture-owned-root")))
+}
+
+#[test]
+fn api_failure_diagnostics_bind_request_hash_and_closed_redacted_response() {
+    let request = "secret-request-marker";
+    let bytes = br#"{"version":1,"error":"invalid_request","input_grant":"secret-response-grant"}"#;
+    let diagnostic = api_error_diagnostic("sessions", request, bytes);
+    assert!(
+        diagnostic.contains("invalid_request")
+            && diagnostic.contains(&format!("{:x}", Sha256::digest(request.as_bytes())))
+    );
+    assert!(!diagnostic.contains(request) && !diagnostic.contains("secret-response-grant"));
+    let malicious = format!("{{\"version\":1,\"error\":\"{}\"}}", TOKEN);
+    assert!(!api_error_diagnostic("sessions", request, malicious.as_bytes()).contains(TOKEN));
+    assert!(api_error_diagnostic("sessions", request, &vec![b'x'; 8193]).contains("oversized"));
+}
+
 fn post(base: &str, endpoint: &str, token: &str, id: &str, body: &Value) -> Value {
     let (status, bytes) = http(
         "POST",
@@ -535,8 +581,10 @@ fn post(base: &str, endpoint: &str, token: &str, id: &str, body: &Value) -> Valu
             .fetch_add(1, Ordering::Relaxed);
     }
     assert_eq!(
-        status, 200,
-        "private API operation {endpoint} returned HTTP {status}"
+        status,
+        200,
+        "private API operation {endpoint} returned HTTP {status}; {}",
+        api_error_diagnostic(endpoint, id, &bytes)
     );
     serde_json::from_slice(&bytes).expect("valid private API response JSON")
 }
@@ -709,13 +757,85 @@ fn disjoint_geometry(slot_count: usize) -> Value {
             .map(|slot| {
                 let column = slot % 3;
                 let row = slot / 3;
-                let x = [0, 214, 427][column];
-                let width = [214, 213, 213][column];
+                let x = [0, 214, 428][column];
+                let width = [214, 214, 212][column];
                 json!({"slot_id":slot,"x":x,"y":row * 120,"width":width,"height":120,"z":slot})
             })
             .collect()
     };
     json!({"canvas":{"width":640,"height":360,"fps":10},"revision":1,"mode":"disjoint","rects":rects})
+}
+
+fn validate_fixture_geometry(
+    value: Value,
+) -> Result<
+    ottplay_core::multiview::geometry::ValidatedGeometry,
+    ottplay_core::multiview::geometry::GeometryError,
+> {
+    use ottplay_core::multiview::{
+        broker::wire::Geometry,
+        geometry::{CanvasSpec, ImportedRect, OverlapPolicy, ValidatedGeometry},
+    };
+    let value: Geometry =
+        serde_json::from_value(value).expect("fixture geometry uses actual production DTO");
+    let rects: Vec<_> = value
+        .rects
+        .iter()
+        .map(|r| ImportedRect {
+            slot_id: r.slot_id,
+            x: r.x,
+            y: r.y,
+            width: r.width,
+            height: r.height,
+            z: r.z,
+        })
+        .collect();
+    ValidatedGeometry::new(
+        CanvasSpec {
+            width: value.canvas.width,
+            height: value.canvas.height,
+            fps: value.canvas.fps,
+        },
+        value.revision,
+        &rects,
+        OverlapPolicy::Disjoint,
+    )
+}
+
+#[test]
+fn two_slot_fixture_geometry_passes_actual_core_validation() {
+    let geometry = validate_fixture_geometry(disjoint_geometry(2)).unwrap();
+    assert_eq!(geometry.rects().len(), 2);
+    assert_eq!(geometry.canvas().width, 640);
+}
+
+#[test]
+fn nine_slot_fixture_geometry_passes_actual_core_and_old_odd_grid_is_rejected() {
+    use ottplay_core::multiview::geometry::GeometryError;
+    let geometry = validate_fixture_geometry(disjoint_geometry(9)).unwrap();
+    assert_eq!(geometry.rects().len(), 9);
+    assert_eq!(
+        geometry
+            .rects()
+            .iter()
+            .map(|r| u64::from(r.width) * u64::from(r.height))
+            .sum::<u64>(),
+        640 * 360
+    );
+    assert_eq!(
+        geometry
+            .rects()
+            .iter()
+            .map(|r| (r.slot_id, r.z))
+            .collect::<Vec<_>>(),
+        (0..9).map(|id| (id, id)).collect::<Vec<_>>()
+    );
+    let mut old = disjoint_geometry(9);
+    old["rects"][1]["width"] = json!(213);
+    assert_eq!(
+        validate_fixture_geometry(old).err(),
+        Some(GeometryError::InvalidRect)
+    );
 }
 
 fn native_for_slot(slot: u64) -> Value {

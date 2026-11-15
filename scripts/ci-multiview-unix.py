@@ -1,5 +1,6 @@
 """Bounded Unix synthetic qualification of the selected multiview profile and adapters."""
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -13,6 +14,7 @@ import stat
 import struct
 import sys
 import time
+import uuid
 
 sys.dont_write_bytecode = True
 GUARD_SHA256 = '6f623bb7234b3619ff859dec0afe9c1ad938f29d606f0836b69434312867e020'
@@ -22,6 +24,9 @@ HLS_BATCH_SHA256 = '967ceaa7e7478c2488c3a984d4a4a15f968226ef82a7cd065b4a93b84aa1
 PRODUCTION_TEST = 'normal_server_private_http_mpegts_renew_replace_and_cleanup'
 HLS_PRODUCTION_TEST = 'normal_server_private_http_hls_renew_replace_and_cleanup'
 PRODUCTION_ORDINARY_TESTS = frozenset({
+    'two_slot_fixture_geometry_passes_actual_core_validation',
+    'nine_slot_fixture_geometry_passes_actual_core_and_old_odd_grid_is_rejected',
+    'api_failure_diagnostics_bind_request_hash_and_closed_redacted_response',
     'production_tls::leaf_request_has_explicit_distinguished_name_for_openssl_1_1_and_3',
     'startup_diagnostic_tail_is_bounded_and_redacts_fixture_secrets_and_urls',
     'hls_production::tests::starts_with_three_complete_and_slides_six_without_exposing_future',
@@ -1116,15 +1121,226 @@ def run_core_rotation_fixture(driver, command, executable, tools, prepared_input
                 driver.env[key] = value
 
 
+def custody_identity(path):
+    info = path.lstat()
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_uid, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
+def custody_directory_identity(path):
+    info = path.lstat()
+    require(stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700
+            and info.st_uid == os.geteuid(), 'Owned tool directory shape changed')
+    return info.st_dev, info.st_ino, info.st_mode, info.st_uid
+
+
+@contextlib.contextmanager
+def production_tool_custody(driver, budget, command, tools, output):
+    """Copy only selected fingerprinted bytes; never relax the normal loader."""
+    home_proof = activation_home_preflight(driver, budget)
+    home = Path(home_proof['parent'])
+    home_size_before = home.lstat().st_size
+    root = home / ('.ottplay-multiview-tools-' + uuid.uuid4().hex)
+    probe_cwd = root / 'probe-cwd'
+    probe_cwd_before = None
+    root_created = False
+    root_before = None
+    reservation = output / 'production-tool-custody-reservation'
+    reservation_before = None
+    reservation_owner = None
+    command_start = len(driver.commands)
+    staged, originals = {}, {}
+    fifo_names = ('explicit-mode.fifo', 'default-mode.fifo')
+    receipt = {'schema': 'ottplay.multiview.tool-custody.v1', 'root': str(root),
+               'home': home_proof, 'home_size_before': home_size_before,
+               'tools': {}, 'cleanup_confirmed': False,
+               'transitive_shared_library_custody_qualified': False,
+               'original_tools_provenance_preserved': True,
+               'optional_otool_not_run': True}
+    try:
+        root.mkdir(mode=0o700)
+        root_created = True
+        root_before = custody_directory_identity(root)
+        probe_cwd.mkdir(mode=0o700)
+        probe_cwd_before = custody_directory_identity(probe_cwd)
+        receipt['probe_cwd_identity'] = probe_cwd_before
+        with contextlib.ExitStack() as stack:
+            opened = {}
+            for name in ('ffmpeg', 'ffprobe', 'mkfifo'):
+                original = tools[name]
+                require(type(original['bytes']) is int and 0 < original['bytes'] <= 64 * 1024**2,
+                        'Selected tool exceeds private copy bound')
+                current = system_tool_identity(Path(original['requested_path']), budget, cap=64 * 1024**2)
+                require(all(original[key] == value for key, value in current.items()), 'Tool executable identity changed')
+                source = Path(current['path'])
+                stream = stack.enter_context(os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb'))
+                info = os.fstat(stream.fileno())
+                require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid in (0, os.geteuid())
+                        and info.st_mode & 0o111 and not info.st_mode & 0o022
+                        and 0 < info.st_size == current['bytes'] <= 64 * 1024**2
+                        and info.st_dev == current['device'] and info.st_ino == current['inode'], 'Selected source FD is not trusted')
+                opened[name] = (stream, info)
+                originals[name] = current
+            total = sum(info.st_size for _, info in opened.values())
+            require(total <= 192 * 1024**2 and shutil.disk_usage(home).free >= 4 * 1024**3 + total + 65536,
+                    'Owned tool copy resource bound exceeded')
+            # Driver.sample counts logical st_size: charge the HOME copies to
+            # the unchanged attempt growth cap BEFORE writing any copied bytes.
+            with reservation.open('xb') as stream:
+                info = os.fstat(stream.fileno())
+                reservation_owner = (info.st_dev, info.st_ino, info.st_uid)
+                stream.truncate(total + 65536)
+                stream.flush()
+                os.fsync(stream.fileno())
+            reservation.chmod(0o400)
+            reservation_before = custody_identity(reservation)
+            require(reservation_before[5] == total + 65536, 'Tool-copy growth reservation differs')
+            driver.sample()
+            for name, (source, before) in opened.items():
+                destination = root / name
+                digest = hashlib.sha256()
+                count = 0
+                with destination.open('xb') as target:
+                    destination.chmod(0o600)
+                    while block := source.read(65536):
+                        budget.tick()
+                        count += len(block)
+                        require(count <= before.st_size, 'Selected tool grew during copy')
+                        target.write(block)
+                        digest.update(block)
+                    target.flush()
+                    os.fsync(target.fileno())
+                destination.chmod(0o500)
+                after = os.fstat(source.fileno())
+                require((before.st_dev, before.st_ino, before.st_mode, before.st_nlink, before.st_uid,
+                         before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+                        (after.st_dev, after.st_ino, after.st_mode, after.st_nlink, after.st_uid,
+                         after.st_size, after.st_mtime_ns, after.st_ctime_ns), 'Source FD changed during copy')
+                require(count == before.st_size and digest.hexdigest() == originals[name]['sha256'], 'Copied supplier bytes differ')
+                current = system_tool_identity(destination, budget)
+                info = destination.lstat()
+                require(info.st_uid == os.geteuid() and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o500
+                        and current['sha256'] == originals[name]['sha256'] and current['bytes'] == before.st_size,
+                        'Staged executable custody differs')
+                staged[name] = current
+                receipt['tools'][name] = {'original': originals[name], 'staged': current}
+            require(activation_home_preflight(driver, budget) == home_proof, 'Tool HOME ancestry changed')
+            require(custody_directory_identity(root) == root_before and root.lstat().st_uid == os.geteuid()
+                    and stat.S_IMODE(root.lstat().st_mode) == 0o700, 'Owned tool directory changed')
+        def verify():
+            budget.tick()
+            require(activation_home_preflight(driver, budget) == home_proof, 'Tool HOME ancestry changed')
+            require(custody_directory_identity(root) == root_before
+                    and custody_directory_identity(probe_cwd) == probe_cwd_before and not list(probe_cwd.iterdir()),
+                    'Owned tool directory or empty probe working directory changed')
+            metadata_bytes = root.lstat().st_size + probe_cwd.lstat().st_size + max(0, home.lstat().st_size - home_size_before)
+            require(metadata_bytes <= 65536, 'Owned tool HOME/root metadata reservation exceeded')
+            receipt['observed_copy_metadata_bytes'] = metadata_bytes
+            require(custody_identity(reservation) == reservation_before, 'Tool growth reservation changed')
+            require(all(item.get('cleanup_confirmed') for item in driver.commands[command_start:]),
+                    'Owned process cleanup unknown; production tools retained')
+            for item in staged.values():
+                require(system_tool_identity(Path(item['path']), budget) == item, 'Staged executable identity changed')
+
+        def checked_command(name, args, seconds=15):
+            verify()
+            text = command(name, args, seconds)
+            verify()
+            return text
+
+        def runtime_probe(name, args, seconds):
+            # Core Command inherits the normal server's env/cwd. The fixture
+            # starts that server with env_clear + only HOME and synthetic EPG.
+            # Probe in an empty private directory, never the repo/Brew cwd.
+            previous_env, previous_root = driver.env, driver.root
+            try:
+                driver.env = {'HOME': str(home), 'EPG_URLS': 'http://127.0.0.1:1/fixture-unavailable'}
+                driver.root = probe_cwd
+                return checked_command(name, args, seconds)
+            finally:
+                driver.env, driver.root = previous_env, previous_root
+
+        receipt['runtime_probe_environment_keys'] = ['EPG_URLS', 'HOME']
+        receipt['runtime_probe_cwd'] = str(probe_cwd)
+        receipt['runtime_probe_matches_normal_server_env_clear'] = True
+        verify()
+        for name in ('ffmpeg', 'ffprobe'):
+            text = runtime_probe('production-custody-' + name + '-version', [staged[name]['path'], '-version'], 15)
+            require(len(text.encode()) <= 65536 and text.startswith(name + ' version '), 'Staged supplier cannot execute: ' + name)
+        for index, name in enumerate(fifo_names):
+            path = root / name
+            args = [staged['mkfifo']['path']] + (['-m', '600'] if index == 0 else []) + [str(path)]
+            runtime_probe('production-custody-mkfifo-' + str(index), args, 10)
+            info = path.lstat()
+            require(stat.S_ISFIFO(info.st_mode) and info.st_uid == os.geteuid() and info.st_nlink == 1,
+                    'Staged mkfifo did not create an owned FIFO')
+            if index == 0:
+                require(stat.S_IMODE(info.st_mode) == 0o600, 'Staged mkfifo ignored explicit permissions')
+            receipt.setdefault('fifo_probes', []).append({'mode': oct(stat.S_IMODE(info.st_mode)), 'owned_fifo': True})
+            path.unlink()
+        receipt['runtime_probes_passed'] = True
+        receipt['copied_bytes'] = total
+        receipt['directory_metadata_reserved_bytes'] = 65536
+        receipt['reserved_bytes'] = total + 65536
+        budget.json_evidence(driver.evidence / 'production-tool-custody.json', receipt)
+        yield staged, checked_command
+        for name, item in staged.items():
+            require(system_tool_identity(Path(item['path']), budget) == item, 'Staged executable identity changed')
+            observed = system_tool_identity(Path(tools[name]['requested_path']), budget)
+            require(observed == originals[name], 'Original supplier changed during production fixtures')
+    finally:
+        errors = []
+        try:
+            require(all(item.get('cleanup_confirmed') for item in driver.commands[command_start:]),
+                    'Owned process cleanup unknown; production tools retained')
+            require(root_created and root_before is not None and custody_directory_identity(root) == root_before,
+                    'Owned tool directory custody changed or unconfirmed')
+            entries = list(root.iterdir())
+            require({path.name for path in entries} <= {'ffmpeg', 'ffprobe', 'mkfifo', 'probe-cwd', *fifo_names}, 'Unknown tool-custody entry retained')
+            if probe_cwd.exists() or probe_cwd.is_symlink():
+                require(probe_cwd_before is not None and custody_directory_identity(probe_cwd) == probe_cwd_before
+                        and not list(probe_cwd.iterdir()), 'Uncertain probe working directory retained')
+            for path in entries:
+                if path == probe_cwd:
+                    continue
+                info = path.lstat()
+                require(info.st_uid == os.geteuid() and info.st_nlink == 1
+                        and (stat.S_ISREG(info.st_mode) if path.name in ('ffmpeg', 'ffprobe', 'mkfifo') else stat.S_ISFIFO(info.st_mode)),
+                        'Uncertain tool-custody file retained')
+            if reservation_owner is not None:
+                info = reservation.lstat()
+                require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                        and (info.st_dev, info.st_ino, info.st_uid) == reservation_owner, 'Tool growth reservation ownership changed')
+            if reservation_before is not None:
+                require(custody_identity(reservation) == reservation_before, 'Tool growth reservation changed')
+            for path in entries:
+                if path == probe_cwd:
+                    path.rmdir()
+                else:
+                    path.unlink()
+            root.rmdir()
+            if reservation_owner is not None:
+                reservation.unlink()
+            receipt['cleanup_confirmed'] = True
+        except (OSError, RuntimeError) as error:
+            errors.append(str(error))
+        receipt['cleanup_errors'] = errors
+        budget.json_evidence(driver.evidence / 'production-tool-custody-cleanup.json', receipt, cleanup=True)
+        require(not errors, 'Owned production tool cleanup uncertain: ' + '; '.join(errors))
+
+
 def run_production_fixture(driver, budget, command, executable, tools, result, output, prepared_inputs=None):
     staged = {}
-    _run_production_mode(driver, budget, command, executable, tools, staged, output, hls=False, prepared_inputs=prepared_inputs)
-    _run_production_mode(driver, budget, command, executable, tools, staged, output, hls=True)
-    # No terminal admission/media flags publish until BOTH exact modes qualify.
+    with production_tool_custody(driver, budget, command, tools, output) as (runtime_tools, checked_command):
+        _run_production_mode(driver, budget, checked_command, executable, tools, staged, output, hls=False,
+                             prepared_inputs=prepared_inputs, runtime_tools=runtime_tools)
+        _run_production_mode(driver, budget, checked_command, executable, tools, staged, output, hls=True,
+                             runtime_tools=runtime_tools)
+    # Flags publish only after BOTH modes AND actual owned tool cleanup qualify.
     result.update(staged)
 
 
-def _run_production_mode(driver, budget, command, executable, tools, result, output, *, hls, prepared_inputs=None):
+def _run_production_mode(driver, budget, command, executable, tools, result, output, *, hls, prepared_inputs=None, runtime_tools=None):
     """Run one exact normal-server mode under its unchanged600-second bound."""
     name = HLS_PRODUCTION_TEST if hls else PRODUCTION_TEST
     label = 'production-live-hls-server' if hls else 'production-normal-server'
@@ -1171,11 +1387,12 @@ def _run_production_mode(driver, budget, command, executable, tools, result, out
                 'OTTPLAY_MULTIVIEW_OPENSSL', 'OTTPLAY_MULTIVIEW_PRODUCTION_HLS_INPUTS')
     previous = {key: driver.env.get(key) for key in env_keys}
     try:
+        runtime_tools = runtime_tools or tools
         driver.env.update(OTTPLAY_MULTIVIEW_PRODUCTION_INPUTS=str(manifest_path),
                           OTTPLAY_MULTIVIEW_PRODUCTION_RECEIPT=str(receipt_path),
-                          OTTPLAY_MULTIVIEW_FFMPEG=tools['ffmpeg']['path'],
-                          OTTPLAY_MULTIVIEW_FFPROBE=tools['ffprobe']['path'],
-                          OTTPLAY_MULTIVIEW_MKFIFO=tools['mkfifo']['path'],
+                          OTTPLAY_MULTIVIEW_FFMPEG=runtime_tools['ffmpeg']['path'],
+                          OTTPLAY_MULTIVIEW_FFPROBE=runtime_tools['ffprobe']['path'],
+                          OTTPLAY_MULTIVIEW_MKFIFO=runtime_tools['mkfifo']['path'],
                           OTTPLAY_MULTIVIEW_OPENSSL=tools['openssl']['path'])
         if hls:
             driver.env['OTTPLAY_MULTIVIEW_PRODUCTION_HLS_INPUTS'] = str(manifest_path)

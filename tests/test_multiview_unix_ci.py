@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import stat
 from pathlib import Path
 import sys
@@ -391,6 +392,10 @@ class Attempt:
                                       'cleanup_confirmed': attempt.case != 'unknown-cleanup'
                                       and not (name == 'broker-ordinary' and attempt.case == 'broker-cleanup-unknown')
                                       and not (name == 'listener-ordinary' and attempt.case == 'listener-cleanup-unknown')})
+                if name.startswith('production-custody-'):
+                    attempt.tool_probe_contexts=getattr(attempt,'tool_probe_contexts',[])+[(dict(self.env),self.root)]
+                if name in ('production-normal-server','production-live-hls-server'):
+                    attempt.production_tool_envs=getattr(attempt,'production_tool_envs',[])+[dict(self.env)]
                 if name == 'fixture-pending-clock':
                     attempt.pending_env = dict(self.env)
                 rotation_command = 'core-ignored-' + hashlib.sha256(ci.CORE_ROTATION_TEST.encode()).hexdigest()[:12]
@@ -443,6 +448,15 @@ class Attempt:
         return self.stack.__exit__(*args)
 
     def response(self, name, argv):
+        if name.startswith('production-custody-'):
+            if name.endswith('-version'):
+                tool='ffprobe' if 'ffprobe' in name else 'ffmpeg'
+                if self.case=='staged-version-unusable':return 'loader could not resolve supplier library\n'
+                return tool+' version synthetic-owned-copy-never-executed\n'
+            if name.startswith('production-custody-mkfifo-'):
+                if self.case=='staged-mkfifo-not-fifo':Path(argv[-1]).write_bytes(b'not a FIFO')
+                else:os.mkfifo(argv[-1],0o600 if '-m' in argv else 0o644)
+                return ''
         if name.startswith('pending-generate-'):
             if self.case != 'pending-missing-input':
                 Path(argv[-1]).write_bytes(b'synthetic pending TS payload: ' + name.encode())
@@ -2083,10 +2097,13 @@ class MockMainTests(unittest.TestCase):
                     self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
 
     def test_normal_fixture_credential_and_startup_diagnostic_units_are_mandatory(self):
-        required={'startup_diagnostic_tail_is_bounded_and_redacts_fixture_secrets_and_urls',
+        required={'two_slot_fixture_geometry_passes_actual_core_validation',
+                  'nine_slot_fixture_geometry_passes_actual_core_and_old_odd_grid_is_rejected',
+                  'api_failure_diagnostics_bind_request_hash_and_closed_redacted_response',
+                  'startup_diagnostic_tail_is_bounded_and_redacts_fixture_secrets_and_urls',
                   'production_tls::leaf_request_has_explicit_distinguished_name_for_openssl_1_1_and_3'}
         self.assertTrue(required <= ci.PRODUCTION_ORDINARY_TESTS)
-        self.assertEqual(len(ci.PRODUCTION_ORDINARY_TESTS),5)
+        self.assertEqual(len(ci.PRODUCTION_ORDINARY_TESTS),8)
         for missing in required:
             with self.subTest(missing=missing), Attempt() as attempt:
                 original=attempt.response
@@ -2098,6 +2115,126 @@ class MockMainTests(unittest.TestCase):
                 with mock.patch.object(attempt,'response',side_effect=response), self.assertRaises(RuntimeError):attempt.run()
                 self.assertFalse(attempt.terminal()['normal_server_hls_to_hls'])
                 self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
+
+    def test_private_tool_custody_preserves_selected_bytes_without_uploading_binaries(self):
+        with Attempt() as attempt:
+            attempt.run()
+            receipt=json.loads((attempt.output/'evidence/production-tool-custody.json').read_text())
+            cleanup=json.loads((attempt.output/'evidence/production-tool-custody-cleanup.json').read_text())
+            self.assertFalse(receipt['transitive_shared_library_custody_qualified'])
+            self.assertTrue(cleanup['cleanup_confirmed'])
+            self.assertFalse(Path(receipt['root']).exists())
+            self.assertFalse((attempt.output/'production-tool-custody-reservation').exists())
+            self.assertEqual(receipt['copied_bytes'],sum(Path(attempt.supplied[n]).stat().st_size for n in ('ffmpeg','ffprobe','mkfifo')))
+            self.assertEqual(receipt['reserved_bytes'],receipt['copied_bytes']+65536)
+            for name,row in receipt['tools'].items():
+                self.assertEqual(row['staged']['sha256'],row['original']['sha256'])
+                self.assertEqual(stat.S_IMODE(row['staged']['mode']),0o500)
+                self.assertEqual(row['staged']['nlink'],1)
+                self.assertNotEqual(row['staged']['path'],row['original']['path'])
+                key={'ffmpeg':'OTTPLAY_MULTIVIEW_FFMPEG','ffprobe':'OTTPLAY_MULTIVIEW_FFPROBE','mkfifo':'OTTPLAY_MULTIVIEW_MKFIFO'}[name]
+                self.assertTrue(all(env[key]==row['staged']['path'] for env in attempt.production_tool_envs))
+            self.assertEqual(len(receipt['fifo_probes']),2)
+            self.assertEqual(receipt['fifo_probes'][0]['mode'],'0o600')
+            names=[row['name'] for row in attempt.driver.commands]
+            self.assertTrue({'production-custody-ffmpeg-version','production-custody-ffprobe-version',
+                'production-custody-mkfifo-0','production-custody-mkfifo-1'}<=set(names))
+            self.assertLess(names.index('production-custody-ffprobe-version'),names.index('production-normal-server'))
+
+    def test_unrunnable_staged_supplier_and_nonfifo_probe_fail_closed_without_fallback(self):
+        for case in ('staged-version-unusable','staged-mkfifo-not-fifo'):
+            with self.subTest(case=case), Attempt(case) as attempt:
+                with self.assertRaises(RuntimeError):attempt.run()
+                self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
+                self.assertFalse(any(row['name']=='production-normal-server' for row in attempt.driver.commands))
+                cleanup=json.loads((attempt.output/'evidence/production-tool-custody-cleanup.json').read_text())
+                # A non-FIFO at an owned FIFO name is retained as uncertain, never swept.
+                self.assertEqual(cleanup['cleanup_confirmed'],case!='staged-mkfifo-not-fifo')
+
+    def test_uncertain_process_cleanup_retains_owned_tools_and_growth_charge(self):
+        with Attempt() as attempt:
+            original=attempt.response
+            def response(name,argv):
+                text=original(name,argv)
+                if name=='production-normal-server':attempt.driver.commands[-1]['cleanup_confirmed']=False
+                return text
+            with mock.patch.object(attempt,'response',side_effect=response), self.assertRaises(RuntimeError):attempt.run()
+            cleanup=json.loads((attempt.output/'evidence/production-tool-custody-cleanup.json').read_text())
+            self.assertFalse(cleanup['cleanup_confirmed'])
+            self.assertTrue(Path(cleanup['root']).is_dir())
+            self.assertEqual((attempt.output/'production-tool-custody-reservation').stat().st_size,cleanup['reserved_bytes'])
+            self.assertFalse(any(row['name']=='production-live-hls-server' for row in attempt.driver.commands))
+            self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
+
+    def test_selected_source_mutation_and_changed_reservation_deny_before_native_qualification(self):
+        for fault in ('source','reservation'):
+            with self.subTest(fault=fault), Attempt() as attempt:
+                original_chmod=Path.chmod
+                fired=False
+                def chmod(path,mode,*args,fault=fault,original_chmod=original_chmod,**kwargs):
+                    nonlocal fired
+                    result=original_chmod(path,mode,*args,**kwargs)
+                    if not fired and mode==0o500 and path.name=='ffmpeg' and path.parent.name.startswith('.ottplay-multiview-tools-'):
+                        fired=True
+                        if fault=='source':Path(attempt.supplied['ffmpeg']).write_bytes(b'changed selected source')
+                        else:
+                            reservation=attempt.output/'production-tool-custody-reservation'
+                            original_chmod(reservation,0o600)
+                            with reservation.open('r+b') as stream:stream.truncate(0)
+                    return result
+                with mock.patch.object(Path,'chmod',chmod), self.assertRaises(RuntimeError):attempt.run()
+                self.assertTrue(fired)
+                self.assertFalse(any(row['name']=='production-normal-server' for row in attempt.driver.commands))
+                self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
+                cleanup=json.loads((attempt.output/'evidence/production-tool-custody-cleanup.json').read_text())
+                self.assertEqual(cleanup['cleanup_confirmed'],fault=='source')
+
+    def test_staged_probes_use_normal_cleared_environment_and_empty_private_cwd(self):
+        with Attempt() as attempt:
+            original=attempt.response
+            def response(name,argv):
+                text=original(name,argv)
+                if name=='fixture-3':
+                    attempt.driver.env.update(LD_PRELOAD='poison',DYLD_LIBRARY_PATH='poison',
+                        DYLD_INSERT_LIBRARIES='poison',HTTPS_PROXY='poison',FFREPORT='poison')
+                return text
+            with mock.patch.object(attempt,'response',side_effect=response):attempt.run()
+            self.assertEqual(len(attempt.tool_probe_contexts),4)
+            for env,cwd in attempt.tool_probe_contexts:
+                self.assertEqual(set(env),{'HOME','EPG_URLS'})
+                self.assertEqual(env['HOME'],str(attempt.home))
+                self.assertEqual(env['EPG_URLS'],'http://127.0.0.1:1/fixture-unavailable')
+                self.assertEqual(cwd.name,'probe-cwd')
+                self.assertNotEqual(cwd,attempt.root)
+            self.assertEqual(attempt.driver.env['LD_PRELOAD'],'poison')
+            self.assertEqual(attempt.driver.root,attempt.root)
+            receipt=json.loads((attempt.output/'evidence/production-tool-custody-cleanup.json').read_text())
+            self.assertTrue(receipt['runtime_probe_matches_normal_server_env_clear'])
+            self.assertLessEqual(receipt['observed_copy_metadata_bytes'],65536)
+
+    def test_probe_env_contract_matches_actual_normal_binary_launch_source(self):
+        source=(ROOT/'src-rs/server/tests/multiview_production.rs').read_text()
+        launch=source.split('let mut server = ChildGuard(',1)[1].split('.spawn()',1)[0]
+        self.assertIn('.env_clear()',launch)
+        self.assertIn('.current_dir(&public)',launch)
+        self.assertEqual(set(re.findall(r'\.env\(\s*"([^"\n]+)"',launch)),{'HOME','EPG_URLS'})
+        self.assertRegex(launch,r'\.env\("HOME",\s*secure_home\(\)\)')
+        value=re.search(r'\.env\("EPG_URLS",\s*"([^"]+)"\)',launch).group(1)
+        self.assertEqual(value,'http://127.0.0.1:1/fixture-unavailable')
+
+    def test_positive_home_parent_growth_is_included_in_metadata_reservation(self):
+        with Attempt() as attempt:
+            original_lstat=Path.lstat
+            def lstat(path,*args,**kwargs):
+                value=original_lstat(path,*args,**kwargs)
+                if path==attempt.home and list(attempt.home.glob('.ottplay-multiview-tools-*')):
+                    fields={key:getattr(value,key) for key in ('st_mode','st_uid','st_dev','st_ino','st_nlink','st_mtime_ns','st_ctime_ns')}
+                    fields['st_size']=value.st_size+65536
+                    return types.SimpleNamespace(**fields)
+                return value
+            with mock.patch.object(Path,'lstat',lstat), self.assertRaises(RuntimeError):attempt.run()
+            self.assertFalse(any(row['name']=='production-normal-server' for row in attempt.driver.commands))
+            self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
 
     def test_mock_driver_log_names_are_exclusive_before_any_response_or_overwrite(self):
         with Attempt() as attempt:
