@@ -104,6 +104,24 @@ pub(crate) struct NetworkDocument {
     private_addresses: Vec<IpAddr>,
     #[serde(default)]
     allow_public_http: bool,
+    #[serde(default)]
+    allow_private_http: bool,
+}
+impl NetworkDocument {
+    fn build_origin_rule(&self) -> Result<OriginRule, ()> {
+        let origin = Url::parse(&self.origin).map_err(|_| ())?;
+        if self.allow_public_http && self.allow_private_http
+            || (self.allow_public_http || self.allow_private_http) && origin.scheme() != "http"
+            || self.allow_public_http && !self.private_addresses.is_empty()
+        {
+            return Err(());
+        }
+        if self.allow_private_http {
+            OriginRule::private_only(&self.origin, &self.private_addresses).map_err(|_| ())
+        } else {
+            OriginRule::new(&self.origin, &self.private_addresses).map_err(|_| ())
+        }
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -247,7 +265,7 @@ impl MediaDocument {
                 || origins
                     .insert(
                         rule.origin.clone(),
-                        OriginRule::new(&rule.origin, &rule.private_addresses)
+                        rule.build_origin_rule()
                             .map_err(|_| invalid("invalid network policy"))?,
                     )
                     .is_some()
@@ -296,7 +314,7 @@ impl MediaDocument {
                 // Public HTTP is a protected per-origin opt-in. Its empty
                 // private allowlist still requires every DNS answer to be public.
                 // Otherwise preserve the explicitly enrolled private-literal path.
-                if !rule.allow_public_http {
+                if !rule.allow_public_http && !rule.allow_private_http {
                     let peer = private_literal.ok_or_else(|| invalid("cleartext source denied"))?;
                     if !rule.private_addresses.contains(&peer) {
                         return Err(invalid("cleartext source denied"));
@@ -395,7 +413,7 @@ impl MediaConfig {
             let network_rules = self
                 .network
                 .iter()
-                .map(|rule| OriginRule::new(&rule.origin, &rule.private_addresses))
+                .map(|rule| rule.build_origin_rule())
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| invalid("invalid network policy"))?;
             let policy =
@@ -556,6 +574,7 @@ mod tests {
                 origin: origin.into(),
                 private_addresses,
                 allow_public_http: false,
+                allow_private_http: false,
             }],
             items: vec![ItemDocument {
                 input_adapter: ADAPTER.into(),
@@ -669,6 +688,7 @@ mod tests {
             origin: "https://unused.example".into(),
             private_addresses: vec![],
             allow_public_http: false,
+            allow_private_http: false,
         });
         assert!(unused.validate(&operator()).is_err());
 
@@ -750,6 +770,7 @@ mod tests {
             origin: "http://unused.example".into(),
             private_addresses: vec![private],
             allow_public_http: true,
+            allow_private_http: false,
         });
         assert!(unused.validate(&operator()).is_err());
         let mut no_token = document(
@@ -790,6 +811,119 @@ mod tests {
         }
         assert!(serde_json::from_value::<NetworkDocument>(
             serde_json::json!({"origin":"http://media.example", "allow_http":true})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn private_http_requires_exact_protected_consent_and_keeps_bearer_consent() {
+        let peer = "192.168.2.4".parse().unwrap();
+        assert!(document(
+            "http://media.example/live.m3u8",
+            "http://media.example",
+            vec![peer]
+        )
+        .validate(&operator())
+        .is_err());
+        let mut allowed = document(
+            "http://media.example/live.m3u8",
+            "http://media.example",
+            vec![peer],
+        );
+        allowed.network[0].allow_private_http = true;
+        assert!(allowed.validate(&operator()).is_ok());
+        let mut secret = document(
+            "http://media.example/live.m3u8?token=synthetic-url-secret",
+            "http://media.example",
+            vec![peer],
+        );
+        secret.network[0].allow_private_http = true;
+        secret.items[0].bearer_token = Some("synthetic-bearer-secret".into());
+        let error = secret.validate(&operator()).err().unwrap().to_string();
+        assert!(!error.contains("synthetic") && !error.contains("media.example"));
+        let mut credential = document(
+            "http://media.example/live.m3u8",
+            "http://media.example",
+            vec![peer],
+        );
+        credential.network[0].allow_private_http = true;
+        credential.items[0].bearer_token = Some("synthetic-bearer-secret".into());
+        credential.items[0].allow_cleartext_credentials = true;
+        assert!(credential.validate(&operator()).is_ok());
+        for url in [
+            "http://other.example/live",
+            "http://sub.media.example/live",
+            "http://media.example:8080/live",
+            "http://user@media.example/live",
+            "http://media.example/live#fragment",
+        ] {
+            let mut denied = document(url, "http://media.example", vec![peer]);
+            denied.network[0].allow_private_http = true;
+            assert!(denied.validate(&operator()).is_err());
+        }
+    }
+
+    #[test]
+    fn private_http_scope_is_closed_and_rejects_public_or_conflicting_rules() {
+        let peer = "192.168.2.4".parse().unwrap();
+        for (url, origin, peers, public) in [
+            (
+                "http://media.example/live",
+                "http://media.example",
+                vec![],
+                false,
+            ),
+            (
+                "https://media.example/live",
+                "https://media.example",
+                vec![peer],
+                false,
+            ),
+            (
+                "http://media.example/live",
+                "http://media.example",
+                vec!["8.8.8.8".parse().unwrap()],
+                false,
+            ),
+            (
+                "http://media.example/live",
+                "http://media.example",
+                vec![peer],
+                true,
+            ),
+        ] {
+            let mut denied = document(url, origin, peers);
+            denied.network[0].allow_private_http = true;
+            denied.network[0].allow_public_http = public;
+            assert!(denied.validate(&operator()).is_err());
+        }
+        let mut unused = document(
+            "https://media.example/live",
+            "https://media.example",
+            vec![],
+        );
+        unused.network.push(NetworkDocument {
+            origin: "http://unused.example".into(),
+            private_addresses: vec![],
+            allow_public_http: false,
+            allow_private_http: true,
+        });
+        assert!(unused.validate(&operator()).is_err());
+        let absent: NetworkDocument =
+            serde_json::from_value(serde_json::json!({"origin":"http://media.example"})).unwrap();
+        assert!(!absent.allow_private_http);
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!("true"),
+            serde_json::json!(1),
+        ] {
+            assert!(serde_json::from_value::<NetworkDocument>(
+                serde_json::json!({"origin":"http://media.example","allow_private_http":value})
+            )
+            .is_err());
+        }
+        assert!(serde_json::from_value::<NetworkDocument>(
+            serde_json::json!({"origin":"http://media.example","allow_private_hostname":true})
         )
         .is_err());
     }
@@ -910,6 +1044,27 @@ mod tests {
                 .iter()
                 .all(|item| expected.contains(&item.input_adapter)));
         }
+
+        // Actual prepare uses the same closed constructor as validation.
+        let mut private = self::document(
+            "http://media.example/live",
+            "http://media.example",
+            vec!["192.168.2.4".parse().unwrap()],
+        );
+        private.network[0].allow_private_http = true;
+        private.output = OutputDocument {
+            root: output_root.clone(),
+            ffmpeg: tools[0].clone(),
+            ffprobe: tools[1].clone(),
+            mkfifo: tools[2].clone(),
+        };
+        let mut validated = private.validate(&operator()).unwrap();
+        assert!(validated.prepare(&operator()).is_ok());
+        validated.network[0].allow_public_http = true;
+        assert!(
+            validated.prepare(&operator()).is_err(),
+            "activation cannot bypass conflicting private/public policy"
+        );
 
         fs::set_permissions(&output_root, Permissions::from_mode(0o755)).unwrap();
         assert!(validate_output_root(&output_root).is_err());

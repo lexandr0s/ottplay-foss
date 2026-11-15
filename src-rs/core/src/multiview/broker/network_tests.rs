@@ -2012,3 +2012,204 @@ async fn peer_dns_cancellation_retains_admission_until_the_actual_worker_finishe
             .is_err()
     );
 }
+
+#[test]
+fn private_only_constructor_is_closed_and_existing_scope_is_unchanged() {
+    let private: IpAddr = "192.168.2.4".parse().unwrap();
+    for origin in [
+        "https://media.example",
+        "http://media.example/",
+        "http://MEDIA.example",
+        "http://media.example:80",
+        "http://media.example:0",
+        "http://user@media.example",
+        "http://media.example/path",
+        "http://media.example?secret=value",
+        "http://media.example#fragment",
+        "http://*.example",
+        "http://8.8.8.8",
+        "http://192.168.2.5",
+    ] {
+        assert!(OriginRule::private_only(origin, &[private]).is_err());
+    }
+    assert!(OriginRule::private_only("http://media.example", &[]).is_err());
+    assert!(OriginRule::private_only("http://media.example", &[private, private]).is_err());
+    let too_many: Vec<IpAddr> = (1..=65)
+        .map(|last| IpAddr::V4(Ipv4Addr::new(10, 0, 0, last)))
+        .collect();
+    assert!(OriginRule::private_only("http://media.example", &too_many).is_err());
+    for ip in [
+        "8.8.8.8",
+        "127.0.0.1",
+        "169.254.169.254",
+        "100.64.0.1",
+        "224.0.0.1",
+        "192.0.2.1",
+        "::1",
+        "fe80::1",
+        "::ffff:192.168.2.4",
+        "2001:4860:4860::8888",
+    ] {
+        assert!(OriginRule::private_only("http://media.example", &[ip.parse().unwrap()]).is_err());
+    }
+    let old = NetworkPolicy::new(vec![
+        OriginRule::new("https://media.example", &[private]).unwrap()
+    ])
+    .unwrap();
+    assert!(old
+        .approve(
+            &address("https://media.example/path").unwrap(),
+            &["8.8.8.8:443".parse().unwrap()]
+        )
+        .is_ok());
+}
+
+#[test]
+fn private_only_policy_rejects_all_unlisted_answers_including_clones_and_literals() {
+    let a = "192.168.2.4".parse().unwrap();
+    let b = "fd00::4".parse().unwrap();
+    let policy = NetworkPolicy::new(vec![OriginRule::private_only(
+        "http://media.example:8080",
+        &[a, b],
+    )
+    .unwrap()])
+    .unwrap();
+    let url = address("http://media.example:8080/live.m3u8").unwrap();
+    for current in [policy.clone(), policy] {
+        assert!(current
+            .approve(&url, &[SocketAddr::new(a, 8080), SocketAddr::new(b, 8080)])
+            .is_ok());
+        for ips in [
+            vec![],
+            vec!["8.8.8.8:8080"],
+            vec!["192.168.2.5:8080"],
+            vec!["192.168.2.4:8080", "8.8.8.8:8080"],
+            vec!["127.0.0.1:8080"],
+            vec!["169.254.1.1:8080"],
+            vec!["[::ffff:192.168.2.4]:8080"],
+            vec!["192.168.2.4:8081"],
+        ] {
+            let peers: Vec<SocketAddr> = ips.iter().map(|ip| ip.parse().unwrap()).collect();
+            assert_eq!(current.approve(&url, &peers), Err(Error::DestinationDenied));
+        }
+        assert_eq!(
+            current.approve(&url, &vec![SocketAddr::new(a, 8080); 65]),
+            Err(Error::DestinationDenied)
+        );
+        assert_eq!(
+            current.approve(
+                &address("http://other.example:8080/live").unwrap(),
+                &[SocketAddr::new(a, 8080)]
+            ),
+            Err(Error::DestinationDenied)
+        );
+    }
+    let literal = NetworkPolicy::new(vec![
+        OriginRule::private_only("http://192.168.2.4", &[a]).unwrap()
+    ])
+    .unwrap();
+    assert!(literal
+        .approve(
+            &address("http://192.168.2.4/live").unwrap(),
+            &[SocketAddr::new(a, 80)]
+        )
+        .is_ok());
+    assert_eq!(
+        literal.approve(
+            &address("http://192.168.2.4/live").unwrap(),
+            &["8.8.8.8:80".parse().unwrap()]
+        ),
+        Err(Error::DestinationDenied)
+    );
+}
+
+#[tokio::test]
+async fn private_only_rebinding_and_bound_peer_checks_do_not_send_network_io() {
+    let a: IpAddr = "192.168.2.4".parse().unwrap();
+    let b: IpAddr = "192.168.2.5".parse().unwrap();
+    let policy = NetworkPolicy::new(vec![OriginRule::private_only(
+        "http://media.example",
+        &[a, b],
+    )
+    .unwrap()])
+    .unwrap();
+    let mut transport = CheckedTransport::new(policy, Limits::default()).unwrap();
+    let url = address("http://media.example/live.m3u8").unwrap();
+    for (answers, allowed) in [
+        (vec![SocketAddr::new(a, 80)], true),
+        (vec![SocketAddr::new(b, 80)], true),
+        (vec!["8.8.8.8:80".parse().unwrap()], false),
+        (vec!["192.168.2.6:80".parse().unwrap()], false),
+        (
+            vec![SocketAddr::new(a, 80), "8.8.8.8:80".parse().unwrap()],
+            false,
+        ),
+    ] {
+        let expected = answers.clone();
+        transport.fixture_dns = Some(Arc::new(move |_, _| Ok(answers.clone())));
+        let permit = transport.permits.clone().try_acquire_owned().unwrap();
+        let checked = transport
+            .checked_client(&url, None, Arc::new(permit), false)
+            .await;
+        assert_eq!(checked.is_ok(), allowed);
+        if let Ok(client) = checked {
+            assert_eq!(client.addresses, expected);
+        }
+        // checked_client only builds a client; no request/send is executed.
+    }
+    let peer = PeerEvidence {
+        origin: origin(&url),
+        address: SocketAddr::new(a, 80),
+        transport: transport.identity.clone(),
+    };
+    assert!(transport.validate_peer(&url, &peer).is_ok());
+    let hls = transport.hls_transport();
+    assert!(hls.validate_peer(&url, &peer).is_ok());
+    assert_eq!(
+        hls.policy.approve(&url, &["8.8.8.8:80".parse().unwrap()]),
+        Err(Error::DestinationDenied)
+    );
+    let literal_url = address("http://192.168.2.4/live.ts").unwrap();
+    let literal = CheckedTransport::new(
+        NetworkPolicy::new(vec![OriginRule::private_only(
+            "http://192.168.2.4",
+            &[a, b],
+        )
+        .unwrap()])
+        .unwrap(),
+        Limits::default(),
+    )
+    .unwrap();
+    let wrong_literal = PeerEvidence {
+        origin: origin(&literal_url),
+        address: SocketAddr::new(b, 80),
+        transport: literal.identity.clone(),
+    };
+    assert_eq!(
+        literal.validate_peer(&literal_url, &wrong_literal),
+        Err(Error::DestinationDenied)
+    );
+
+    let mut credentials = OriginCredentials::new(url.as_str(), HeaderMap::new()).unwrap();
+    credentials.peer = Some(peer);
+    transport.fixture_dns = Some(Arc::new(|_, _| {
+        panic!("bound credentials must not refresh DNS")
+    }));
+    let permit = transport.permits.clone().try_acquire_owned().unwrap();
+    let checked = transport
+        .checked_client(&url, Some(&credentials), Arc::new(permit), false)
+        .await
+        .unwrap();
+    assert_eq!(checked.addresses, vec![SocketAddr::new(a, 80)]);
+    for address in ["8.8.8.8:80", "192.168.2.6:80", "192.168.2.4:81"] {
+        let denied = PeerEvidence {
+            origin: origin(&url),
+            address: address.parse().unwrap(),
+            transport: transport.identity.clone(),
+        };
+        assert_eq!(
+            transport.validate_peer(&url, &denied),
+            Err(Error::DestinationDenied)
+        );
+    }
+}

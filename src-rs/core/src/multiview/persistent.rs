@@ -62,6 +62,43 @@ impl Config {
             require_broker_grants: false,
         }
     }
+
+    fn validate_output_timeouts(&self) -> Result<(), Error> {
+        if self.startup_timeout.is_zero()
+            || self.stale_after.is_zero()
+            || self.startup_timeout > self.max_duration
+            || self.stale_after > self.max_duration
+        {
+            return Err(Error::InvalidConfig);
+        }
+        Ok(())
+    }
+
+    fn encoder_config_at(
+        &self,
+        canvas: CanvasSpec,
+        absolute_end: Instant,
+        now: Instant,
+    ) -> Result<EncoderConfig, Error> {
+        self.validate_output_timeouts()?;
+        let remaining = absolute_end
+            .checked_duration_since(now)
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(Error::Stopped)?;
+        // Setup and output rotation consume the same immutable session lease.
+        // They may shorten encoder deadlines, never extend the session end.
+        Ok(EncoderConfig {
+            ffmpeg: self.ffmpeg.clone(),
+            mkfifo: self.mkfifo.clone(),
+            output_root: self.output_root.clone(),
+            canvas,
+            startup_timeout: self.startup_timeout.min(remaining),
+            stall_timeout: self.stale_after.min(remaining),
+            max_duration: remaining,
+            idle_timeout: self.idle_timeout,
+            max_disk_bytes: self.max_disk_bytes,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -665,6 +702,7 @@ pub struct Session {
 
 impl Session {
     pub fn start(config: Config, geometry: ValidatedGeometry) -> Result<Self, Error> {
+        config.validate_output_timeouts()?;
         let canvas = geometry.canvas();
         if config.frame_spec.width == 0
             || config.frame_spec.height == 0
@@ -874,21 +912,9 @@ impl Session {
         let audio_clock = self.presentation_clock.clone();
         let audio =
             Arc::new(move |tick| mix_audio_tick(&audio_clock, &audio_route, &audio_queues, tick));
-        let remaining = self
-            .absolute_end
-            .checked_duration_since(Instant::now())
-            .ok_or(Error::Stopped)?;
-        let config = EncoderConfig {
-            ffmpeg: self.config.ffmpeg.clone(),
-            mkfifo: self.config.mkfifo.clone(),
-            output_root: self.config.output_root.clone(),
-            canvas,
-            startup_timeout: self.config.startup_timeout,
-            stall_timeout: self.config.stale_after,
-            max_duration: remaining,
-            idle_timeout: self.config.idle_timeout,
-            max_disk_bytes: self.config.max_disk_bytes,
-        };
+        let config = self
+            .config
+            .encoder_config_at(canvas, self.absolute_end, Instant::now())?;
         let capacity = self.capacity.take().ok_or(Error::OutputFailed)?;
         let encoder = match Encoder::start_session_capture_av(
             config,
@@ -1677,6 +1703,105 @@ impl Drop for Session {
 mod tests {
     use super::super::geometry::{ImportedRect, OverlapPolicy};
     use super::*;
+
+    #[test]
+    fn output_encoder_config_shortens_equal_startup_after_setup() {
+        let mut config = Config::new("no-ffmpeg".into(), "no-ffprobe".into(), "no-output".into());
+        config.max_duration = Duration::from_secs(10);
+        let began = Instant::now();
+        let absolute_end = began + config.max_duration;
+        let now = began + Duration::from_nanos(1);
+        let canvas = CanvasSpec {
+            width: 384,
+            height: 256,
+            fps: 10,
+        };
+        let encoder = config.encoder_config_at(canvas, absolute_end, now).unwrap();
+        let remaining = Duration::from_secs(10) - Duration::from_nanos(1);
+        assert_eq!(encoder.max_duration, remaining);
+        assert_eq!(encoder.startup_timeout, remaining);
+        assert_eq!(encoder.stall_timeout, Duration::from_secs(2));
+        assert_eq!(encoder.idle_timeout, config.idle_timeout);
+        assert_eq!(encoder.max_disk_bytes, config.max_disk_bytes);
+        assert_eq!(encoder.ffmpeg, config.ffmpeg);
+        assert_eq!(encoder.mkfifo, config.mkfifo);
+        assert_eq!(encoder.output_root, config.output_root);
+        assert_eq!(encoder.canvas, canvas);
+        assert_eq!(now + encoder.max_duration, absolute_end);
+        assert_eq!(config.startup_timeout, Duration::from_secs(10));
+        assert_eq!(config.max_duration, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn output_encoder_config_shortens_both_timeouts_near_hard_end() {
+        let config = Config::new("no-ffmpeg".into(), "no-ffprobe".into(), "no-output".into());
+        let began = Instant::now();
+        let absolute_end = began + config.max_duration;
+        let canvas = CanvasSpec {
+            width: 384,
+            height: 256,
+            fps: 10,
+        };
+        for remaining in [Duration::from_secs(1), Duration::from_nanos(1)] {
+            let now = absolute_end - remaining;
+            let encoder = config.encoder_config_at(canvas, absolute_end, now).unwrap();
+            assert_eq!(encoder.max_duration, remaining);
+            assert_eq!(encoder.startup_timeout, remaining);
+            assert_eq!(encoder.stall_timeout, remaining);
+            assert_eq!(now + encoder.max_duration, absolute_end);
+            assert_eq!(encoder.idle_timeout, Duration::from_secs(60));
+        }
+        assert_eq!(config.startup_timeout, Duration::from_secs(10));
+        assert_eq!(config.stale_after, Duration::from_secs(2));
+        assert_eq!(config.max_duration, Duration::from_secs(120));
+        assert_eq!(absolute_end, began + Duration::from_secs(120));
+    }
+
+    #[test]
+    fn output_encoder_config_stops_at_or_after_hard_end() {
+        let config = Config::new("no-ffmpeg".into(), "no-ffprobe".into(), "no-output".into());
+        let absolute_end = Instant::now() + config.max_duration;
+        let canvas = CanvasSpec {
+            width: 384,
+            height: 256,
+            fps: 10,
+        };
+        for now in [absolute_end, absolute_end + Duration::from_nanos(1)] {
+            assert_eq!(
+                config.encoder_config_at(canvas, absolute_end, now).err(),
+                Some(Error::Stopped)
+            );
+        }
+    }
+
+    #[test]
+    fn session_rejects_invalid_original_timeouts_before_encoder_projection() {
+        let geometry = || stream_state().geometry;
+        for (startup, stale) in [
+            (Duration::ZERO, Duration::from_secs(2)),
+            (
+                Duration::from_secs(10) + Duration::from_nanos(1),
+                Duration::from_secs(2),
+            ),
+            (
+                Duration::from_secs(10),
+                Duration::from_secs(10) + Duration::from_nanos(1),
+            ),
+        ] {
+            let mut config = Config::new(
+                "must-not-execute".into(),
+                "must-not-execute".into(),
+                "must-not-create".into(),
+            );
+            config.max_duration = Duration::from_secs(10);
+            config.startup_timeout = startup;
+            config.stale_after = stale;
+            assert_eq!(
+                Session::start(config, geometry()).err(),
+                Some(Error::InvalidConfig)
+            );
+        }
+    }
 
     #[test]
     fn session_clock_keeps_waiting_decoder_live_through_output_gap_longer_than_five_seconds() {

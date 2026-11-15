@@ -77,9 +77,15 @@ CORE_REQUIRED_NAMES = (
     'multiview::broker::registry::try_authority_tests::try_session_authority_maps_poison_to_unavailable_without_callback',
     'multiview::broker::registry::try_authority_tests::try_session_authority_preserves_authorization_and_output_block',
 )
+CORE_REMAINING_BUDGET_NAMES = (
+    'multiview::persistent::tests::output_encoder_config_shortens_both_timeouts_near_hard_end',
+    'multiview::persistent::tests::output_encoder_config_shortens_equal_startup_after_setup',
+    'multiview::persistent::tests::output_encoder_config_stops_at_or_after_hard_end',
+    'multiview::persistent::tests::session_rejects_invalid_original_timeouts_before_encoder_projection',
+)
 CORE_CLOCK_RETIREMENT_NAMES = tuple(sorted(ci.CORE_REQUIRED_CLOCK_RETIREMENT_TESTS))
 CORE_NAMES = ('multiview::frames::synthetic_contract', 'multiview::encoder::synthetic_stop_contract',
-              *CORE_REQUIRED_NAMES, *CORE_CLOCK_RETIREMENT_NAMES, *sorted(ci.CORE_REQUIRED_HLS_TESTS))
+              *CORE_REQUIRED_NAMES, *CORE_CLOCK_RETIREMENT_NAMES, *sorted(ci.CORE_REQUIRED_HLS_TESTS), *sorted(ci.CORE_REQUIRED_PRIVATE_HTTP_TESTS), *CORE_REMAINING_BUDGET_NAMES)
 CORE_IGNORED = tuple(ci.CORE_IGNORED_TESTS)
 SERVER_NAMES = ('geometry_and_fixture_success_do_not_grant_production_admission',
                 'worker_rejects_ungranted_files_modified_plans_and_pre_cancelled_work')
@@ -320,6 +326,8 @@ class Attempt:
         self.media = FakeMedia(self)
         for name in ('Cargo.toml', 'Cargo.lock', 'src-rs/core/Cargo.toml',
                      'src-rs/core/src/multiview/broker/registry.rs',
+                     'src-rs/core/src/multiview/broker/network.rs',
+                     'src-rs/core/src/multiview/broker/network_tests.rs',
                      'src-rs/core/src/multiview/broker/hls_timeline.rs',
                      'src-rs/core/src/multiview/broker/hls_timeline_tests.rs',
                      'src-rs/core/src/multiview/broker/stream_hls.rs',
@@ -546,10 +554,11 @@ class Attempt:
             elif self.case == 'listener-cargo-missing':
                 listener = ''
             return listener
-        if name.startswith('public-http-policy-'):
+        if name.startswith(('public-http-policy-','private-http-policy-')):
             policy_name=argv[1]
             index=int(name.split('-')[3])
-            faulty=(self.case or '').startswith(f'public-http-{index}-')
+            kind='private' if name.startswith('private') else 'public'
+            faulty=(self.case or '').startswith(f'{kind}-http-{index}-')
             if name.endswith('-inventory'):
                 return '' if faulty and self.case.endswith('-missing') else policy_name+': test\n'
             if name.endswith('-ignored'):
@@ -1269,10 +1278,14 @@ class CoreRequiredContracts(unittest.TestCase):
         self.assertIn('multiview::persistent' + suffix, ci.CORE_REQUIRED_CLOCK_RETIREMENT_TESTS)
         self.assertNotIn('multiview::decoder' + suffix, ci.CORE_REQUIRED_CLOCK_RETIREMENT_TESTS)
 
+    def test_remaining_budget_inventory_binds_all_four_actual_regressions(self):
+        self.assertEqual(len(CORE_REMAINING_BUDGET_NAMES),4)
+        self.assertEqual(ci.CORE_REQUIRED_REMAINING_BUDGET_TESTS,frozenset(CORE_REMAINING_BUDGET_NAMES))
+
     def test_each_frozen_authority_regression_is_mandatory_and_cannot_be_ignored(self):
         self.assertEqual(ci.CORE_REQUIRED_TESTS, frozenset(CORE_REQUIRED_NAMES))
         self.assertEqual(len(CORE_REQUIRED_NAMES), 3)
-        for required in (*CORE_REQUIRED_NAMES, *sorted(ci.CORE_REQUIRED_HLS_TESTS)):
+        for required in (*CORE_REQUIRED_NAMES, *sorted(ci.CORE_REQUIRED_HLS_TESTS), *sorted(ci.CORE_REQUIRED_PRIVATE_HTTP_TESTS), *CORE_REMAINING_BUDGET_NAMES):
             for state in ('missing', 'ignored'):
                 with self.subTest(required=required, state=state), Attempt() as attempt:
                     original = attempt.response
@@ -2047,6 +2060,22 @@ class MockMainTests(unittest.TestCase):
         for index in range(3):
             for failure in ('missing','ignored','zero'):
                 with self.subTest(index=index,failure=failure), Attempt(f'public-http-{index}-{failure}') as attempt:
+                    with self.assertRaises(RuntimeError):attempt.run()
+                    self.assertFalse(attempt.terminal()['normal_server_hls_to_hls'])
+                    self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
+
+    def test_private_http_policy_requires_actual_config_units_and_core_destination_guards(self):
+        self.assertEqual(len(ci.PRIVATE_HTTP_POLICY_TESTS),3)
+        self.assertEqual(len(ci.CORE_REQUIRED_PRIVATE_HTTP_TESTS),3)
+        with Attempt() as attempt:
+            attempt.run()
+            for index,name in enumerate(ci.PRIVATE_HTTP_POLICY_TESTS):
+                row=next(row for row in attempt.driver.commands if row['name']==f'private-http-policy-{index}')
+                self.assertEqual(row['argv'][1:],[name,'--exact','--test-threads=1','--color=never'])
+                self.assertEqual(row['limit'],30)
+        for index in range(3):
+            for failure in ('missing','ignored','zero'):
+                with self.subTest(index=index,failure=failure), Attempt(f'private-http-{index}-{failure}') as attempt:
                     with self.assertRaises(RuntimeError):attempt.run()
                     self.assertFalse(attempt.terminal()['normal_server_hls_to_hls'])
                     self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])

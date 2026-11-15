@@ -159,12 +159,36 @@ exact origin in the protected `media.network` configuration:
 private addresses, including an unused rule. Its empty private-address list means
 **every** resolved address must pass the existing public-address policy. Private,
 loopback, link-local, mapped or mixed public/private answers are denied before
-sending a request. Private HTTP hostnames remain unsupported; use HTTPS or the
-existing explicitly enrolled private-literal form. Public DNS/CDN addresses may
-change between requests, with each new answer checked again.
+sending a request. Public DNS/CDN addresses may change between requests, with
+each new answer checked again.
 
-This opt-in permits the whole stored URL, including its path and query, to travel
-without encryption. HTTP also lacks cryptographic server identity and protection
+A private HTTP hostname requires a separate opt-in on its exact enrolled origin:
+
+```json
+{
+  "origin": "http://media.home.example",
+  "private_addresses": ["192.168.1.20"],
+  "allow_private_http": true
+}
+```
+
+Replace these example values with the intended origin and approved addresses.
+`allow_private_http` defaults to false, is mutually exclusive with
+`allow_public_http`, and is rejected for HTTPS. It requires 1–64 unique, exact
+RFC1918 IPv4 or IPv6 ULA addresses; wildcards and CIDR ranges are not accepted.
+Every DNS answer must be one of those listed private addresses, at the enrolled
+origin's port. A public, unlisted private, loopback, link-local or IPv4-mapped
+answer rejects the request; the service does not filter out a denied answer and
+continue with the others. A literal IP origin must also be in that exact list.
+
+The approved address set is pinned separately for each request and the connected
+peer is checked. DNS changes are allowed only within the explicit private list;
+this is not a lifetime pin or permission to accept arbitrary private addresses.
+The stored URL is not rewritten to an IP address. Neither HTTP flag activates the
+service or provisions a native client.
+
+Either HTTP opt-in permits the whole stored URL, including its path and query,
+to travel without encryption. HTTP also lacks cryptographic server identity and protection
 against an attacker on the network path. A bearer header additionally requires
 that individual item's `allow_cleartext_credentials: true`; the origin opt-in
 does not waive that consent. Use HTTPS when available. HLS children must still

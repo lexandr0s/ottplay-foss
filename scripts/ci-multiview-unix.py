@@ -146,6 +146,12 @@ CORE_REQUIRED_CLOCK_RETIREMENT_TESTS = frozenset({
     'multiview::broker::registry::tests::refused_renew_commit_does_not_extend_registry_lease',
     'multiview::broker::registry::tests::successful_renew_commit_advances_both_under_one_barrier',
 })
+CORE_REQUIRED_REMAINING_BUDGET_TESTS = frozenset({
+    'multiview::persistent::tests::output_encoder_config_shortens_both_timeouts_near_hard_end',
+    'multiview::persistent::tests::output_encoder_config_shortens_equal_startup_after_setup',
+    'multiview::persistent::tests::output_encoder_config_stops_at_or_after_hard_end',
+    'multiview::persistent::tests::session_rejects_invalid_original_timeouts_before_encoder_projection',
+})
 CORE_ROTATION_TEST = 'multiview::persistent::tests::real_stream_output_rotation_preserves_sibling_decoders'
 CORE_IGNORED_TESTS = frozenset({CORE_ROTATION_TEST})
 HLS_ITEM_ADAPTER_TEST = 'multiview_operator::media_config::tests::item_adapter_is_explicit_closed_and_defaults_to_direct_ts'
@@ -158,6 +164,16 @@ CORE_REQUIRED_HLS_TESTS = frozenset({
     'multiview::broker::stream::hls_factory_tests::actual_factory_finish_is_busy_while_hls_chunk_keeps_authorized_source',
     'multiview::broker::stream::hls_factory_tests::hls_probe_join_precedes_fresh_decode_and_final_cleanup',
 })
+CORE_REQUIRED_PRIVATE_HTTP_TESTS = frozenset('multiview::broker::network::tests::' + name for name in (
+    'private_only_constructor_is_closed_and_existing_scope_is_unchanged',
+    'private_only_policy_rejects_all_unlisted_answers_including_clones_and_literals',
+    'private_only_rebinding_and_bound_peer_checks_do_not_send_network_io',
+))
+PRIVATE_HTTP_POLICY_TESTS = tuple('multiview_operator::media_config::tests::' + name for name in (
+    'private_http_requires_exact_protected_consent_and_keeps_bearer_consent',
+    'private_http_scope_is_closed_and_rejects_public_or_conflicting_rules',
+    'media_paths_require_private_output_and_trusted_absolute_tools',
+))
 LISTENER_TEST_PREFIX = 'listener_tests::'
 LISTENER_REQUIRED_TESTS = frozenset({
     'listener_tests::selected_media_dispatch_preserves_public_request_context_and_response',
@@ -1318,6 +1334,8 @@ def main(argv=None):
                 'Source checkout is dirty')
         paths = ('Cargo.toml', 'Cargo.lock', 'src-rs/core/Cargo.toml', 'src-rs/server/Cargo.toml',
                  'src-rs/core/src/multiview/broker/registry.rs',
+                 'src-rs/core/src/multiview/broker/network.rs',
+                 'src-rs/core/src/multiview/broker/network_tests.rs',
                  'src-rs/core/src/multiview/broker/hls_timeline.rs',
                  'src-rs/core/src/multiview/broker/hls_timeline_tests.rs',
                  'src-rs/core/src/multiview/broker/stream_hls.rs',
@@ -1439,7 +1457,7 @@ def main(argv=None):
                 'Core multiview ignored test inventory differs from the one reviewed media test')
         ordinary_core = core_all - core_ignored
         require(all(name.startswith('multiview::') and name in ordinary_core for name in
-                    (*CORE_REQUIRED_TESTS, *CORE_REQUIRED_CLOCK_RETIREMENT_TESTS, *CORE_REQUIRED_HLS_TESTS, *args.required_core_test)),
+                    (*CORE_REQUIRED_TESTS, *CORE_REQUIRED_CLOCK_RETIREMENT_TESTS, *CORE_REQUIRED_HLS_TESTS, *CORE_REQUIRED_PRIVATE_HTTP_TESTS, *CORE_REQUIRED_REMAINING_BUDGET_TESTS, *args.required_core_test)),
                 'Required ordinary core regression is absent or ignored')
         core_text = command('core-multiview-ordinary', [str(core_executable), 'multiview::',
                             '--test-threads=1', '--color=never'], 300)
@@ -1517,6 +1535,16 @@ def main(argv=None):
                 [str(listener), policy_name, '--list', '--ignored', '--format', 'terse']))
             require(present == {policy_name} and not ignored_policy,
                     'Exact public HTTP policy regression is missing or ignored')
+            require_one_pass(command(label, [str(listener), policy_name, '--exact',
+                             '--test-threads=1', '--color=never'], 30), policy_name)
+        for index, policy_name in enumerate(PRIVATE_HTTP_POLICY_TESTS):
+            label = f'private-http-policy-{index}'
+            present = listed_names(command(label + '-inventory',
+                [str(listener), policy_name, '--list', '--format', 'terse']))
+            ignored_policy = listed_names(command(label + '-ignored',
+                [str(listener), policy_name, '--list', '--ignored', '--format', 'terse']))
+            require(present == {policy_name} and not ignored_policy,
+                    'Exact private HTTP policy regression is missing or ignored')
             require_one_pass(command(label, [str(listener), policy_name, '--exact',
                              '--test-threads=1', '--color=never'], 30), policy_name)
         for index, (name, limit) in enumerate(TESTS):

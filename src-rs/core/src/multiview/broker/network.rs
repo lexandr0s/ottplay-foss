@@ -79,10 +79,17 @@ fn origin(url: &Url) -> String {
 
 /// Trusted enrollment only. No Deserialize and no Debug; exact origin, not a
 /// suffix/CIDR match. Private addresses require explicit RFC1918/ULA entries.
+#[derive(Clone, Copy)]
+enum AddressScope {
+    Existing,
+    PrivateOnly,
+}
+
 #[derive(Clone)]
 pub struct OriginRule {
     origin: String,
     private_addresses: HashSet<IpAddr>,
+    scope: AddressScope,
 }
 impl OriginRule {
     pub fn new(base: &str, private_addresses: &[IpAddr]) -> Result<Self, Error> {
@@ -97,7 +104,37 @@ impl OriginRule {
         Ok(Self {
             origin: origin(&url),
             private_addresses: private_addresses.iter().copied().collect(),
+            scope: AddressScope::Existing,
         })
+    }
+
+    /// Protected enrollment only: exact HTTP origin, all peers explicitly private.
+    /// Does not enable TLS or promise confidentiality on the private network.
+    pub fn private_only(base: &str, private_addresses: &[IpAddr]) -> Result<Self, Error> {
+        let mut rule = Self::new(base, private_addresses)?;
+        let url = address(base)?;
+        if url.scheme() != "http"
+            || origin(&url) != base
+            || url.port_or_known_default() == Some(0)
+            || url
+                .host_str()
+                .is_none_or(|host| host.contains('*') || host.contains('%'))
+            || private_addresses.is_empty()
+            || rule.private_addresses.len() != private_addresses.len()
+        {
+            return Err(Error::InvalidConfiguration);
+        }
+        let literal = url.host_str().and_then(|host| {
+            host.trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<IpAddr>()
+                .ok()
+        });
+        if literal.is_some_and(|ip| !private_ip(ip) || !rule.private_addresses.contains(&ip)) {
+            return Err(Error::InvalidConfiguration);
+        }
+        rule.scope = AddressScope::PrivateOnly;
+        Ok(rule)
     }
 }
 #[derive(Clone)]
@@ -132,8 +169,11 @@ impl NetworkPolicy {
         if addresses.is_empty()
             || addresses.len() > 64
             || addresses.iter().any(|a| {
-                let allowed = public_ip(a.ip())
-                    || private_ip(a.ip()) && rule.private_addresses.contains(&a.ip());
+                let listed_private = private_ip(a.ip()) && rule.private_addresses.contains(&a.ip());
+                let allowed = match rule.scope {
+                    AddressScope::Existing => public_ip(a.ip()) || listed_private,
+                    AddressScope::PrivateOnly => listed_private,
+                };
                 #[cfg(test)]
                 let allowed = allowed || self.fixture_loopback && a.ip().is_loopback();
                 a.port() != url.port_or_known_default().unwrap_or(0) || !allowed
