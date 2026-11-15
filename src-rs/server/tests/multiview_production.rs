@@ -5,6 +5,8 @@
 
 #[path = "support/hls_production.rs"]
 mod hls_production;
+#[path = "support/multiview_production_config.rs"]
+mod production_config;
 #[path = "support/multiview_production_tls.rs"]
 mod production_tls;
 
@@ -12,7 +14,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{Read, Write},
     net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
@@ -29,28 +31,103 @@ use std::{
 
 const STARTUP_LIMIT: Duration = Duration::from_secs(12);
 const RUN_LIMIT: Duration = Duration::from_secs(600);
-const TOKEN: &str = "production_fixture_control_owner_aaaaaaaaaaaaaaaa";
-const EXPIRING_TOKEN: &str = "production_fixture_control_expiring_bbbbbbbbbbbb";
+use production_config::{EXPIRING_TOKEN, TOKEN};
 const PROFILE: &str = "http-mpegts-v1-640x360-10fps";
 const INPUTS: &str = "OTTPLAY_MULTIVIEW_PRODUCTION_INPUTS";
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ProductionMode {
-    RawMpegTs,
-    LiveHlsTs,
+use production_config::ProductionMode;
+
+fn redacted_startup_tail(bytes: &[u8], root: &Path) -> String {
+    // Redact before truncating, so a boundary cannot expose part of a secret.
+    let text = String::from_utf8_lossy(bytes)
+        .replace(TOKEN, "[control-token]")
+        .replace(EXPIRING_TOKEN, "[expiry-token]")
+        .replace(
+            "production_fixture_signing_key_aaaaaaaaaaaaaaaa",
+            "[signing-key]",
+        )
+        .replace(root.to_string_lossy().as_ref(), "[owned-root]");
+    let cleaned = text
+        .split_whitespace()
+        .map(|word| if word.contains("://") { "[url]" } else { word })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut start = cleaned.len().saturating_sub(8192);
+    while !cleaned.is_char_boundary(start) {
+        start += 1;
+    }
+    cleaned[start..].to_owned()
 }
-impl ProductionMode {
-    fn adapter(self) -> &'static str {
-        match self {
-            Self::RawMpegTs => "http-mpegts-v1",
-            Self::LiveHlsTs => "http-hls-ts-v1",
+
+fn fixture_stderr_diagnostic(root: &Path, path: &Path) -> String {
+    let read = || -> std::io::Result<Vec<u8>> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)?;
+        let before = file.metadata()?;
+        if !before.is_file()
+            || before.nlink() != 1
+            || before.uid() != unsafe { libc::geteuid() }
+            || before.mode() & 0o077 != 0
+            || before.len() > 65536
+        {
+            return Err(std::io::Error::other("stderr shape or bound"));
         }
-    }
-    fn path(self, id: usize) -> String {
-        match self {
-            Self::RawMpegTs => format!("source-{id}.ts"),
-            Self::LiveHlsTs => format!("source-{id}/master.m3u8"),
+        let mut bytes = Vec::new();
+        (&file).take(65537).read_to_end(&mut bytes)?;
+        let after = file.metadata()?;
+        let identity = |value: &fs::Metadata| {
+            (
+                value.dev(),
+                value.ino(),
+                value.len(),
+                value.mode(),
+                value.nlink(),
+                value.uid(),
+                value.mtime(),
+                value.mtime_nsec(),
+                value.ctime(),
+                value.ctime_nsec(),
+            )
+        };
+        if bytes.len() > 65536
+            || identity(&before) != identity(&after)
+            || identity(&after) != identity(&fs::symlink_metadata(&path)?)
+        {
+            return Err(std::io::Error::other("stderr changed"));
         }
+        Ok(bytes)
+    };
+    match read() {
+        Ok(bytes) => format!(
+            "stderr_bytes={} stderr_sha256={:x} stderr_tail={:?}",
+            bytes.len(),
+            Sha256::digest(&bytes),
+            redacted_startup_tail(&bytes, root)
+        ),
+        Err(_) => "stderr_unavailable_or_outside_owned_bound".to_owned(),
     }
+}
+
+#[test]
+fn startup_diagnostic_tail_is_bounded_and_redacts_fixture_secrets_and_urls() {
+    let root = Path::new("/owned/synthetic-fixture");
+    let text=format!("{} {} production_fixture_signing_key_aaaaaaaaaaaaaaaa /owned/synthetic-fixture/operator.json http://fixture.invalid/path?token=hidden \u{1b}[31m invalid source credential policy",TOKEN,EXPIRING_TOKEN);
+    let redacted = redacted_startup_tail(text.as_bytes(), root);
+    for secret in [
+        TOKEN,
+        EXPIRING_TOKEN,
+        "production_fixture_signing_key_aaaaaaaaaaaaaaaa",
+        "/owned/synthetic-fixture",
+        "fixture.invalid",
+        "token=hidden",
+    ] {
+        assert!(!redacted.contains(secret));
+    }
+    assert!(redacted.contains("invalid source credential policy"));
+    assert!(!format!("{redacted:?}").contains('\u{1b}'));
+    let long = vec![b'x'; 65536];
+    assert_eq!(redacted_startup_tail(&long, root).len(), 8192);
 }
 
 struct FixtureHttp {
@@ -1320,31 +1397,20 @@ fn run_normal_production(mode: ProductionMode) {
     let mkfifo = std::env::var("OTTPLAY_MULTIVIEW_MKFIFO").expect("configured mkfifo");
     let output = root.0.join("media-output");
     fs::DirBuilder::new().mode(0o700).create(&output).unwrap();
-    let items: Vec<Value> = inputs.iter().enumerate().map(|(index, (_, _, sha, _))| json!({
-        "item_ref": format!("production_item_{}", index + 1), "favorite_sha256":sha,
-        "title":format!("Fixture source {}", index + 1), "provider":"fixture",
-        "input_adapter":mode.adapter(), "url":format!("{source_origin}/{}", mode.path(index + 1)), "allow_cleartext_credentials":true,
-    })).collect();
-    let allowed = json!([
-        {"subject":"production_owner_A","installation_id":"production_install_A"},
-        {"subject":"production_expiry_B","installation_id":"production_install_B"}
-    ]);
-    let config = json!({
-        "version":1,"server_id":"production_fixture_server","origin":api_origin,
-        "listener":{"bind_ip":"127.0.0.1","https":true,"lan_approved":false},
-        "allowed_origins":["https://native.example.test"],
-        "signing_key":"production_fixture_signing_key_aaaaaaaaaaaaaaaa",
-        "credentials":[
-            {"installation_id":"production_install_A","control_bearer":TOKEN,"subject":"production_owner_A","revision":1,"expires_at_ms":expires},
-            {"installation_id":"production_install_B","control_bearer":EXPIRING_TOKEN,"subject":"production_expiry_B","revision":1,"expires_at_ms":short_expires}
-        ],
-        "media":{"version":1,"adapter":"http-mpegts-v1","source_ref":"production_source_A",
-            "profile_uuid":"b1e52616-9af1-4fcb-937e-0e70e654c2f1","config_revision":"production_config_A","policy_revision":"production_policy_A",
-            "allowed":allowed,
-            "network":[{"origin":source_origin,"private_addresses":[private_peer.to_string()]}],
-            "items":items,"output":{"root":output,"ffmpeg":ffmpeg,"ffprobe":ffprobe,"mkfifo":mkfifo},
-            "max_duration_seconds":600}
-    });
+    let config = production_config::Config {
+        mode,
+        source_origin: &source_origin,
+        private_peer,
+        inputs: &inputs,
+        api_origin: &api_origin,
+        expires,
+        short_expires,
+        output: &output,
+        ffmpeg: &ffmpeg,
+        ffprobe: &ffprobe,
+        mkfifo: &mkfifo,
+    }
+    .document();
     let config_path = root.write_private("operator.json", &serde_json::to_vec(&config).unwrap());
     drop((api_listener, decoy_listener));
     let mut server = ChildGuard(
@@ -1368,8 +1434,22 @@ fn run_normal_production(mode: ProductionMode) {
             .arg(tls.cert_path())
             .arg("--key")
             .arg(tls.key_path())
-            .stdout(File::create(root.0.join("server.stdout")).unwrap())
-            .stderr(File::create(root.0.join("server.stderr")).unwrap())
+            .stdout(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(root.0.join("server.stdout"))
+                    .unwrap(),
+            )
+            .stderr(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(root.0.join("server.stderr"))
+                    .unwrap(),
+            )
             .spawn()
             .expect("normal production server binary"),
     );
@@ -1377,7 +1457,10 @@ fn run_normal_production(mode: ProductionMode) {
     let server_epoch;
     loop {
         if let Some(status) = server.0.try_wait().expect("server process status") {
-            panic!("normal server exited before capabilities response: {status}");
+            panic!(
+                "normal server exited before capabilities response: {status}; {}",
+                fixture_stderr_diagnostic(&root.0, &root.0.join("server.stderr"))
+            );
         }
         let (code, bytes) = get(
             &api_origin,

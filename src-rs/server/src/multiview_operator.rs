@@ -5,6 +5,10 @@
 //! network authority or enroll media sources. Keep this file outside public and
 //! synchronized trees; arbitrary synchronization software cannot be detected.
 
+#[cfg(all(test, unix))]
+#[path = "../tests/support/multiview_production_config.rs"]
+mod production_fixture_config;
+
 use std::{collections::BTreeSet, net::IpAddr, path::Path};
 
 use ottplay_core::multiview::broker::wire::{self, Permission};
@@ -359,6 +363,54 @@ mod tests {
         assert!(!diagnostic.contains(TOKEN));
         assert!(!diagnostic.contains(SIGNING));
         diagnostic
+    }
+
+    #[test]
+    fn actual_production_fixture_documents_validate_for_both_adapters_and_reject_false_consent() {
+        use super::production_fixture_config::{Config, ProductionMode};
+        let fixture = Fixture::new();
+        let inputs: Vec<_> = (1..=3)
+            .map(|id| (id, PathBuf::from("unused.ts"), "a".repeat(64), 188))
+            .collect();
+        for (index, mode) in [ProductionMode::RawMpegTs, ProductionMode::LiveHlsTs]
+            .into_iter()
+            .enumerate()
+        {
+            let output = fixture.root.join("media-output");
+            let document = Config {
+                mode,
+                source_origin: "http://192.168.2.4:8080",
+                private_peer: "192.168.2.4".parse().unwrap(),
+                inputs: &inputs,
+                api_origin: "https://127.0.0.1:18443",
+                expires: 4_102_444_800_000,
+                short_expires: 4_102_444_800_000,
+                output: &output,
+                ffmpeg: "/usr/bin/ffmpeg",
+                ffprobe: "/usr/bin/ffprobe",
+                mkfifo: "/usr/bin/mkfifo",
+            }
+            .document();
+            let path = fixture.write(
+                &format!("production-{index}.json"),
+                &serde_json::to_vec(&document).unwrap(),
+            );
+            let loaded = load_configuration_for_public_directory(&path, &fixture.public).unwrap();
+            assert!(loaded.media.is_some());
+            let mut rejected = document;
+            rejected["media"]["items"][0]["allow_cleartext_credentials"] = serde_json::json!(true);
+            let path = fixture.write(
+                &format!("production-rejected-{index}.json"),
+                &serde_json::to_vec(&rejected).unwrap(),
+            );
+            let error = load_configuration_for_public_directory(&path, &fixture.public)
+                .err()
+                .expect("missing credential consent must reject");
+            let message = error.to_string();
+            assert!(message.contains("invalid source credential policy"));
+            assert!(!message.contains(production_fixture_config::TOKEN));
+            assert!(!message.contains(production_fixture_config::EXPIRING_TOKEN));
+        }
     }
 
     #[test]

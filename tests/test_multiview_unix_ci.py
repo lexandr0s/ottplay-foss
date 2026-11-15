@@ -334,6 +334,7 @@ class Attempt:
                      'src-rs/core/src/multiview/broker/stream_hls_tests.rs',
                      'src-rs/core/src/multiview/broker/stream_hls_factory_tests.rs',
                      'src-rs/server/src/multiview_media_config.rs',
+                     'src-rs/server/src/multiview_operator.rs',
                      'src-rs/server/Cargo.toml', 'src-rs/server/tests/multiview_fixtures.rs',
                      'src-rs/server/tests/multiview_production.rs',
                      'src-rs/server/tests/multiview_activation.rs', 'src-rs/server/src/main.rs',
@@ -347,6 +348,7 @@ class Attempt:
                      'src-rs/server/tests/support/streamed_archive.rs',
                      'src-rs/server/tests/support/streamed_decoder.rs',
                      'src-rs/server/tests/support/multiview_production_tls.rs',
+                     'src-rs/server/tests/support/multiview_production_config.rs',
                      'src-rs/server/tests/support/hls_production.rs',
                      'src-rs/core/src/multiview/decoder.rs', 'src-rs/core/src/multiview/frames.rs',
                      'src-rs/core/src/multiview/geometry.rs', 'src-rs/core/src/multiview/timing.rs',
@@ -2065,7 +2067,7 @@ class MockMainTests(unittest.TestCase):
                     self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
 
     def test_private_http_policy_requires_actual_config_units_and_core_destination_guards(self):
-        self.assertEqual(len(ci.PRIVATE_HTTP_POLICY_TESTS),3)
+        self.assertEqual(len(ci.PRIVATE_HTTP_POLICY_TESTS),4)
         self.assertEqual(len(ci.CORE_REQUIRED_PRIVATE_HTTP_TESTS),3)
         with Attempt() as attempt:
             attempt.run()
@@ -2073,12 +2075,29 @@ class MockMainTests(unittest.TestCase):
                 row=next(row for row in attempt.driver.commands if row['name']==f'private-http-policy-{index}')
                 self.assertEqual(row['argv'][1:],[name,'--exact','--test-threads=1','--color=never'])
                 self.assertEqual(row['limit'],30)
-        for index in range(3):
+        for index in range(4):
             for failure in ('missing','ignored','zero'):
                 with self.subTest(index=index,failure=failure), Attempt(f'private-http-{index}-{failure}') as attempt:
                     with self.assertRaises(RuntimeError):attempt.run()
                     self.assertFalse(attempt.terminal()['normal_server_hls_to_hls'])
                     self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
+
+    def test_normal_fixture_credential_and_startup_diagnostic_units_are_mandatory(self):
+        required={'startup_diagnostic_tail_is_bounded_and_redacts_fixture_secrets_and_urls',
+                  'production_tls::leaf_request_has_explicit_distinguished_name_for_openssl_1_1_and_3'}
+        self.assertTrue(required <= ci.PRODUCTION_ORDINARY_TESTS)
+        self.assertEqual(len(ci.PRODUCTION_ORDINARY_TESTS),5)
+        for missing in required:
+            with self.subTest(missing=missing), Attempt() as attempt:
+                original=attempt.response
+                def response(name,argv,original=original,missing=missing):
+                    text=original(name,argv)
+                    if name=='production-inventory':
+                        return '\n'.join(line for line in text.splitlines() if line != missing+': test')+'\n'
+                    return text
+                with mock.patch.object(attempt,'response',side_effect=response), self.assertRaises(RuntimeError):attempt.run()
+                self.assertFalse(attempt.terminal()['normal_server_hls_to_hls'])
+                self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
 
     def test_mock_driver_log_names_are_exclusive_before_any_response_or_overwrite(self):
         with Attempt() as attempt:

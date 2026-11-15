@@ -22,6 +22,8 @@ HLS_BATCH_SHA256 = '967ceaa7e7478c2488c3a984d4a4a15f968226ef82a7cd065b4a93b84aa1
 PRODUCTION_TEST = 'normal_server_private_http_mpegts_renew_replace_and_cleanup'
 HLS_PRODUCTION_TEST = 'normal_server_private_http_hls_renew_replace_and_cleanup'
 PRODUCTION_ORDINARY_TESTS = frozenset({
+    'production_tls::leaf_request_has_explicit_distinguished_name_for_openssl_1_1_and_3',
+    'startup_diagnostic_tail_is_bounded_and_redacts_fixture_secrets_and_urls',
     'hls_production::tests::starts_with_three_complete_and_slides_six_without_exposing_future',
     'hls_production::tests::never_loops_or_serves_fifty_first_segment_and_keeps_original_duration',
     'hls_production::tests::exact_path_fence_and_master_child_are_self_contained',
@@ -173,7 +175,7 @@ PRIVATE_HTTP_POLICY_TESTS = tuple('multiview_operator::media_config::tests::' + 
     'private_http_requires_exact_protected_consent_and_keeps_bearer_consent',
     'private_http_scope_is_closed_and_rejects_public_or_conflicting_rules',
     'media_paths_require_private_output_and_trusted_absolute_tools',
-))
+)) + ('multiview_operator::tests::actual_production_fixture_documents_validate_for_both_adapters_and_reject_false_consent',)
 LISTENER_TEST_PREFIX = 'listener_tests::'
 LISTENER_REQUIRED_TESTS = frozenset({
     'listener_tests::selected_media_dispatch_preserves_public_request_context_and_response',
@@ -1345,6 +1347,8 @@ def main(argv=None):
                  'src-rs/server/tests/multiview_fixtures.rs', 'src-rs/server/tests/multiview_activation.rs',
                  'src-rs/server/tests/multiview_production.rs',
                  'src-rs/server/tests/support/multiview_production_tls.rs',
+                 'src-rs/server/tests/support/multiview_production_config.rs',
+                 'src-rs/server/src/multiview_operator.rs',
                  'src-rs/server/tests/support/hls_production.rs',
                  'src-rs/server/tests/multiview_broker_boundary.rs',
                  'src-rs/server/src/multiview_broker.rs', 'src-rs/server/src/multiview_broker_live.rs',

@@ -14,6 +14,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+const LEAF_REQUEST_CONFIG: &[u8] =
+    b"[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=Synthetic production fixture listener\n";
+
 const COMMAND_LIMIT: Duration = Duration::from_secs(8);
 const REQUEST_LIMIT: Duration = Duration::from_secs(3);
 const WRONG_HOST: &str = "not-covered.fixture.invalid";
@@ -112,6 +115,20 @@ impl Drop for CertChild {
 }
 
 fn openssl(tool: &Path, root: &Path, args: &[&str]) {
+    let stage = match args.first().copied() {
+        Some("req") if args.contains(&"-x509") => "root-request",
+        Some("req") => "leaf-request",
+        Some("x509") => "leaf-sign",
+        Some("verify") => "leaf-verify",
+        _ => panic!("unrecognized synthetic TLS command"),
+    };
+    let stderr_path = root.join(format!("{stage}.stderr"));
+    let stderr = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&stderr_path)
+        .expect("fresh private certificate diagnostic");
     let mut child = CertChild(Some(
         Command::new(tool)
             .args(args)
@@ -121,7 +138,7 @@ fn openssl(tool: &Path, root: &Path, args: &[&str]) {
             .env("OPENSSL_CONF", root.join("empty.cnf"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .spawn()
             .expect("start installed synthetic certificate supplier"),
     ));
@@ -134,12 +151,27 @@ fn openssl(tool: &Path, root: &Path, args: &[&str]) {
             .try_wait()
             .expect("certificate supplier status")
         {
-            assert!(status.success(), "synthetic certificate command failed");
+            assert!(
+                fs::symlink_metadata(&stderr_path)
+                    .is_ok_and(|value| value.is_file() && value.len() <= 65536),
+                "synthetic certificate diagnostics exceeded bound stage={stage}"
+            );
+            assert!(
+                status.success(),
+                "synthetic certificate command failed stage={stage} status={status}; {}",
+                super::fixture_stderr_diagnostic(root, &stderr_path)
+            );
             return;
         }
         assert!(
+            fs::symlink_metadata(&stderr_path)
+                .is_ok_and(|value| value.is_file() && value.len() <= 65536),
+            "synthetic certificate diagnostics exceeded bound stage={stage}"
+        );
+        assert!(
             Instant::now() < deadline,
-            "synthetic certificate command timed out"
+            "synthetic certificate command timed out stage={stage}; {}",
+            super::fixture_stderr_diagnostic(root, &stderr_path)
         );
         thread::sleep(Duration::from_millis(10));
     }
@@ -179,6 +211,7 @@ impl SyntheticTls {
                 "root.pem",
             ],
         );
+        write_private(&root, "leaf-req.cnf", LEAF_REQUEST_CONFIG);
         openssl(
             &tool,
             &root,
@@ -191,6 +224,8 @@ impl SyntheticTls {
                 "ec_paramgen_curve:P-256",
                 "-nodes",
                 "-sha256",
+                "-config",
+                "leaf-req.cnf",
                 "-subj",
                 "/CN=Synthetic production fixture listener",
                 "-keyout",
@@ -340,4 +375,12 @@ impl SyntheticTls {
             "leaf_sha256":self.leaf_sha256,"openssl_sha256":self.openssl_sha256,
             "untrusted_ca_rejected":self.rejected_untrusted,"wrong_hostname_rejected":self.rejected_hostname})
     }
+}
+
+#[test]
+fn leaf_request_has_explicit_distinguished_name_for_openssl_1_1_and_3() {
+    let config = std::str::from_utf8(LEAF_REQUEST_CONFIG).unwrap();
+    assert!(config.contains("[req]\ndistinguished_name=dn\nprompt=no\n[dn]\n"));
+    assert!(config.contains("CN=Synthetic production fixture listener\n"));
+    assert!(!config.contains("extensions") && !config.contains("subjectAltName"));
 }
