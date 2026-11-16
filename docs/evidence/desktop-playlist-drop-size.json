@@ -1,0 +1,20 @@
+{
+  "base": "fcb5fbe5c4ce00a0a93a976069d6222763cd3e7a",
+  "toolchain": {
+    "node": "26.8.2"
+  },
+  "asset": "dist/local-drop.js",
+  "measured": {
+    "bytes": 17401,
+    "gzipBytes": 5695
+  },
+  "previousBudget": {
+    "bytes": 5807,
+    "gzipBytes": 2369
+  },
+  "addedAllowance": {
+    "bytes": 12000,
+    "gzipBytes": 3500
+  },
+  "scope": "Lazy desktop-drop asset only; added once to each complete payload, no startup-entry budget increase. Source measurement from build/reports/classic-size-diagnostics.json."
+}

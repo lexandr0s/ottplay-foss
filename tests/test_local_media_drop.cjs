@@ -7,6 +7,7 @@ const path = require("node:path");
 const test = require("node:test");
 const ts = require("typescript");
 const vm = require("node:vm");
+const { File } = require("node:buffer");
 const imports = require("./helpers/remote-transfer-dependency.cjs").storage;
 const ROOT = path.resolve(__dirname, "..");
 const clone = (v) => JSON.parse(JSON.stringify(v));
@@ -293,7 +294,7 @@ test("invalid later queue entries reject the whole replacement and retain the pr
             v.items = [];
         },
         (v) => {
-            v.items = queue(Array(129).fill("video")).items;
+            v.items = queue(Array(4097).fill("video")).items;
         },
     ]) {
         const f = fixture();
@@ -510,4 +511,75 @@ test("ordinary remote activation retains its existing promotable session contrac
     assert.equal(f.w.ottpStorage.localPlayback.end(true), true);
     assert.equal(f.saved.get("ottplayprov"), "offline");
     assert.deepEqual(f.releases, []);
+});
+
+test("expanded playlist queues keep more than 128 entries without changing the saved provider", async () => {
+    const f = fixture();
+    const value = queue(Array.from({ length: 4096 }, (_, i) => "station-" + i));
+    value.items.forEach((item, i) => {
+        item.url = "https://media.example.test/" + i + ".m3u8";
+        item.mime = "application/vnd.apple.mpegurl";
+    });
+    f.api.playDroppedVideo(
+        value,
+        () => true,
+        () => f.releases.push("playlist")
+    );
+    const delivered = await f.api.playbackList();
+    assert.equal(delivered.items.length, 4096);
+    assert.equal(delivered.items[4095].url, value.items[4095].url);
+    assert.deepEqual(f.saved, f.before);
+    f.api.cancelDroppedVideo();
+    assert.deepEqual(f.releases, ["playlist"]);
+});
+
+test("real mixed playlist builder hands one temporary source to the real Local plugin", async () => {
+    const f = fixture();
+    const videos = load("src/offline/dropped-video.ts");
+    const playlists = load(
+        "src/offline/dropped-playlist.ts",
+        { "./dropped-video": videos },
+        { TextDecoder }
+    );
+    const revoked = [];
+    const host = {
+        File,
+        TextDecoder,
+        document: { createElement: () => ({ canPlayType: () => "probably" }) },
+        URL: {
+            createObjectURL: () => "blob:mixed-local",
+            revokeObjectURL: (url) => revoked.push(url),
+        },
+    };
+    const playlist = new File(
+        [
+            "#EXTM3U\n#EXTINF:-1,Remote channel\nhttps://media.example.test/live.m3u8\n#EXTINF:90,Local film\nclip.mp4\n",
+        ],
+        "mixed.m3u"
+    );
+    const lease = await playlists.createDroppedPlaylists(host, [
+        playlist,
+        new File(["video"], "clip.mp4", { type: "video/mp4" }),
+    ]);
+    f.api.playDroppedVideo(lease.catalog, () => true, lease.release);
+    const delivered = await f.api.playbackList();
+    assert.equal(delivered.sources.length, 1);
+    assert.equal(delivered.items.length, 2);
+    assert.deepEqual(
+        Array.from(delivered.items, (item) => item.name),
+        ["Remote channel", "Local film"]
+    );
+    assert.equal(
+        delivered.items[0].url,
+        "https://media.example.test/live.m3u8"
+    );
+    assert.equal(delivered.items[1].url, "blob:mixed-local");
+    assert.ok(
+        delivered.items.every(
+            (item) => item.sourceId === delivered.sources[0].id
+        )
+    );
+    assert.deepEqual(f.saved, f.before);
+    f.api.cancelDroppedVideo();
+    assert.deepEqual(revoked, ["blob:mixed-local"]);
 });

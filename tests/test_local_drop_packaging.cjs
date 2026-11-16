@@ -45,11 +45,12 @@ function temporary(t) {
     return dir;
 }
 
-test("optional bundle links both actual modules and installs a usable drop factory", async (t) => {
+test("optional bundle links video and playlist modules and installs a usable drop factory", async (t) => {
     const dir = temporary(t);
     const modules = bundle.CLASSIC_OPTIONAL_BUNDLES["local-drop"];
     assert.deepEqual(modules, [
         "build/offline/dropped-video.js",
+        "build/offline/dropped-playlist.js",
         "build/plugins/local-drop.js",
     ]);
     for (const file of modules) {

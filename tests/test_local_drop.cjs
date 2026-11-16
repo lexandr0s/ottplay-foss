@@ -18,6 +18,8 @@ function load(path, imports = {}) {
     acorn.parse(code, { ecmaVersion: 5 });
     vm.runInNewContext(code, {
         exports,
+        URL,
+        TextDecoder,
         require(name) {
             assert.ok(name in imports, name);
             return imports[name];
@@ -26,8 +28,12 @@ function load(path, imports = {}) {
     return exports;
 }
 const media = load("src/offline/dropped-video.ts");
+const playlists = load("src/offline/dropped-playlist.ts", {
+    "./dropped-video": media,
+});
 const plugin = load("src/plugins/local-drop.ts", {
     "../offline/dropped-video": media,
+    "../offline/dropped-playlist": playlists,
 });
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -170,6 +176,97 @@ test("file gesture plays the exact File via Local and prevents browser navigatio
     assert.equal(f.played[0].catalog.items[0].name, "video.mp4");
     assert.equal(f.revoked.length, 0);
     assert.equal(f.event("drop", [], ["text/plain"]).prevented, false);
+});
+test("M3U drop opens ordered HTTP streams as a temporary queue without object URLs", async () => {
+    const f = fixture();
+    const playlist = new File(
+        [
+            "#EXTM3U\n#EXTINF:-1,News\nhttps://example.test/live.m3u8?token=one\n#EXTINF:90,Film\nhttp://example.test/movie.mp4\n",
+        ],
+        "channels.m3u8"
+    );
+    f.event("drop", [playlist]);
+    await flush();
+    assert.equal(f.played.length, 1);
+    assert.deepEqual(
+        Array.from(f.played[0].catalog.items, (item) => item.name),
+        ["News", "Film"]
+    );
+    assert.deepEqual(
+        Array.from(f.played[0].catalog.items, (item) => item.url),
+        [
+            "https://example.test/live.m3u8?token=one",
+            "http://example.test/movie.mp4",
+        ]
+    );
+    assert.deepEqual(f.revoked, []);
+    assert.equal(f.timers.size, 0);
+});
+test("late playlist reads cannot replace a newer video drop or a new provider generation", async () => {
+    for (const invalidate of [
+        (f) => f.event("drop", [file("newer.mp4")]),
+        (f) => {
+            f.w.__ottCommandChannelLoad = {};
+        },
+        (f) => {
+            f.w.__ottKiosk = { enabled: () => true };
+        },
+        (f) => f.api.dispose(),
+        (f) => {
+            for (const callback of [...f.timers.values()]) callback();
+        },
+    ]) {
+        const f = fixture();
+        let complete;
+        const playlist = new File(
+            ["#EXTM3U\nhttps://example.test/late.mp4"],
+            "late.m3u"
+        );
+        Object.defineProperty(playlist, "arrayBuffer", {
+            value: () =>
+                new Promise((resolve) => {
+                    complete = resolve;
+                }),
+        });
+        Object.defineProperty(playlist, "text", {
+            value: () =>
+                new Promise((resolve) => {
+                    complete = (value) =>
+                        resolve(new TextDecoder().decode(value));
+                }),
+        });
+        f.event("drop", [playlist]);
+        await flush();
+        assert.equal(typeof complete, "function");
+        invalidate(f);
+        complete(
+            new TextEncoder().encode("#EXTM3U\nhttps://example.test/late.mp4")
+                .buffer
+        );
+        await flush();
+        assert.equal(
+            f.played.some((p) =>
+                p.catalog.items.some(
+                    (item) => item.url === "https://example.test/late.mp4"
+                )
+            ),
+            false
+        );
+        assert.equal(f.timers.size, 0);
+    }
+});
+test("invalid playlist does not stop the current queue and errors never expose private data", async () => {
+    const f = fixture();
+    f.event("drop", [file("old.mp4")]);
+    f.event("drop", [
+        new File(["#EXTM3U\nfile:///private/passwords.mp4"], "invalid.m3u"),
+    ]);
+    await flush();
+    assert.equal(f.played.length, 1);
+    assert.equal(f.played[0].admitted(), true);
+    assert.deepEqual(f.revoked, []);
+    assert.ok(f.messages.length);
+    assert.equal(f.messages.join(" ").includes("/private/"), false);
 });
 test("ordered batch drops replace the prior queue while invalid batches preserve it", () => {
     const f = fixture();

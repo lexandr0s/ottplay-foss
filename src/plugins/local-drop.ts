@@ -1,3 +1,7 @@
+import {
+    createDroppedPlaylists,
+    hasDroppedPlaylist,
+} from "../offline/dropped-playlist";
 import { createDroppedVideos } from "../offline/dropped-video";
 
 /** Desktop file gestures use the same temporary Local playback as remote commands. */
@@ -44,6 +48,55 @@ export function installLocalDrop(w: any): any {
     }
     function message(text: string): void {
         if (!disposed && typeof w.showShift === "function") w.showShift(text);
+    }
+    function failure(error: any): void {
+        // Never surface native paths, signed URLs, or arbitrary IPC errors.
+        var text = typeof error === "string" ? error : error?.message;
+        var codes: any = {
+            playlist_limit: "Playlist is too large",
+            playlist_invalid: "Playlist is empty or invalid",
+            playlist_unsupported: "Playlist contains unsupported sources",
+            playlist_local_unavailable:
+                "Playlist local files must be dropped together with the playlist",
+            playlist_hls_local_unsupported:
+                "Local HLS manifests are not supported; use an HTTP(S) manifest URL",
+        };
+        if (
+            error &&
+            Object.prototype.hasOwnProperty.call(
+                codes,
+                error.droppedPlaylistCode
+            )
+        )
+            text = codes[error.droppedPlaylistCode];
+        if (
+            text ===
+            "Local HLS manifests are not supported; add the HTTP(S) manifest URL as a playlist entry"
+        )
+            text = codes.playlist_hls_local_unsupported;
+        if (text === "Dropped playlist must be UTF-8")
+            text = "Playlist must use UTF-8";
+        if (
+            text ===
+                "Dropped playlist exceeds the 2 MiB file or 8 MiB batch limit" ||
+            text === "Dropped playlists exceed 4096 entries or 128 local files"
+        )
+            text = codes.playlist_limit;
+        if (
+            text === "Dropped playlist contains no playable entries" ||
+            text === "Dropped playlist contains an invalid entry"
+        )
+            text = codes.playlist_invalid;
+        var known = [
+            "Local HLS manifests are not supported; use an HTTP(S) manifest URL",
+            "Playlist local files must be dropped together with the playlist",
+            "Playlist contains unsupported sources",
+            "Playlist is empty or invalid",
+            "Playlist is too large",
+            "Playlist must use UTF-8",
+        ];
+        if (known.indexOf(text) < 0) text = "Unsupported source";
+        message(w._ ? w._(text) : text);
     }
     function invoke(name: string, args: any): Promise<any> {
         var bridge = w.__TAURI__?.core || w.__TAURI__;
@@ -118,6 +171,53 @@ export function installLocalDrop(w: any): any {
         event.stopPropagation();
         if (native || !allowed()) return;
         var files = event.dataTransfer.files;
+        if (!files || files.length < 1 || files.length > 128) {
+            failure(null);
+            return;
+        }
+        if (hasDroppedPlaylist(files)) {
+            // Capture the gesture's File references before the first await.
+            var captured: any[] = [];
+            for (var i = 0; i < files.length; i++) captured.push(files[i]);
+            cancelPending();
+            var request = sequence;
+            var load = w.__ottCommandChannelLoad;
+            var waiting: any = { release: function () {} };
+            pending = waiting;
+            waiting.timer = w.setTimeout(function () {
+                if (pending === waiting) {
+                    cancelPending();
+                    failure(null);
+                }
+            }, 20000);
+            createDroppedPlaylists(w, captured).then(
+                function (lease) {
+                    if (
+                        pending !== waiting ||
+                        request !== sequence ||
+                        !allowed() ||
+                        load !== w.__ottCommandChannelLoad
+                    ) {
+                        if (pending === waiting) {
+                            pending = null;
+                            w.clearTimeout(waiting.timer);
+                        }
+                        release(lease);
+                        return;
+                    }
+                    pending = null;
+                    w.clearTimeout(waiting.timer);
+                    play(lease);
+                },
+                function (error) {
+                    if (pending !== waiting) return;
+                    pending = null;
+                    w.clearTimeout(waiting.timer);
+                    failure(error);
+                }
+            );
+            return;
+        }
         var lease: any;
         try {
             // Capture every File synchronously while the gesture owns DataTransfer.
@@ -180,16 +280,12 @@ export function installLocalDrop(w: any): any {
                 lease.catalog = catalog;
                 play(lease);
             },
-            function () {
+            function (error) {
                 if (pending !== lease) return;
                 pending = null;
                 w.clearTimeout(lease.timer);
                 release(lease);
-                message(
-                    w._
-                        ? w._("Local source unavailable")
-                        : "Local source unavailable"
-                );
+                failure(error);
             }
         );
     }

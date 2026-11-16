@@ -822,6 +822,14 @@ const DESKTOP_VIDEO_QUEUE_ALLOWANCE = Object.freeze({
     bytes: 407,
     gzipBytes: 169,
 });
+// M3U admission, strict decoding and temporary mixed queues stay in the lazy
+// desktop-drop asset. Measured optional asset: 17401 raw / 5695 gzip on
+// Node 26.8.2; allocate its delta over the existing 5807 / 2369 cap once.
+// Evidence: docs/evidence/desktop-playlist-drop-size.json.
+const DESKTOP_PLAYLIST_DROP_ALLOWANCE = Object.freeze({
+    bytes: 12000,
+    gzipBytes: 3500,
+});
 // Bounded recovery after relay failure adds 425 raw and at most 259 gzip bytes.
 // Existing raw caps cover the change. Count the measured gzip cost once per
 // entry and aggregate; preserve identity headroom and unrelated asset caps.
@@ -1359,10 +1367,12 @@ const OPTIONAL_BUDGETS = Object.freeze({
     "local-drop": Object.freeze({
         bytes:
             DESKTOP_DROP_ALLOWANCE.optional.bytes +
-            DESKTOP_VIDEO_QUEUE_ALLOWANCE.bytes,
+            DESKTOP_VIDEO_QUEUE_ALLOWANCE.bytes +
+            DESKTOP_PLAYLIST_DROP_ALLOWANCE.bytes,
         gzipBytes:
             DESKTOP_DROP_ALLOWANCE.optional.gzipBytes +
-            DESKTOP_VIDEO_QUEUE_ALLOWANCE.gzipBytes,
+            DESKTOP_VIDEO_QUEUE_ALLOWANCE.gzipBytes +
+            DESKTOP_PLAYLIST_DROP_ALLOWANCE.gzipBytes,
     }),
     "local-media-ui": Object.freeze({ bytes: 8500, gzipBytes: 3400 }),
     "media-companion": Object.freeze({
@@ -1492,6 +1502,7 @@ const BASE_TOTAL_BUDGET = Object.freeze({
         CLIENT_INTERFACE_COLORS_ALLOWANCE.remoteSettingsLifecycle.bytes +
         CLIENT_INTERFACE_COLORS_ALLOWANCE.optional.bytes +
         DESKTOP_VIDEO_QUEUE_ALLOWANCE.bytes +
+        DESKTOP_PLAYLIST_DROP_ALLOWANCE.bytes +
         INTERFACE_NOTIFICATION_SETTINGS_ALLOWANCE.entry.bytes +
         CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE.entry.bytes +
         INTERFACE_NOTIFICATION_SETTINGS_ALLOWANCE.appearance.bytes +
@@ -1595,6 +1606,7 @@ const BASE_TOTAL_BUDGET = Object.freeze({
         CLIENT_INTERFACE_COLORS_ALLOWANCE.remoteSettingsLifecycle.gzipBytes +
         CLIENT_INTERFACE_COLORS_ALLOWANCE.optional.gzipBytes +
         DESKTOP_VIDEO_QUEUE_ALLOWANCE.gzipBytes +
+        DESKTOP_PLAYLIST_DROP_ALLOWANCE.gzipBytes +
         INTERFACE_NOTIFICATION_SETTINGS_ALLOWANCE.entry.gzipBytes +
         CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE.entry.gzipBytes +
         INTERFACE_NOTIFICATION_SETTINGS_ALLOWANCE.appearance.gzipBytes +

@@ -1660,7 +1660,7 @@ export function installLocalMedia(w: any): any {
                     catalog.available === false ||
                     !Array.isArray(catalog.items) ||
                     !catalog.items.length ||
-                    catalog.items.length > 128 ||
+                    catalog.items.length > 4096 ||
                     !Array.isArray(catalog.sources) ||
                     catalog.sources.length !== 1 ||
                     typeof release !== "function" ||

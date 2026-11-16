@@ -116,6 +116,7 @@ const CLASSIC_MODULES = [
     "build/provider/drivers.js",
     "build/offline/browser-local-media.js",
     "build/offline/dropped-video.js",
+    "build/offline/dropped-playlist.js",
     "build/offline/local-media-progress.js",
     "build/offline/playback-selection.js",
     "build/offline/local-item-path.js",
@@ -310,6 +311,7 @@ const CLASSIC_OPTIONAL_BUNDLES = Object.freeze({
     ],
     "local-drop": [
         "build/offline/dropped-video.js",
+        "build/offline/dropped-playlist.js",
         "build/plugins/local-drop.js",
     ],
     "local-media-ui": ["build/plugins/local-media-ui.js"],
