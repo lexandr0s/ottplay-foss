@@ -24,6 +24,7 @@ HLS_BATCH_SHA256 = '967ceaa7e7478c2488c3a984d4a4a15f968226ef82a7cd065b4a93b84aa1
 PRODUCTION_TEST = 'normal_server_private_http_mpegts_renew_replace_and_cleanup'
 HLS_PRODUCTION_TEST = 'normal_server_private_http_hls_renew_replace_and_cleanup'
 PRODUCTION_ORDINARY_TESTS = frozenset({
+    'segment_video_proof_checks_count_timing_and_sampling_domain',
     'two_slot_fixture_geometry_passes_actual_core_validation',
     'nine_slot_fixture_geometry_passes_actual_core_and_old_odd_grid_is_rejected',
     'api_failure_diagnostics_bind_request_hash_and_closed_redacted_response',
@@ -1346,6 +1347,30 @@ def run_production_fixture(driver, budget, command, executable, tools, result, o
     result.update(staged)
 
 
+def require_segment_video_proofs(rows):
+    require(type(rows) is list and 1 <= len(rows) <= 64,
+            'Normal output segment proof collection is missing or unbounded')
+    fields = {'sha256', 'bytes', 'decoded_video_frames', 'sample_index',
+              'duration_ticks', 'time_base', 'source_identity_unchanged'}
+    for row in rows:
+        require(type(row) is dict and set(row) == fields,
+                'Normal output segment proof fields differ')
+        require(type(row['sha256']) is str and re.fullmatch(r'[0-9a-f]{64}', row['sha256'])
+                and type(row['bytes']) is int and 188 <= row['bytes'] <= 8 * 1024**2
+                and type(row['decoded_video_frames']) is int and 1 <= row['decoded_video_frames'] <= 300
+                and type(row['sample_index']) is int
+                and row['sample_index'] == min(10, row['decoded_video_frames'] - 1)
+                and type(row['duration_ticks']) is int and 1 <= row['duration_ticks'] <= 2**63 - 1
+                and type(row['time_base']) is str
+                and re.fullmatch(r'[0-9]{1,20}/[0-9]{1,20}', row['time_base'])
+                and row['source_identity_unchanged'] is True,
+                'Normal output segment proof values differ')
+        numerator, denominator = map(int, row['time_base'].split('/'))
+        require(1 <= numerator <= 2**64 - 1 and 1 <= denominator <= 2**64 - 1
+                and row['duration_ticks'] * numerator <= 30 * denominator,
+                'Normal output segment proof duration differs')
+
+
 def _run_production_mode(driver, budget, command, executable, tools, result, output, *, hls, prepared_inputs=None, runtime_tools=None):
     """Run one exact normal-server mode under its unchanged600-second bound."""
     name = HLS_PRODUCTION_TEST if hls else PRODUCTION_TEST
@@ -1446,6 +1471,7 @@ def _run_production_mode(driver, budget, command, executable, tools, result, out
                 and type(observed.get('inputs')) is list
                 and type(observed.get('upstream_request_counts')) is dict,
                 'Normal production-server adapter receipt did not qualify its bounded contract')
+        require_segment_video_proofs(observed.get('output_segment_video_proofs'))
         input_rows = ([{'id': row['id'], 'sha256': row['original_sha256'], 'bytes': row['original_bytes'], 'path': row['original_path']}
                        for row in manifest['sources']] if hls else manifest['inputs'])
         expected = {row['id']: row for row in input_rows}

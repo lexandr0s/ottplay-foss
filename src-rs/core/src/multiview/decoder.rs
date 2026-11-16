@@ -39,6 +39,109 @@ pub enum DecoderError {
     Io,
 }
 
+// Failure-only diagnostics contain closed enums and numeric clocks only. This
+// must work when Core is a normal dependency of a captured libtest caller.
+#[derive(Clone, Copy)]
+enum ProbeStage {
+    FfmpegProtocol,
+    FfprobeProtocol,
+    StatsHelp,
+    Metadata,
+}
+impl ProbeStage {
+    fn index(self) -> usize {
+        match self {
+            Self::FfmpegProtocol => 0,
+            Self::FfprobeProtocol => 1,
+            Self::StatsHelp => 2,
+            Self::Metadata => 3,
+        }
+    }
+    fn code(self) -> &'static str {
+        match self {
+            Self::FfmpegProtocol => "protocol_ffmpeg",
+            Self::FfprobeProtocol => "protocol_ffprobe",
+            Self::StatsHelp => "stats_help",
+            Self::Metadata => "metadata",
+        }
+    }
+}
+fn probe_error_class(error: DecoderError) -> &'static str {
+    match error {
+        DecoderError::InvalidInput => "invalid_input",
+        DecoderError::Unsupported => "unsupported",
+        DecoderError::ProbeFailed => "probe_failed",
+        DecoderError::ProbeTimeout => "probe_timeout",
+        DecoderError::ProbeLimit => "probe_limit",
+        DecoderError::StaleGeneration => "stale_generation",
+        DecoderError::Expired => "expired",
+        DecoderError::Revoked => "revoked",
+        DecoderError::BindingMismatch => "binding_mismatch",
+        DecoderError::PublicationDenied => "publication_denied",
+        DecoderError::Backpressure => "backpressure",
+        DecoderError::Stalled => "stalled",
+        DecoderError::Cancelled => "cancelled",
+        DecoderError::Io => "io",
+    }
+}
+#[derive(Clone, Copy)]
+struct ProbeFailureRecord {
+    stage: ProbeStage,
+    error: DecoderError,
+    elapsed_ms: u64,
+    remaining_ms: u64,
+    stage_ms: [u64; 4],
+}
+impl std::fmt::Display for ProbeFailureRecord {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "multiview_probe stage={} error={} elapsed_ms={} remaining_ms={} protocol_ffmpeg_ms={} protocol_ffprobe_ms={} stats_help_ms={} metadata_ms={}",
+            self.stage.code(), probe_error_class(self.error), self.elapsed_ms, self.remaining_ms,
+            self.stage_ms[0], self.stage_ms[1], self.stage_ms[2], self.stage_ms[3])
+    }
+}
+fn write_probe_failure(record: ProbeFailureRecord) {
+    #[cfg(panic = "unwind")]
+    {
+        let _ = std::panic::catch_unwind(|| eprintln!("{record}"));
+    }
+    #[cfg(panic = "abort")]
+    {
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr().lock(), "{record}");
+    }
+}
+fn observe_probe_stage<T>(
+    stage: ProbeStage,
+    started: Instant,
+    deadline: Instant,
+    stage_ms: &mut [u64; 4],
+    operation: impl FnOnce() -> Result<T, DecoderError>,
+) -> Result<T, DecoderError> {
+    let began = Instant::now();
+    let result = operation();
+    let now = Instant::now();
+    stage_ms[stage.index()] = now
+        .saturating_duration_since(began)
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    if let Err(error) = result.as_ref() {
+        write_probe_failure(ProbeFailureRecord {
+            stage,
+            error: *error,
+            elapsed_ms: now
+                .saturating_duration_since(started)
+                .as_millis()
+                .min(u64::MAX as u128) as u64,
+            remaining_ms: deadline
+                .saturating_duration_since(now)
+                .as_millis()
+                .min(u64::MAX as u128) as u64,
+            stage_ms: *stage_ms,
+        });
+    }
+    result
+}
+
 pub struct DecoderConfig {
     pub ffmpeg: PathBuf,
     pub ffprobe: PathBuf,
@@ -2853,10 +2956,36 @@ pub fn probe_stream(
         }
         source.binding.check(&source.binding.context)
     };
-    let ffmpeg = stream_fd_tool(&config.ffmpeg, deadline, &check)?;
-    let ffprobe = stream_fd_tool(&config.ffprobe, deadline, &check)?;
-    require_stream_stats(&ffmpeg, deadline, &check)?;
-    let bytes = captured_until(
+    let probe_started = Instant::now();
+    let mut stage_ms = [0; 4];
+    let ffmpeg = observe_probe_stage(
+        ProbeStage::FfmpegProtocol,
+        probe_started,
+        deadline,
+        &mut stage_ms,
+        || stream_fd_tool(&config.ffmpeg, deadline, &check),
+    )?;
+    let ffprobe = observe_probe_stage(
+        ProbeStage::FfprobeProtocol,
+        probe_started,
+        deadline,
+        &mut stage_ms,
+        || stream_fd_tool(&config.ffprobe, deadline, &check),
+    )?;
+    observe_probe_stage(
+        ProbeStage::StatsHelp,
+        probe_started,
+        deadline,
+        &mut stage_ms,
+        || require_stream_stats(&ffmpeg, deadline, &check),
+    )?;
+    let information = observe_probe_stage(
+        ProbeStage::Metadata,
+        probe_started,
+        deadline,
+        &mut stage_ms,
+        || {
+            let bytes = captured_until(
         Command::new(&ffprobe)
             .args([
                 "-v",
@@ -2884,11 +3013,14 @@ pub fn probe_stream(
         deadline,
         &check,
     )?;
-    let information = metadata(&bytes)?;
-    check()?;
-    if Instant::now() >= deadline {
-        return Err(DecoderError::ProbeTimeout);
-    }
+            let information = metadata(&bytes)?;
+            check()?;
+            if Instant::now() >= deadline {
+                return Err(DecoderError::ProbeTimeout);
+            }
+            Ok(information)
+        },
+    )?;
     {
         let mut state = source.identity.0.lock().map_err(|_| DecoderError::Io)?;
         if state.probe_completed || state.started {
@@ -6968,6 +7100,63 @@ mod tests {
             }
             .pixel_rate(),
             u64::MAX
+        );
+    }
+}
+
+#[cfg(test)]
+mod probe_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn probe_failure_record_is_closed_and_keeps_each_stage_duration() {
+        let record = ProbeFailureRecord {
+            stage: ProbeStage::Metadata,
+            error: DecoderError::ProbeTimeout,
+            elapsed_ms: 5000,
+            remaining_ms: 0,
+            stage_ms: [40, 30, 70, 4860],
+        };
+        assert_eq!(record.to_string(), "multiview_probe stage=metadata error=probe_timeout elapsed_ms=5000 remaining_ms=0 protocol_ffmpeg_ms=40 protocol_ffprobe_ms=30 stats_help_ms=70 metadata_ms=4860");
+        assert!(record.to_string().len() < 256);
+        assert!(!record.to_string().contains('\n'));
+    }
+
+    #[test]
+    fn probe_observation_preserves_results_and_prior_stage_counters() {
+        let start = Instant::now();
+        let end = start + Duration::from_secs(5);
+        let mut counters = [41, 42, 43, 44];
+        let mut calls = 0;
+        assert_eq!(
+            observe_probe_stage(ProbeStage::Metadata, start, end, &mut counters, || {
+                calls += 1;
+                Ok::<_, DecoderError>(73)
+            }),
+            Ok(73)
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(&counters[..3], &[41, 42, 43]);
+        assert_eq!(
+            observe_probe_stage::<()>(ProbeStage::StatsHelp, start, end, &mut counters, || {
+                calls += 1;
+                Err(DecoderError::PublicationDenied)
+            }),
+            Err(DecoderError::PublicationDenied)
+        );
+        assert_eq!(calls, 2);
+        assert_eq!(&counters[..2], &[41, 42]);
+        // An elapsed diagnostic deadline does not add an admission policy: the
+        // original operation remains responsible for its unchanged deadline.
+        assert_eq!(
+            observe_probe_stage(
+                ProbeStage::FfprobeProtocol,
+                start,
+                start,
+                &mut counters,
+                || Ok::<_, DecoderError>(11)
+            ),
+            Ok(11)
         );
     }
 }

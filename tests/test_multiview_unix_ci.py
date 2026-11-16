@@ -637,6 +637,7 @@ class Attempt:
                 input_rows = manifest['inputs']
             receipt = {'schema': 'ottplay.multiview.production-binary.v1', 'pass': True,
                        'input_adapter':'http-hls-ts-v1' if hls else 'http-mpegts-v1',
+                       'output_segment_video_proofs':[{'sha256':'a'*64,'bytes':1880,'decoded_video_frames':10,'sample_index':9,'duration_ticks':90000,'time_base':'1/90000','source_identity_unchanged':True}],
                        'sequential_contexts':17,'sequential_output_generations':17,'active_sigterm':True,
                        'scope': 'Normal production HTTPS control/HLS with a private RFC1918 HTTP MPEG-TS adapter, all nine advertised slots and private HLS output; no native-player or physical-television qualification',
                        'tls': {'configured_api_transport':'https','trust':'synthetic_ca_only',
@@ -667,6 +668,7 @@ class Attempt:
                         'segments':[{key:item[key] for key in ('index','sha256','bytes','duration_ns')} for item in row['segments']]}
                         for row in manifest['sources']]}
                 if self.case == 'hls-no-active-sigterm': receipt['active_sigterm'] = False
+                if self.case == 'production-no-segment-proof': receipt.pop('output_segment_video_proofs')
                 if self.case == 'hls-sixteen-contexts': receipt['sequential_contexts'] = 16
                 if self.case == 'hls-no-segment-binding': receipt['hls_source']['inputs'][0]['segments'][0]['sha256'] = '0'*64
                 if self.case == 'hls-future-fetch': receipt['hls_source']['audit']['future_denied'] = 1
@@ -2096,14 +2098,38 @@ class MockMainTests(unittest.TestCase):
                     self.assertFalse(attempt.terminal()['normal_server_hls_to_hls'])
                     self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
 
+    def test_output_segment_proof_requires_closed_measured_sampling_evidence(self):
+        row={'sha256':'a'*64,'bytes':1880,'decoded_video_frames':10,'sample_index':9,
+             'duration_ticks':90000,'time_base':'1/90000','source_identity_unchanged':True}
+        ci.require_segment_video_proofs([row])
+        ci.require_segment_video_proofs([dict(row,decoded_video_frames=11,sample_index=10)])
+        invalid=[None,[],[row]*65,[{}]]
+        for key,value in [('sha256','not-a-hash'),('sha256',7),('bytes',True),('bytes',187),
+                          ('decoded_video_frames',0),('decoded_video_frames',301),
+                          ('sample_index',10),('sample_index',False),('duration_ticks',0),
+                          ('duration_ticks',2**63),('time_base','0/90000'),('time_base','1/0'),
+                          ('time_base','1/90000/private'),('time_base',None),
+                          ('time_base',str(2**64)+'/1'),('duration_ticks',31*90000),
+                          ('source_identity_unchanged',False),('source_identity_unchanged',1)]:
+            invalid.append([dict(row,**{key:value})])
+        invalid.append([dict(row,unexpected='value')])
+        for rows in invalid:
+            with self.subTest(rows=rows),self.assertRaises(RuntimeError):
+                ci.require_segment_video_proofs(rows)
+        with Attempt('production-no-segment-proof') as attempt:
+            self.failed(attempt, 'Normal output segment proof collection')
+            self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
+            self.assertFalse(attempt.terminal()['normal_server_hls_to_hls'])
+
     def test_normal_fixture_credential_and_startup_diagnostic_units_are_mandatory(self):
-        required={'two_slot_fixture_geometry_passes_actual_core_validation',
+        required={'segment_video_proof_checks_count_timing_and_sampling_domain',
+                  'two_slot_fixture_geometry_passes_actual_core_validation',
                   'nine_slot_fixture_geometry_passes_actual_core_and_old_odd_grid_is_rejected',
                   'api_failure_diagnostics_bind_request_hash_and_closed_redacted_response',
                   'startup_diagnostic_tail_is_bounded_and_redacts_fixture_secrets_and_urls',
                   'production_tls::leaf_request_has_explicit_distinguished_name_for_openssl_1_1_and_3'}
         self.assertTrue(required <= ci.PRODUCTION_ORDINARY_TESTS)
-        self.assertEqual(len(ci.PRODUCTION_ORDINARY_TESTS),8)
+        self.assertEqual(len(ci.PRODUCTION_ORDINARY_TESTS),9)
         for missing in required:
             with self.subTest(missing=missing), Attempt() as attempt:
                 original=attempt.response

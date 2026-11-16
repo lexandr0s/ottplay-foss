@@ -37,6 +37,8 @@ const INPUTS: &str = "OTTPLAY_MULTIVIEW_PRODUCTION_INPUTS";
 use production_config::ProductionMode;
 
 thread_local! {
+    // Bounded summaries only; raw segments, URLs and ffprobe JSON are never retained.
+    static SEGMENT_VIDEO_PROOFS: std::cell::RefCell<Vec<Value>> = const { std::cell::RefCell::new(Vec::new()) };
     // Bound only this test thread's owned normal-server stderr, never an arbitrary file.
     static FAILURE_STDERR_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
@@ -1131,6 +1133,48 @@ fn fetch_segment(base: &str, url: &str) -> Option<Vec<u8>> {
     (status == 200 && bytes.len() >= 188).then_some(bytes)
 }
 
+#[test]
+fn segment_video_proof_checks_count_timing_and_sampling_domain() {
+    fn report(count: usize) -> (Value, Vec<Value>) {
+        (json!({"nb_read_frames":count.to_string(),"time_base":"1/90000"}),
+         (0..count).map(|n| json!({"media_type":"video","best_effort_timestamp":n*9000,"pkt_duration":9000})).collect())
+    }
+    for (count, expected) in [(1, 0), (10, 9), (11, 10), (12, 10)] {
+        let (video, frames) = report(count);
+        let proof = segment_video_proof(&video, &frames).unwrap();
+        assert_eq!(proof.count, count as u64);
+        assert_eq!(proof.time_base, "1/90000");
+        assert_eq!(proof.sample_index, expected);
+        assert_eq!(proof.duration_ticks, count as i64 * 9000);
+    }
+    let (mut video, mut frames) = report(10);
+    video["nb_read_frames"] = json!("0");
+    assert!(segment_video_proof(&video, &frames).is_none());
+    for bad in ["N/A", "-1", "+10", "1.0", "301", "18446744073709551616"] {
+        video["nb_read_frames"] = json!(bad);
+        assert!(segment_video_proof(&video, &frames).is_none());
+    }
+    video["nb_read_frames"] = json!("10");
+    for bad in ["0/90000", "1/0", "bad"] {
+        video["time_base"] = json!(bad);
+        assert!(segment_video_proof(&video, &frames).is_none());
+    }
+    video["time_base"] = json!("1/90000");
+    frames[1]["best_effort_timestamp"] = json!(0);
+    assert!(segment_video_proof(&video, &frames).is_none());
+    let (video, mut frames) = report(10);
+    frames[9]["pkt_duration"] = json!(0);
+    assert!(segment_video_proof(&video, &frames).is_none());
+    frames.pop();
+    assert!(segment_video_proof(&video, &frames).is_none());
+    let (video, mut frames) = report(10);
+    frames[9]["best_effort_timestamp"] = json!(i64::MAX);
+    assert!(segment_video_proof(&video, &frames).is_none());
+    let (video, mut frames) = report(10);
+    frames[9]["pkt_duration"] = json!(31 * 90000);
+    assert!(segment_video_proof(&video, &frames).is_none());
+}
+
 fn try_new_segment(
     base: &str,
     playlist: &str,
@@ -1240,7 +1284,71 @@ fn run_bounded_filter(
     (status, output)
 }
 
-fn ffprobe_segment(ffprobe: &Path, bytes: &[u8]) {
+struct SegmentVideoProof {
+    count: u64,
+    sample_index: u64,
+    duration_ticks: i64,
+    time_base: String,
+}
+
+fn segment_video_proof(video: &Value, frames: &[Value]) -> Option<SegmentVideoProof> {
+    let raw_count = video["nb_read_frames"].as_str()?;
+    if raw_count.is_empty() || !raw_count.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let count = raw_count.parse::<u64>().ok()?;
+    if !(1..=300).contains(&count) {
+        return None;
+    }
+    let time_base = video["time_base"].as_str()?;
+    let (numerator, denominator) = time_base.split_once('/')?;
+    let numerator = numerator.parse::<u64>().ok()?;
+    let denominator = denominator.parse::<u64>().ok()?;
+    if numerator == 0 || denominator == 0 {
+        return None;
+    }
+    let video_frames: Vec<_> = frames
+        .iter()
+        .filter(|v| v["media_type"] == "video")
+        .collect();
+    if video_frames.len() as u64 != count {
+        return None;
+    }
+    let mut previous = None;
+    for frame in &video_frames {
+        let timestamp = frame["best_effort_timestamp"].as_i64()?;
+        if previous.is_some_and(|old| timestamp <= old) {
+            return None;
+        }
+        previous = Some(timestamp);
+    }
+    let first = video_frames.first()?["best_effort_timestamp"].as_i64()?;
+    let last = video_frames.last()?;
+    let last_duration = last["duration"]
+        .as_i64()
+        .or_else(|| last["pkt_duration"].as_i64())?;
+    if last_duration <= 0 {
+        return None;
+    }
+    let duration_ticks = last["best_effort_timestamp"]
+        .as_i64()?
+        .checked_add(last_duration)?
+        .checked_sub(first)?;
+    let scaled = u128::try_from(duration_ticks)
+        .ok()?
+        .checked_mul(u128::from(numerator))?;
+    if scaled == 0 || scaled > 30 * u128::from(denominator) {
+        return None;
+    }
+    Some(SegmentVideoProof {
+        count,
+        sample_index: 10.min(count - 1),
+        duration_ticks,
+        time_base: time_base.to_owned(),
+    })
+}
+
+fn ffprobe_segment(ffprobe: &Path, bytes: &[u8]) -> SegmentVideoProof {
     assert!(
         bytes.len() >= 188 && bytes.len() <= 8 * 1024 * 1024,
         "bounded TS output segment required"
@@ -1250,8 +1358,10 @@ fn ffprobe_segment(ffprobe: &Path, bytes: &[u8]) {
         &[
             "-v",
             "error",
+            "-count_frames",
+            "-show_frames",
             "-show_entries",
-            "stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate",
+            "stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,nb_read_frames,time_base:frame=media_type,best_effort_timestamp,pkt_duration,duration",
             "-of",
             "json",
             "-i",
@@ -1288,9 +1398,32 @@ fn ffprobe_segment(ffprobe: &Path, bytes: &[u8]) {
         audio["codec_name"], "aac",
         "selected profile audio codec differs"
     );
+    let proof = segment_video_proof(
+        video,
+        report["frames"].as_array().expect("decoded frame proof"),
+    )
+    .expect("positive bounded decoded frame count, timestamps and duration required");
+    // The segment is a borrowed immutable byte slice throughout probe and decode;
+    // retain content identity, not an API URL or an output capability.
+    eprintln!("normal_segment_video_proof sha256={:x} bytes={} frames={} sample_index={} duration_ticks={} time_base={}",
+        Sha256::digest(bytes), bytes.len(), proof.count, proof.sample_index, proof.duration_ticks, proof.time_base);
+    SEGMENT_VIDEO_PROOFS.with(|rows| {
+        let mut rows = rows.borrow_mut();
+        assert!(rows.len() < 64, "bounded segment proof summary required");
+        rows.push(
+            json!({"sha256":format!("{:x}", Sha256::digest(bytes)), "bytes":bytes.len(),
+            "decoded_video_frames":proof.count,"sample_index":proof.sample_index,
+            "duration_ticks":proof.duration_ticks,"time_base":proof.time_base}),
+        );
+    });
+    proof
 }
 
 fn decode_segment_rgb(ffmpeg: &Path, bytes: &[u8]) -> Vec<u8> {
+    let identity = Sha256::digest(bytes);
+    let ffprobe = PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFPROBE").unwrap());
+    let proof = ffprobe_segment(&ffprobe, bytes);
+    let select = format!(r"select=eq(n\,{})", proof.sample_index);
     assert!(
         bytes.len() >= 188 && bytes.len() <= 8 * 1024 * 1024,
         "bounded TS output segment required"
@@ -1305,7 +1438,7 @@ fn decode_segment_rgb(ffmpeg: &Path, bytes: &[u8]) -> Vec<u8> {
             "-i",
             "pipe:0",
             "-vf",
-            r"select=gte(n\,10)",
+            &select,
             "-frames:v",
             "1",
             "-f",
@@ -1323,6 +1456,15 @@ fn decode_segment_rgb(ffmpeg: &Path, bytes: &[u8]) -> Vec<u8> {
         640 * 360 * 3,
         "HLS frame dimensions differ from selected profile"
     );
+    assert_eq!(
+        Sha256::digest(bytes),
+        identity,
+        "segment content changed during probe/decode"
+    );
+    SEGMENT_VIDEO_PROOFS.with(|rows| {
+        rows.borrow_mut().last_mut().expect("owned segment proof")["source_identity_unchanged"] =
+            json!(true);
+    });
     output
 }
 
@@ -1905,9 +2047,7 @@ fn run_normal_production(mode: ProductionMode) {
     // before the final slot reached its ten-frame readiness barrier.
     let _ = wait_new_segment(&api_origin, playlist, &mut grid_seen, grid_end);
     let (_, _, grid_segment) = wait_new_segment(&api_origin, playlist, &mut grid_seen, grid_end);
-    let ffprobe = PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFPROBE").unwrap());
     let ffmpeg = PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFMPEG").unwrap());
-    ffprobe_segment(&ffprobe, &grid_segment);
     let rgb = decode_segment_rgb(&ffmpeg, &grid_segment);
     for slot_id in 0..9usize {
         let x = [107, 320, 533][slot_id % 3];
@@ -2071,10 +2211,7 @@ fn run_normal_production(mode: ProductionMode) {
         if !output_checked {
             if let Some(path) = last_status["output"]["playlist_path"].as_str() {
                 if let Some((_, _, bytes)) = try_new_segment(&api_origin, path, &mut main_seen) {
-                    let ffprobe =
-                        PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFPROBE").unwrap());
                     let ffmpeg = PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFMPEG").unwrap());
-                    ffprobe_segment(&ffprobe, &bytes);
                     let rgb = decode_segment_rgb(&ffmpeg, &bytes);
                     assert_cell_color(&rgb, 160, 180, 1);
                     assert_cell_color(&rgb, 480, 180, 2);
@@ -2399,6 +2536,7 @@ fn run_normal_production(mode: ProductionMode) {
     );
     let receipt = json!({
         "schema":"ottplay.multiview.production-binary.v1","pass":true,
+        "output_segment_video_proofs":SEGMENT_VIDEO_PROOFS.with(|rows| rows.borrow().clone()),
         "input_adapter":mode.adapter(),"sequential_contexts":sequential_sessions.len(),
         "sequential_output_generations":sequential_outputs.len(),"active_sigterm":true,"hls_source":hls_source_evidence,
         "tls":tls.receipt(),

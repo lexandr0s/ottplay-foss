@@ -6,8 +6,8 @@ use futures_util::FutureExt;
 use ottplay_core::multiview::{
     broker::{
         registry::{Registry, RegistryError, Reservation, RetirementProof, SlotSourceRefs},
-        runtime::SourceService,
-        stream::{OpenedStream, StreamFactory, StreamPhase},
+        runtime::{RuntimeError, SourceService},
+        stream::{OpenedStream, ProducerRetirement, StreamError, StreamFactory, StreamPhase},
         wire::{
             self, Binding, ControlOp, ControlRequest, ControlResponse, Geometry, NativeExpected,
             Output, OutputProfile, SessionCreateRequest, SessionState, StatusRequest,
@@ -210,6 +210,187 @@ fn error(value: RegistryError) -> BoundaryError {
         _ => BoundaryError::Conflict,
     }
 }
+// Never format source/config/request/OS errors here: only closed classes and
+// the already-owned producer's numeric retirement receipt cross this boundary.
+#[derive(Clone, Copy)]
+enum PlayStage {
+    Prepare,
+    Resolve,
+    Factory,
+    Grant,
+    ProbeOpen,
+    ProbeWrap,
+    ProbeResult,
+    ProbeRetire,
+    DecodeOpen,
+    DecodeWrap,
+    CommitStream,
+    CommitJoin,
+    Panic,
+}
+impl PlayStage {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Prepare => "prepare",
+            Self::Resolve => "resolve",
+            Self::Factory => "factory",
+            Self::Grant => "grant",
+            Self::ProbeOpen => "probe_open",
+            Self::ProbeWrap => "probe_wrap",
+            Self::ProbeResult => "probe_result",
+            Self::ProbeRetire => "probe_retire",
+            Self::DecodeOpen => "decode_open",
+            Self::DecodeWrap => "decode_wrap",
+            Self::CommitStream => "commit_stream",
+            Self::CommitJoin => "commit_join",
+            Self::Panic => "panic",
+        }
+    }
+}
+#[derive(Clone, Copy)]
+enum PlayFailure {
+    Runtime(RuntimeError),
+    Stream(StreamError),
+    Decoder(decoder::DecoderError),
+    Core(persistent::Error),
+    Join,
+    Retirement,
+    Panic,
+}
+fn runtime_failure_class(error: RuntimeError) -> &'static str {
+    use ottplay_core::multiview::broker::network::Error as N;
+    match error {
+        RuntimeError::Registry(error) => match error {
+            RegistryError::InvalidRequest => "registry_invalid",
+            RegistryError::Forbidden => "registry_forbidden",
+            RegistryError::NotFound => "registry_not_found",
+            RegistryError::Stale => "registry_stale",
+            RegistryError::Expired => "registry_expired",
+            RegistryError::Limit => "registry_limit",
+            RegistryError::Busy => "registry_busy",
+            RegistryError::Revoked => "registry_revoked",
+            RegistryError::Unavailable => "registry_unavailable",
+        },
+        RuntimeError::Network(error) => match error {
+            N::InvalidConfiguration => "network_config",
+            N::InvalidAddress => "network_address",
+            N::DestinationDenied => "destination_denied",
+            N::Busy => "network_busy",
+            N::Cancelled => "network_cancelled",
+            N::Timeout => "network_timeout",
+            N::Transport => "network_transport",
+            N::Rejected => "network_rejected",
+            N::TooLarge => "network_limit",
+            N::RedirectDenied => "redirect_denied",
+            N::InvalidManifest => "manifest_invalid",
+            N::Unsupported => "network_unsupported",
+            N::InvalidResponse => "response_invalid",
+            N::CleanupUnconfirmed => "cleanup_unconfirmed",
+        },
+        RuntimeError::InvalidConfiguration => "runtime_config",
+        RuntimeError::Unavailable => "runtime_unavailable",
+    }
+}
+fn stream_failure_class(error: StreamError) -> &'static str {
+    match error {
+        StreamError::Source(error) => runtime_failure_class(error),
+        StreamError::InvalidPhase => "stream_phase",
+        StreamError::Expired => "stream_expired",
+        StreamError::UnsupportedPlatform => "stream_platform",
+        StreamError::Io => "stream_io",
+        StreamError::Busy => "stream_busy",
+        StreamError::JoinFailed => "stream_join_failed",
+        StreamError::JoinTimeout => "stream_join_timeout",
+        StreamError::ProbeLimit => "stream_probe_limit",
+    }
+}
+impl PlayFailure {
+    fn code(self) -> &'static str {
+        use decoder::DecoderError as D;
+        use persistent::Error as C;
+        match self {
+            Self::Runtime(error) => runtime_failure_class(error),
+            Self::Stream(error) => stream_failure_class(error),
+            Self::Decoder(error) => match error {
+                D::InvalidInput => "decoder_invalid",
+                D::Unsupported => "decoder_unsupported",
+                D::ProbeFailed => "probe_failed",
+                D::ProbeTimeout => "probe_timeout",
+                D::ProbeLimit => "probe_limit",
+                D::StaleGeneration => "stale_generation",
+                D::Expired => "decoder_expired",
+                D::Revoked => "decoder_revoked",
+                D::BindingMismatch => "binding_mismatch",
+                D::PublicationDenied => "publication_denied",
+                D::Backpressure => "backpressure",
+                D::Stalled => "stalled",
+                D::Cancelled => "decoder_cancelled",
+                D::Io => "decoder_io",
+            },
+            Self::Core(error) => match error {
+                C::InvalidConfig => "core_config",
+                C::InvalidSlot => "core_slot",
+                C::StaleRevision => "core_stale",
+                C::CapacityExceeded => "core_capacity",
+                C::SourceFailed => "core_source_failed",
+                C::NoAudio => "core_no_audio",
+                C::OutputFailed => "core_output_failed",
+                C::Stopped => "core_stopped",
+            },
+            Self::Join => "join_failed",
+            Self::Retirement => "producer_retirement",
+            Self::Panic => "panic",
+        }
+    }
+}
+struct PlayFailureRecord {
+    stage: PlayStage,
+    error: PlayFailure,
+    elapsed_ms: u64,
+    producer: Option<ProducerRetirement>,
+}
+impl std::fmt::Display for PlayFailureRecord {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let p = self.producer;
+        write!(out, "multiview_play stage={} error={} elapsed_ms={} producer_present={} producer_bytes={} producer_eof={} producer_cancelled={} producer_joined={} producer_error={}",
+            self.stage.code(), self.error.code(), self.elapsed_ms, p.is_some(),
+            p.map_or(0, |p| p.bytes), p.is_some_and(|p| p.eof), p.is_some_and(|p| p.cancelled), p.is_some_and(|p| p.joined),
+            p.and_then(|p| p.error).map_or("none", stream_failure_class))
+    }
+}
+fn play_failure_record(
+    stage: PlayStage,
+    error: PlayFailure,
+    started: Instant,
+    producer: Option<ProducerRetirement>,
+) -> PlayFailureRecord {
+    PlayFailureRecord {
+        stage,
+        error,
+        elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        producer,
+    }
+}
+fn write_play_failure(record: PlayFailureRecord) {
+    #[cfg(panic = "unwind")]
+    {
+        let _ = std::panic::catch_unwind(|| eprintln!("{record}"));
+    }
+    #[cfg(panic = "abort")]
+    {
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr().lock(), "{record}");
+    }
+}
+fn play_failure(
+    stage: PlayStage,
+    error: PlayFailure,
+    started: Instant,
+    producer: Option<ProducerRetirement>,
+) {
+    write_play_failure(play_failure_record(stage, error, started, producer));
+}
+
 fn media_error(value: persistent::Error) -> BoundaryError {
     match value {
         persistent::Error::StaleRevision => BoundaryError::Conflict,
@@ -1348,6 +1529,7 @@ impl LiveBackend {
         context: &Binding,
         grant: &str,
     ) -> Result<(), BoundaryError> {
+        let started = Instant::now();
         let slot = context.native_expected.slot_id;
         let (preparation, cancel, done) = {
             let mut state = session
@@ -1364,12 +1546,26 @@ impl LiveBackend {
             {
                 return Err(BoundaryError::Conflict);
             }
-            let preparation = state
+            let preparation = match state
                 .core
                 .as_ref()
                 .ok_or(BoundaryError::Revoked)?
                 .capture_stream_preparation(slot, context.backend_slot_revision)
-                .map_err(media_error)?;
+            {
+                Ok(preparation) => preparation,
+                Err(error) => {
+                    let record = play_failure_record(
+                        PlayStage::Prepare,
+                        PlayFailure::Core(error),
+                        started,
+                        None,
+                    );
+                    // Stderr may block: release host custody before emitting.
+                    drop(state);
+                    write_play_failure(record);
+                    return Err(media_error(error));
+                }
+            };
             let cancel = session.cancel.child_token();
             let (done, receiver) = watch::channel(false);
             state.pending.insert(
@@ -1389,12 +1585,14 @@ impl LiveBackend {
             grant,
             preparation,
             cancel,
+            started,
         ))
         .catch_unwind()
         .await;
         let result = match outcome {
             Ok(result) => result,
             Err(_) => {
+                play_failure(PlayStage::Panic, PlayFailure::Panic, started, None);
                 if let Ok(mut state) = session.control.lock() {
                     state.cleanup_failed = true;
                 }
@@ -1418,6 +1616,7 @@ impl LiveBackend {
         grant: &str,
         preparation: persistent::StreamPreparation,
         cancel: CancellationToken,
+        started: Instant,
     ) -> Result<(), BoundaryError> {
         let source = match self
             .sources
@@ -1426,6 +1625,12 @@ impl LiveBackend {
         {
             Ok(source) => source,
             Err(failure) => {
+                play_failure(
+                    PlayStage::Resolve,
+                    PlayFailure::Runtime(failure.error),
+                    started,
+                    None,
+                );
                 if let Some(reservation) = failure.reservation {
                     session
                         .control
@@ -1444,6 +1649,12 @@ impl LiveBackend {
         let mut factory = match StreamFactory::new(source, session.end) {
             Ok(factory) => factory,
             Err(failure) => {
+                play_failure(
+                    PlayStage::Factory,
+                    PlayFailure::Stream(failure.error),
+                    started,
+                    None,
+                );
                 let cleaned = failure.into_source().finish().await.is_ok();
                 self.finish_reservation(session, &reservation, cleaned, true);
                 return Err(BoundaryError::Revoked);
@@ -1456,7 +1667,8 @@ impl LiveBackend {
             reservation.publication_authority(),
         ) {
             Ok(granted) => granted,
-            Err(_) => {
+            Err(error) => {
+                play_failure(PlayStage::Grant, PlayFailure::Decoder(error), started, None);
                 let cleaned = factory.finish().await.is_ok();
                 self.finish_reservation(session, &reservation, cleaned, true);
                 return Err(BoundaryError::Unavailable);
@@ -1469,7 +1681,13 @@ impl LiveBackend {
         }
         let mut probe = match factory.open(StreamPhase::Probe).await {
             Ok(probe) => probe,
-            Err(_) => {
+            Err(error) => {
+                play_failure(
+                    PlayStage::ProbeOpen,
+                    PlayFailure::Stream(error),
+                    started,
+                    None,
+                );
                 let cleaned = factory.finish().await.is_ok();
                 self.finish_reservation(session, &reservation, cleaned, true);
                 return Err(BoundaryError::Unavailable);
@@ -1477,11 +1695,12 @@ impl LiveBackend {
         };
         let probe_input = match probe
             .take_file()
-            .ok()
-            .and_then(|file| granted.wrap_probe(file).ok())
+            .map_err(PlayFailure::Stream)
+            .and_then(|file| granted.wrap_probe(file).map_err(PlayFailure::Decoder))
         {
-            Some(input) => input,
-            None => {
+            Ok(input) => input,
+            Err(error) => {
+                play_failure(PlayStage::ProbeWrap, error, started, None);
                 let _ = probe.retire().await;
                 let cleaned = factory.finish().await.is_ok();
                 self.finish_reservation(session, &reservation, cleaned, true);
@@ -1501,7 +1720,31 @@ impl LiveBackend {
             (preparation, granted, result)
         })
         .await;
-        let joined = probe.retire().await.is_ok_and(|r| r.joined);
+        let retirement = probe.retire().await;
+        let joined = retirement.as_ref().is_ok_and(|r| r.joined);
+        let producer = retirement.as_ref().ok().copied();
+        match &probed {
+            Ok((_, _, Err(error))) => play_failure(
+                PlayStage::ProbeResult,
+                PlayFailure::Decoder(*error),
+                started,
+                producer,
+            ),
+            Err(_) => play_failure(PlayStage::ProbeResult, PlayFailure::Join, started, producer),
+            _ => {}
+        }
+        if !joined {
+            play_failure(
+                PlayStage::ProbeRetire,
+                retirement
+                    .as_ref()
+                    .err()
+                    .copied()
+                    .map_or(PlayFailure::Retirement, PlayFailure::Stream),
+                started,
+                producer,
+            );
+        }
         let (preparation, granted, info) = match probed {
             Ok((p, g, Ok(info))) if joined => (p, g, info),
             _ => {
@@ -1517,7 +1760,13 @@ impl LiveBackend {
         }
         let mut decode = match factory.open(StreamPhase::Decode).await {
             Ok(decode) => decode,
-            Err(_) => {
+            Err(error) => {
+                play_failure(
+                    PlayStage::DecodeOpen,
+                    PlayFailure::Stream(error),
+                    started,
+                    None,
+                );
                 let cleaned = factory.finish().await.is_ok();
                 self.finish_reservation(session, &reservation, cleaned, true);
                 return Err(BoundaryError::Unavailable);
@@ -1525,11 +1774,12 @@ impl LiveBackend {
         };
         let input = match decode
             .take_file()
-            .ok()
-            .and_then(|file| granted.wrap_decode(file).ok())
+            .map_err(PlayFailure::Stream)
+            .and_then(|file| granted.wrap_decode(file).map_err(PlayFailure::Decoder))
         {
-            Some(input) => input,
-            None => {
+            Ok(input) => input,
+            Err(error) => {
+                play_failure(PlayStage::DecodeWrap, error, started, None);
                 let _ = decode.retire().await;
                 let cleaned = factory.finish().await.is_ok();
                 self.finish_reservation(session, &reservation, cleaned, true);
@@ -1563,6 +1813,14 @@ impl LiveBackend {
                 .ok_or(BoundaryError::Revoked)?
                 .commit_stream(preparation, &granted, info, input);
             refresh(&mut state, &target.scene);
+            let diagnostic = result.as_ref().err().map(|error| {
+                play_failure_record(
+                    PlayStage::CommitStream,
+                    PlayFailure::Core(*error),
+                    started,
+                    None,
+                )
+            });
             if result.is_err() {
                 let _ = task
                     .registry
@@ -1594,17 +1852,34 @@ impl LiveBackend {
             if task.sync_registry(&target, &mut state).is_err() {
                 state.cleanup_failed = true;
             }
-            result.map(|_| ()).map_err(media_error)
+            // The closed record owns no session/resource reference. Return it
+            // only after the original recovery/sync sequence has completed.
+            Ok::<_, BoundaryError>((result.map(|_| ()).map_err(media_error), diagnostic))
         })
         .await;
-        let (result, worker_reaped) = match commit {
-            Ok(result) => (result, true),
-            Err(_) => (Err(BoundaryError::Unavailable), false),
+        let (result, worker_reaped, diagnostic) = match commit {
+            Ok(Ok((result, diagnostic))) => (result, true, diagnostic),
+            Ok(Err(error)) => (Err(error), true, None),
+            Err(_) => (
+                Err(BoundaryError::Unavailable),
+                false,
+                Some(play_failure_record(
+                    PlayStage::CommitJoin,
+                    PlayFailure::Join,
+                    started,
+                    None,
+                )),
+            ),
         };
         if let Err(error) = result {
             let _ = decode.retire().await;
             let cleaned = factory.finish().await.is_ok();
             self.finish_reservation(session, &reservation, cleaned, worker_reaped);
+            // The control guard and the original source-cleanup sequence are
+            // finished before any potentially blocking diagnostic write.
+            if let Some(record) = diagnostic {
+                write_play_failure(record);
+            }
             return Err(error);
         }
         let install = {
@@ -2892,5 +3167,89 @@ mod tests {
             .await;
         assert!(matches!(replay, Err(BoundaryError::Unavailable)));
         assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod play_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn play_failure_record_preserves_numeric_producer_evidence_without_identity() {
+        let record = PlayFailureRecord {
+            stage: PlayStage::ProbeResult,
+            error: PlayFailure::Decoder(decoder::DecoderError::ProbeTimeout),
+            elapsed_ms: 5007,
+            producer: Some(ProducerRetirement {
+                bytes: 65536,
+                eof: false,
+                cancelled: true,
+                joined: true,
+                error: Some(StreamError::Source(RuntimeError::Network(
+                    ottplay_core::multiview::broker::network::Error::Timeout,
+                ))),
+            }),
+        };
+        assert_eq!(record.to_string(), "multiview_play stage=probe_result error=probe_timeout elapsed_ms=5007 producer_present=true producer_bytes=65536 producer_eof=false producer_cancelled=true producer_joined=true producer_error=network_timeout");
+        assert!(record.to_string().len() < 320);
+        assert!(!record.to_string().contains('\n'));
+    }
+
+    #[test]
+    fn play_closed_classes_distinguish_retirement_decode_and_commit_failures() {
+        let cases = [
+            (
+                PlayStage::Resolve,
+                PlayFailure::Runtime(RuntimeError::Registry(RegistryError::Expired)),
+                "resolve",
+                "registry_expired",
+            ),
+            (
+                PlayStage::ProbeOpen,
+                PlayFailure::Stream(StreamError::Source(RuntimeError::Network(
+                    ottplay_core::multiview::broker::network::Error::Rejected,
+                ))),
+                "probe_open",
+                "network_rejected",
+            ),
+            (
+                PlayStage::ProbeRetire,
+                PlayFailure::Stream(StreamError::JoinTimeout),
+                "probe_retire",
+                "stream_join_timeout",
+            ),
+            (
+                PlayStage::DecodeOpen,
+                PlayFailure::Stream(StreamError::InvalidPhase),
+                "decode_open",
+                "stream_phase",
+            ),
+            (
+                PlayStage::CommitStream,
+                PlayFailure::Core(persistent::Error::OutputFailed),
+                "commit_stream",
+                "core_output_failed",
+            ),
+            (
+                PlayStage::CommitJoin,
+                PlayFailure::Join,
+                "commit_join",
+                "join_failed",
+            ),
+        ];
+        for (stage, error, expected_stage, expected_error) in cases {
+            assert_eq!(stage.code(), expected_stage);
+            assert_eq!(error.code(), expected_error);
+            let text = PlayFailureRecord {
+                stage,
+                error,
+                elapsed_ms: 1,
+                producer: None,
+            }
+            .to_string();
+            assert!(text.ends_with("producer_error=none"));
+            assert!(text.contains("producer_present=false producer_bytes=0"));
+            assert!(text.len() < 320 && text.is_ascii() && !text.contains('\n'));
+        }
     }
 }
