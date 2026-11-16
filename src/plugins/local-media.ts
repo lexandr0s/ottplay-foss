@@ -1642,6 +1642,64 @@ export function installLocalMedia(w: any): any {
         playbackSourceUrl: function (url: string) {
             return localCall(compatibility, "e", [url], 1) || url;
         },
+        // Catalog membership is identity, not a requirement to bypass MSE.
+        // This hint selects an engine only; it grants no URL or filesystem access.
+        playbackTransport: function (
+            url: string
+        ): "file" | "stream" | undefined {
+            if (localCall(compatibility, "c", [url], 1)) return "stream";
+            var item = playbackItem(url);
+            if (!item) return;
+            if (compatibilityPlayback(url)) return "stream";
+            if (/^blob:/i.test(url)) return "file";
+            var parsed: URL;
+            try {
+                parsed = new URL(url);
+            } catch (_) {
+                return;
+            }
+            if (!/^https?:$/.test(parsed.protocol)) return;
+            var mime = String(localField(item, "mime") || "")
+                .split(";", 1)[0]
+                .trim()
+                .toLowerCase();
+            if (
+                /mpegurl|dash\+xml/.test(mime) ||
+                mime === "video/mp2t" ||
+                /\.(?:m3u8?|mpd)$/i.test(parsed.pathname)
+            )
+                return "stream";
+            // Native file grants have an opaque capability and exact item ID.
+            // A loopback host or a Local source label alone is not this witness.
+            var parts = parsed.pathname.split("/");
+            if (
+                !parsed.search &&
+                !parsed.hash &&
+                !parsed.username &&
+                !parsed.password &&
+                parts.length === 4 &&
+                parts[1] === "offline-media" &&
+                /^[A-Za-z0-9_-]{32,}$/.test(parts[2]) &&
+                parts[3] === encodeURIComponent(item.id) &&
+                ((parsed.protocol === "http:" &&
+                    parsed.hostname === "127.0.0.1" &&
+                    !!parsed.port) ||
+                    (!!endpoint &&
+                        url ===
+                            endpoint.replace(/\/+$/, "") +
+                                "/" +
+                                encodeURIComponent(item.id)))
+            )
+                return "file";
+            if (
+                /^video\/(?:mp4|webm|quicktime|x-matroska)$/.test(mime) ||
+                /^audio\//.test(mime)
+            )
+                return "file";
+            // Extensionless and unknown remote HTTP media must keep the normal
+            // engine policy, including adaptive manifests resolved after a redirect.
+            return "stream";
+        },
         playDroppedVideo: function (
             catalog: any,
             admitted: () => boolean,

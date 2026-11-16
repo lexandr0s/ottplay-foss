@@ -830,6 +830,13 @@ const DESKTOP_PLAYLIST_DROP_ALLOWANCE = Object.freeze({
     bytes: 12000,
     gzipBytes: 3500,
 });
+// Preserve adaptive-stream routing for playlist entries in the shared core.
+// Measured entry delta: 978 raw / at most 379 gzip bytes on Node 26.8.2.
+// Evidence: docs/evidence/desktop-playlist-drop-size.json.
+const DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE = Object.freeze({
+    bytes: 1000,
+    gzipBytes: 400,
+});
 // Bounded recovery after relay failure adds 425 raw and at most 259 gzip bytes.
 // Existing raw caps cover the change. Count the measured gzip cost once per
 // entry and aggregate; preserve identity headroom and unrelated asset caps.
@@ -938,6 +945,7 @@ const BUDGET = Object.freeze({
         INTERFACE_NOTIFICATION_SETTINGS_ALLOWANCE.entry.bytes +
         CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE.entry.bytes +
         DESKTOP_DROP_ALLOWANCE.entry.bytes +
+        DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.bytes +
         NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE.bytes +
         FAVORITES_CATEGORY_PERSISTENCE_ALLOWANCE.entry.bytes +
         LOCAL_FAVORITE_WRITE_RECOVERY_ALLOWANCE.entry.bytes +
@@ -980,6 +988,7 @@ const BUDGET = Object.freeze({
         INTERFACE_NOTIFICATION_SETTINGS_ALLOWANCE.entry.gzipBytes +
         CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE.entry.gzipBytes +
         DESKTOP_DROP_ALLOWANCE.entry.gzipBytes +
+        DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.gzipBytes +
         VIDEO_FIT_LIFECYCLE_ENTRY_ALLOWANCE.gzipBytes +
         AUTO_RELAY_STALL_RECOVERY_ENTRY_ALLOWANCE.gzipBytes +
         NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE.gzipBytes +
@@ -1204,6 +1213,7 @@ const LEGACY_TOTAL_BUDGET = Object.freeze({
         INTERFACE_NOTIFICATION_SETTINGS_ALLOWANCE.entry.bytes +
         CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE.entry.bytes +
         DESKTOP_DROP_ALLOWANCE.entry.bytes +
+        DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.bytes +
         NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE.bytes +
         FAVORITES_CATEGORY_PERSISTENCE_ALLOWANCE.entry.bytes +
         LOCAL_FAVORITE_WRITE_RECOVERY_ALLOWANCE.entry.bytes +
@@ -1261,6 +1271,7 @@ const LEGACY_TOTAL_BUDGET = Object.freeze({
         INTERFACE_NOTIFICATION_SETTINGS_ALLOWANCE.entry.gzipBytes +
         CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE.entry.gzipBytes +
         DESKTOP_DROP_ALLOWANCE.entry.gzipBytes +
+        DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.gzipBytes +
         VIDEO_FIT_LIFECYCLE_ENTRY_ALLOWANCE.gzipBytes +
         AUTO_RELAY_STALL_RECOVERY_ENTRY_ALLOWANCE.gzipBytes +
         NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE.gzipBytes +
@@ -1508,6 +1519,7 @@ const BASE_TOTAL_BUDGET = Object.freeze({
         INTERFACE_NOTIFICATION_SETTINGS_ALLOWANCE.appearance.bytes +
         CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE.appearance.bytes +
         DESKTOP_DROP_ALLOWANCE.entry.bytes +
+        DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.bytes +
         DESKTOP_DROP_ALLOWANCE.optional.bytes +
         NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE.bytes +
         FAVORITES_CATEGORY_PERSISTENCE_ALLOWANCE.entry.bytes +
@@ -1612,6 +1624,7 @@ const BASE_TOTAL_BUDGET = Object.freeze({
         INTERFACE_NOTIFICATION_SETTINGS_ALLOWANCE.appearance.gzipBytes +
         CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE.appearance.gzipBytes +
         DESKTOP_DROP_ALLOWANCE.entry.gzipBytes +
+        DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.gzipBytes +
         DESKTOP_DROP_ALLOWANCE.optional.gzipBytes +
         VIDEO_FIT_LIFECYCLE_ENTRY_ALLOWANCE.gzipBytes +
         AUTO_RELAY_STALL_RECOVERY_ENTRY_ALLOWANCE.gzipBytes +
@@ -1882,6 +1895,8 @@ function saveBundleReport(root, optimizer, modules, measured, sets) {
         desktopFavoritesKeyAllowance: DESKTOP_FAVORITES_KEY_ALLOWANCE,
         desktopVideoQueueAllowance: DESKTOP_VIDEO_QUEUE_ALLOWANCE,
         desktopPlaylistDropAllowance: DESKTOP_PLAYLIST_DROP_ALLOWANCE,
+        desktopPlaylistTransportEntryAllowance:
+            DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE,
         epgPresentationEntryAllowance: EPG_PRESENTATION_ENTRY_ALLOWANCE,
         favoritesCategoryPersistenceAllowance:
             FAVORITES_CATEGORY_PERSISTENCE_ALLOWANCE,
@@ -2249,6 +2264,8 @@ function writeBuildBundleReport(
             desktopFavoritesKeyAllowance: DESKTOP_FAVORITES_KEY_ALLOWANCE,
             desktopVideoQueueAllowance: DESKTOP_VIDEO_QUEUE_ALLOWANCE,
             desktopPlaylistDropAllowance: DESKTOP_PLAYLIST_DROP_ALLOWANCE,
+            desktopPlaylistTransportEntryAllowance:
+                DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE,
             diagnostic: true,
             epgPresentationEntryAllowance: EPG_PRESENTATION_ENTRY_ALLOWANCE,
             favoritesCategoryPersistenceAllowance:
@@ -2395,6 +2412,7 @@ module.exports = {
     DESKTOP_FAVORITES_KEY_ALLOWANCE,
     DESKTOP_VIDEO_QUEUE_ALLOWANCE,
     DESKTOP_PLAYLIST_DROP_ALLOWANCE,
+    DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE,
     EPG_PRESENTATION_ENTRY_ALLOWANCE,
     FAVORITES_CATEGORY_PERSISTENCE_ALLOWANCE,
     FAVORITES_RECOVERY_ENTRY_ALLOWANCE,

@@ -1709,6 +1709,12 @@ function startCoreEngine(
             var localFile = !!(
                 (window as any).__ottLocalMedia &&
                 (window as any).__ottLocalMedia.isPlaybackUrl(url) &&
+                coreCall(
+                    (window as any).__ottLocalMedia,
+                    "playbackTransport",
+                    [url],
+                    3
+                ) !== "stream" &&
                 !coreCompat(url)
             );
             if (localFile)
@@ -3182,6 +3188,12 @@ function startCorePipEngine(
             !!(
                 (window as any).__ottLocalMedia &&
                 (window as any).__ottLocalMedia.isPlaybackUrl(url) &&
+                coreCall(
+                    (window as any).__ottLocalMedia,
+                    "playbackTransport",
+                    [url],
+                    3
+                ) !== "stream" &&
                 !coreCompat(url)
             ));
     if (

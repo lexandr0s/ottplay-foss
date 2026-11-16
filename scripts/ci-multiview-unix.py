@@ -147,6 +147,11 @@ BROKER_SHUTDOWN_TESTS = frozenset({
     'broker::live::tests::shutdown_waits_for_owned_operation_after_http_waiter_drops',
 })
 BROKER_HLS_TESTS = frozenset({'broker::live::tests::production_adapter_set_is_unique_explicit_and_keeps_other_guards'})
+PLAYLIST_DROP_PREFIX = 'offline_media::drop_playlist::tests::'
+PLAYLIST_DROP_REQUIRED_TESTS = frozenset(PLAYLIST_DROP_PREFIX + name for name in (
+    'playlist_relative_members_keep_verified_canonical_parent_after_alias_rebind',
+    'playlist_and_referenced_file_symlinks_are_rejected_without_retained_grants',
+))
 CORE_REQUIRED_TESTS = frozenset({
     'multiview::broker::registry::pending_grant_retention_tests::attachment_promotion_keeps_only_exact_unchanged_sibling_binding_grants',
     'multiview::broker::registry::pending_grant_retention_tests::binding_updates_retain_exact_siblings_but_global_source_and_session_revokes_fail_closed',
@@ -1638,6 +1643,7 @@ def main(argv=None):
         require(not command(label + '-status', ['git', 'status', '--porcelain=v1', '--untracked-files=all']).strip(),
                 'Source checkout is dirty')
         paths = ('Cargo.toml', 'Cargo.lock', 'src-rs/core/Cargo.toml', 'src-rs/server/Cargo.toml',
+                 'src-rs/core/src/offline_media.rs', 'src-rs/core/src/offline_media/drop_playlist.rs',
                  'src-rs/core/src/multiview/broker/registry.rs',
                  'src-rs/core/src/multiview/broker/network.rs',
                  'src-rs/core/src/multiview/broker/network_tests.rs',
@@ -1754,6 +1760,17 @@ def main(argv=None):
             'production_test_sha256': production_sha256,
             'normal_server_identity': normal_server_identity,
             'source_commit': before['commit'], 'root_lock_sha256': before['sha256']['Cargo.lock']})
+        playlist_all = listed_names(command('core-playlist-inventory',
+            [str(core_executable), PLAYLIST_DROP_PREFIX, '--list', '--format', 'terse']))
+        playlist_ignored = listed_names(command('core-playlist-ignored-inventory',
+            [str(core_executable), PLAYLIST_DROP_PREFIX, '--list', '--ignored', '--format', 'terse']))
+        require(playlist_all and all(name.startswith(PLAYLIST_DROP_PREFIX) for name in playlist_all),
+                'Core playlist test inventory is empty or outside its namespace')
+        require(not playlist_ignored and PLAYLIST_DROP_REQUIRED_TESTS <= playlist_all,
+                'Required Unix playlist regressions are missing or playlist tests are ignored')
+        playlist_text = command('core-playlist-ordinary', [str(core_executable), PLAYLIST_DROP_PREFIX,
+                                '--test-threads=1', '--color=never'], 60)
+        require_suite_pass(playlist_text, playlist_all, set())
         core_all = listed_names(command('core-multiview-inventory',
             [str(core_executable), 'multiview::', '--list', '--format', 'terse']))
         core_ignored = listed_names(command('core-multiview-ignored-inventory',
@@ -1905,6 +1922,7 @@ def main(argv=None):
                       activation_scope='Actual owned HTTP/TLS normal server; zero-capacity control shell only',
                       activation_fixture_parent=activation_home, activation_fixture_cleanup_confirmed=True,
                       ordinary_core_tests=sorted(ordinary_core),
+                      ordinary_playlist_drop_tests=sorted(playlist_all),
                       executed_core_ignored_tests=core_ignored_executed,
                       ordinary_server_tests=sorted(ordinary_server),
                       production_test_binary_sha256=production_sha256,

@@ -88,6 +88,12 @@ def suite_passed(names, ignored=()):
             + f'test result: ok. {len(names)} passed; 0 failed; {len(ignored)} ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
 
 
+PLAYLIST_DROP_REQUIRED_NAMES = (
+    'offline_media::drop_playlist::tests::playlist_relative_members_keep_verified_canonical_parent_after_alias_rebind',
+    'offline_media::drop_playlist::tests::playlist_and_referenced_file_symlinks_are_rejected_without_retained_grants',
+)
+PLAYLIST_DROP_NAMES = (*PLAYLIST_DROP_REQUIRED_NAMES,
+                       'offline_media::drop_playlist::tests::synthetic_future_playlist_regression')
 CORE_REQUIRED_NAMES = (
     'multiview::broker::registry::pending_grant_retention_tests::attachment_promotion_keeps_only_exact_unchanged_sibling_binding_grants',
     'multiview::broker::registry::pending_grant_retention_tests::binding_updates_retain_exact_siblings_but_global_source_and_session_revokes_fail_closed',
@@ -344,6 +350,7 @@ class Attempt:
         self.output = self.parent / 'ottplay-multiview-unix-123-2'
         self.media = FakeMedia(self)
         for name in ('Cargo.toml', 'Cargo.lock', 'src-rs/core/Cargo.toml',
+                     'src-rs/core/src/offline_media.rs', 'src-rs/core/src/offline_media/drop_playlist.rs',
                      'src-rs/core/src/multiview/broker/registry.rs',
                      'src-rs/core/src/multiview/broker/network.rs',
                      'src-rs/core/src/multiview/broker/network_tests.rs',
@@ -817,6 +824,12 @@ class Attempt:
             if self.case in ('failed-activation-test', 'leaked-home-fixture-and-failed-test'):
                 text = text.replace(ACTIVATION_NAMES[0] + ' ... ok', ACTIVATION_NAMES[0] + ' ... FAILED')
             return text
+        if name == 'core-playlist-inventory':
+            return ''.join(value + ': test\n' for value in PLAYLIST_DROP_NAMES)
+        if name == 'core-playlist-ignored-inventory':
+            return ''
+        if name == 'core-playlist-ordinary':
+            return suite_passed(PLAYLIST_DROP_NAMES)
         if name == 'core-multiview-inventory':
             if self.case == 'core-zero-inventory':
                 return ''
@@ -1385,6 +1398,98 @@ class BoundaryContracts(unittest.TestCase):
                     self.assertIn('test result: ok.', transcript)
                     entry = next(row for row in attempt.driver.commands if row['name'] == stage + '-ordinary')
                     self.assertTrue(entry['cleanup_confirmed'])
+
+
+class PlaylistDropContracts(unittest.TestCase):
+    def test_required_unix_cases_bind_to_actual_playlist_source(self):
+        self.assertEqual(ci.PLAYLIST_DROP_REQUIRED_TESTS, frozenset(PLAYLIST_DROP_REQUIRED_NAMES))
+        source = (ROOT / 'src-rs/core/src/offline_media/drop_playlist.rs').read_text()
+        for name in PLAYLIST_DROP_REQUIRED_NAMES:
+            self.assertIn('async fn ' + name.rsplit('::', 1)[1] + '()', source)
+
+    def test_all_discovered_tests_reuse_the_compiled_core_on_both_unix_hosts(self):
+        for system in ('Linux', 'Darwin'):
+            with self.subTest(system=system), Attempt(system=system) as attempt:
+                attempt.run()
+                result = attempt.terminal()
+                self.assertEqual(result['status'], 'pass')
+                self.assertEqual(result['ordinary_playlist_drop_tests'], sorted(PLAYLIST_DROP_NAMES))
+                rows = {row['name']: row for row in attempt.driver.commands}
+                for name in ('core-playlist-inventory', 'core-playlist-ignored-inventory', 'core-playlist-ordinary'):
+                    self.assertEqual(rows[name]['argv'][:2], [str(attempt.core_executable), ci.PLAYLIST_DROP_PREFIX])
+                    self.assertTrue(rows[name]['cleanup_confirmed'])
+                self.assertEqual(rows['core-playlist-ordinary']['argv'][2:], ['--test-threads=1', '--color=never'])
+                self.assertEqual(rows['core-playlist-ordinary']['limit'], 60)
+                self.assertEqual(sum(row['name'] == 'core-fixture-build' for row in attempt.driver.commands), 1)
+                names = [row['name'] for row in attempt.driver.commands]
+                self.assertLess(names.index('core-playlist-ordinary'), names.index('core-multiview-ordinary'))
+                before = json.loads((attempt.output / 'evidence/source-before.json').read_text())
+                after = json.loads((attempt.output / 'evidence/source-after.json').read_text())
+                self.assertEqual(before, after)
+                for path in ('src-rs/core/src/offline_media.rs', 'src-rs/core/src/offline_media/drop_playlist.rs'):
+                    self.assertEqual(before['sha256'][path], hashlib.sha256((attempt.root / path).read_bytes()).hexdigest())
+
+    def test_missing_ignored_empty_foreign_and_duplicate_inventory_fail_before_execution(self):
+        cases = [('missing', name) for name in PLAYLIST_DROP_REQUIRED_NAMES]
+        cases += [('ignored', name) for name in PLAYLIST_DROP_NAMES]
+        cases += [(name, '') for name in ('empty', 'foreign', 'duplicate')]
+        for case, target in cases:
+            with self.subTest(case=case, target=target), Attempt() as attempt:
+                original = attempt.response
+                def response(name, argv, original=original, case=case, target=target):
+                    text = original(name, argv)
+                    if name == 'core-playlist-inventory':
+                        if case == 'missing':
+                            return text.replace(target + ': test\n', '')
+                        if case == 'empty':
+                            return ''
+                        if case == 'foreign':
+                            return text + 'other::test: test\n'
+                        if case == 'duplicate':
+                            return text + PLAYLIST_DROP_NAMES[0] + ': test\n'
+                    if name == 'core-playlist-ignored-inventory' and case == 'ignored':
+                        return target + ': test\n'
+                    return text
+                with mock.patch.object(attempt, 'response', side_effect=response), self.assertRaises(RuntimeError):
+                    attempt.run()
+                self.assertEqual(attempt.terminal()['status'], 'fail')
+                self.assertNotIn('core-playlist-ordinary', [row['name'] for row in attempt.driver.commands])
+
+    def test_incomplete_failed_zero_and_nonzero_execution_cannot_claim_success(self):
+        for case in ('missing-discovered', 'failed', 'zero', 'ignored', 'wrong-summary', 'nonzero'):
+            with self.subTest(case=case), Attempt() as attempt:
+                original = attempt.response
+                def response(name, argv, original=original, case=case):
+                    if name != 'core-playlist-ordinary':
+                        return original(name, argv)
+                    if case == 'nonzero':
+                        raise RuntimeError('Synthetic playlist command exited nonzero')
+                    if case == 'zero':
+                        return suite_passed(())
+                    if case == 'missing-discovered':
+                        return suite_passed(PLAYLIST_DROP_REQUIRED_NAMES)
+                    if case == 'ignored':
+                        return suite_passed(PLAYLIST_DROP_NAMES[:-1], PLAYLIST_DROP_NAMES[-1:])
+                    text = suite_passed(PLAYLIST_DROP_NAMES)
+                    if case == 'failed':
+                        return text.replace(PLAYLIST_DROP_NAMES[-1] + ' ... ok', PLAYLIST_DROP_NAMES[-1] + ' ... FAILED')
+                    return text.replace('0 failed;', '1 failed;')
+                with mock.patch.object(attempt, 'response', side_effect=response), self.assertRaises(RuntimeError):
+                    attempt.run()
+                self.assertEqual(attempt.terminal()['status'], 'fail')
+                self.assertNotIn('core-multiview-ordinary', [row['name'] for row in attempt.driver.commands])
+
+    def test_both_playlist_inputs_remain_bound_through_the_final_source_check(self):
+        for path in ('src-rs/core/src/offline_media.rs', 'src-rs/core/src/offline_media/drop_playlist.rs'):
+            with self.subTest(path=path), Attempt() as attempt:
+                original = attempt.response
+                def response(name, argv, original=original, path=path, attempt=attempt):
+                    if name == 'fixture-3':
+                        (attempt.root / path).write_text('synthetic changed playlist source')
+                    return original(name, argv)
+                with mock.patch.object(attempt, 'response', side_effect=response), self.assertRaises(RuntimeError):
+                    attempt.run()
+                self.assertIn('Source or root lock changed', attempt.terminal()['error'])
 
 
 class CoreRequiredContracts(unittest.TestCase):
