@@ -2429,7 +2429,9 @@ class MockMainTests(unittest.TestCase):
 
     def test_probe_env_contract_matches_actual_normal_binary_launch_source(self):
         source=(ROOT/'src-rs/server/tests/multiview_production.rs').read_text()
-        launch=source.split('let mut server = ChildGuard(',1)[1].split('.spawn()',1)[0]
+        launch_marker='let mut server = NormalServerGuard('
+        self.assertEqual(source.count(launch_marker),1)
+        launch=source.split(launch_marker,1)[1].split('.spawn()',1)[0]
         self.assertIn('.env_clear()',launch)
         self.assertIn('.current_dir(&public)',launch)
         self.assertEqual(set(re.findall(r'\.env\(\s*"([^"\n]+)"',launch)),{'HOME','EPG_URLS'})
