@@ -68,6 +68,11 @@ ENV EPG_ONLY=true
 
 # Keep the default image as the complete player server, without EPG_ONLY set.
 FROM server-runtime AS player
+# The opt-in private compositor invokes trusted local tools; the guide-only
+# image above keeps its smaller runtime. No media is admitted by default.
+USER root
+RUN apk add --no-cache ffmpeg
+USER nonroot
 # Use the validated web root, including the runtime-only player image allowlist.
 # Copying source trees here would reintroduce retired and private assets.
 COPY --from=build /app/dist/index.html ./index.html
