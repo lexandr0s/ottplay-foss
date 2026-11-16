@@ -22,6 +22,9 @@ COPY images ./images
 COPY locales ./locales
 COPY providers ./providers
 COPY src-tauri/pip ./src-tauri/pip
+# Copy the fixed public dashboard inventory, never integration configuration.
+COPY integrations/home/index.html integrations/home/style.css integrations/home/core.js \
+     integrations/home/webos-host.js integrations/home/app.js ./integrations/home/
 RUN npm run typecheck && npm run build:server
 
 # Resolve the server workspace before the target compilation cache boundary.

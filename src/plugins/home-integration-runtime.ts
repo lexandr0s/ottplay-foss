@@ -69,6 +69,50 @@ export function installHomeIntegrationRuntime(w: any): any {
         var observer: any = null;
         var unregister: any = null;
         var api: any;
+        var activityChild: any = null;
+        function detachActivity(): void {
+            if (activityChild) {
+                try {
+                    activityChild.removeEventListener(
+                        "keydown",
+                        activity,
+                        true
+                    );
+                } catch (_) {}
+                activityChild = null;
+            }
+        }
+        function activity(event: any): void {
+            if (
+                !owns() ||
+                !event ||
+                event.currentTarget !== activityChild ||
+                d.hidden ||
+                blocked()
+            )
+                return;
+            try {
+                var activePort = w.__ottClassicScreenPort;
+                if (
+                    owner &&
+                    (!activePort ||
+                        !activePort.screens ||
+                        typeof activePort.screens.current !== "function" ||
+                        activePort.screens.current() !== owner ||
+                        typeof owner.foreground !== "function" ||
+                        !owner.foreground())
+                )
+                    return;
+                if (
+                    activityChild === frame.contentWindow &&
+                    activityChild.location.protocol === w.location.protocol &&
+                    activityChild.location.host === w.location.host &&
+                    activityChild.location.pathname === homePath &&
+                    typeof w.setSleepTimeout === "function"
+                )
+                    w.setSleepTimeout();
+            } catch (_) {}
+        }
         function owns(): boolean {
             return !closed && current === api && w.aboutKeyHandler === handler;
         }
@@ -82,6 +126,7 @@ export function installHomeIntegrationRuntime(w: any): any {
             d.removeEventListener("visibilitychange", visibility);
             w.removeEventListener("pagehide", retire);
             frame.onload = null;
+            detachActivity();
             // Notify the embedded controller before destroying its browsing context.
             // pagehide cancels dashboard XHR/probes; about:blank/removal aborts loads too.
             try {
@@ -160,6 +205,7 @@ export function installHomeIntegrationRuntime(w: any): any {
         // Fixed packaged asset only: no URL, HA token or bridge key in the host adapter.
         frame.src = base + "/dist/home/index.html";
         frame.onload = function (): void {
+            detachActivity();
             if (!owns()) return;
             try {
                 var child = frame.contentWindow;
@@ -171,6 +217,10 @@ export function installHomeIntegrationRuntime(w: any): any {
                 ) {
                     teardown(true);
                     return;
+                }
+                if (typeof child.addEventListener === "function") {
+                    activityChild = child;
+                    child.addEventListener("keydown", activity, true);
                 }
                 child.OTTHomeHost = {
                     close: function (done?: (ok: boolean) => void): void {

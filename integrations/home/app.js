@@ -74,6 +74,11 @@
         connected = ready;
         latest = ready ? model : null;
         if (focused) rememberedFocus = focused;
+        else if (
+            document.activeElement &&
+            document.activeElement !== document.body
+        )
+            rememberedFocus = null;
         text(
             "connection",
             ready

@@ -1086,3 +1086,46 @@ test("oversized latest save removes previous remembered key before a reload", as
     assert.equal(fresh.requests.length, 0);
     fresh.windowEvents.pagehide();
 });
+
+test("poll renders restore only the currently focused item and never steal navigation or input focus", () => {
+    const u = ui();
+    const model = {
+        entities: [],
+        actions: [],
+        apps: [{ id: "tv", label: "TV", kind: "app" }],
+    };
+    u.render({ status: "ready", model });
+    const old = u.elements.launchers.children[0];
+    old.focus();
+    u.render({ status: "loading", model });
+    u.doc.body = {
+        getAttribute() {
+            return null;
+        },
+    };
+    u.doc.activeElement = u.doc.body; // Real DOM clears focus when its node is removed.
+    u.render({ status: "ready", model });
+    const refreshed = u.elements.launchers.children[0];
+    assert.notEqual(refreshed, old);
+    assert.equal(
+        u.doc.activeElement,
+        refreshed,
+        "replace a currently focused dynamic item"
+    );
+    u.nav[0].focus();
+    u.render({ status: "loading", model });
+    u.render({ status: "ready", model });
+    assert.equal(
+        u.doc.activeElement,
+        u.nav[0],
+        "poll must leave navigation focus alone"
+    );
+    u.elements.key.focus();
+    u.render({ status: "loading", model });
+    u.render({ status: "ready", model });
+    assert.equal(
+        u.doc.activeElement,
+        u.elements.key,
+        "poll must leave text entry alone"
+    );
+});
