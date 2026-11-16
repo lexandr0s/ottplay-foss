@@ -654,6 +654,8 @@ var keyStrings = {
     "Loading via proxy...": "Wczytywanie przez proxy…",
     "Loading. Please wait...": "Wczytywanie. Poczekaj…",
     "Loading...": "Wczytywanie…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Lokalne manifesty HLS nie są obsługiwane; użyj adresu HTTP(S) manifestu",
     "Local HTTP remote control": "Lokalne sterowanie HTTP",
     "Local source did not respond": "Lokalne źródło nie odpowiedziało",
     "Local source unavailable": "Lokalne źródło jest niedostępne",
@@ -788,9 +790,16 @@ var keyStrings = {
     "Player info:": "Informacje o odtwarzaczu:",
     "Playing: %1": "Odtwarzanie: %1",
     Playlist: "Playlista",
+    "Playlist contains unsupported sources":
+        "Playlista zawiera nieobsługiwane źródła",
     "Playlist file": "Plik playlisty",
+    "Playlist is empty or invalid": "Playlista jest pusta lub nieprawidłowa",
     "Playlist is not loading directly...Loading via server...":
         "Playlista nie ładuje się bezpośrednio...Ładowanie przez serwer...",
+    "Playlist is too large": "Playlista jest za duża",
+    "Playlist local files must be dropped together with the playlist":
+        "Lokalne pliki playlisty należy upuścić razem z playlistą",
+    "Playlist must use UTF-8": "Playlista musi używać kodowania UTF-8",
     "Playlist Name": "Nazwa playlisty",
     "Playlist URL": "URL playlisty",
     Plex: "Plex",

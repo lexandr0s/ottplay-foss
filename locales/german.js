@@ -102,6 +102,16 @@ var keyStrings = {
         "Der automatische Modus spielt unterstützte Dateien direkt ab und verwendet bei Bedarf kompatibles HLS.",
     alhabet: "aäbcdefghijklmnoöpqrsßtuüvwxyz",
     always: "immer",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Lokale HLS-Manifeste werden nicht unterstützt; verwenden Sie eine HTTP(S)-Manifest-URL",
+    "Playlist contains unsupported sources":
+        "Die Wiedergabeliste enthält nicht unterstützte Quellen",
+    "Playlist is empty or invalid":
+        "Die Wiedergabeliste ist leer oder ungültig",
+    "Playlist is too large": "Die Wiedergabeliste ist zu groß",
+    "Playlist local files must be dropped together with the playlist":
+        "Lokale Dateien müssen zusammen mit der Wiedergabeliste abgelegt werden",
+    "Playlist must use UTF-8": "Die Wiedergabeliste muss UTF-8 verwenden",
     "and enter code": "und geben Sie den Code ein",
     Back: "Zurück",
     "Back / Forward for 1 minute": "1 Minute zurück / vor",

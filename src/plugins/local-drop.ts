@@ -53,13 +53,11 @@ export function installLocalDrop(w: any): any {
         // Never surface native paths, signed URLs, or arbitrary IPC errors.
         var text = typeof error === "string" ? error : error?.message;
         var codes: any = {
-            playlist_hls_local_unsupported:
-                "Local HLS manifests are not supported; use an HTTP(S) manifest URL",
-            playlist_invalid: "Playlist is empty or invalid",
-            playlist_limit: "Playlist is too large",
-            playlist_local_unavailable:
-                "Playlist local files must be dropped together with the playlist",
-            playlist_unsupported: "Playlist contains unsupported sources",
+            playlist_hls_local_unsupported: 0,
+            playlist_invalid: 3,
+            playlist_limit: 4,
+            playlist_local_unavailable: 1,
+            playlist_unsupported: 2,
         };
         if (
             error &&
@@ -74,8 +72,7 @@ export function installLocalDrop(w: any): any {
             "Local HLS manifests are not supported; add the HTTP(S) manifest URL as a playlist entry"
         )
             text = codes.playlist_hls_local_unsupported;
-        if (text === "Dropped playlist must be UTF-8")
-            text = "Playlist must use UTF-8";
+        if (text === "Dropped playlist must be UTF-8") text = 5;
         if (
             text ===
                 "Dropped playlist exceeds the 2 MiB file or 8 MiB batch limit" ||
@@ -87,16 +84,46 @@ export function installLocalDrop(w: any): any {
             text === "Dropped playlist contains an invalid entry"
         )
             text = codes.playlist_invalid;
-        var known = [
-            "Local HLS manifests are not supported; use an HTTP(S) manifest URL",
-            "Playlist local files must be dropped together with the playlist",
-            "Playlist contains unsupported sources",
-            "Playlist is empty or invalid",
-            "Playlist is too large",
-            "Playlist must use UTF-8",
-        ];
-        if (known.indexOf(text) < 0) text = "Unsupported source";
-        message(w._ ? w._(text) : text);
+        // Keep literal translation keys visible to the catalog audit. Only the
+        // closed diagnostic labels above may reach this switch.
+        var _ = w._
+            ? w._.bind(w)
+            : function (value: string): string {
+                  return value;
+              };
+        switch (text) {
+            case 0:
+            case "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+                text = _(
+                    "Local HLS manifests are not supported; use an HTTP(S) manifest URL"
+                );
+                break;
+            case 1:
+            case "Playlist local files must be dropped together with the playlist":
+                text = _(
+                    "Playlist local files must be dropped together with the playlist"
+                );
+                break;
+            case 2:
+            case "Playlist contains unsupported sources":
+                text = _("Playlist contains unsupported sources");
+                break;
+            case 3:
+            case "Playlist is empty or invalid":
+                text = _("Playlist is empty or invalid");
+                break;
+            case 4:
+            case "Playlist is too large":
+                text = _("Playlist is too large");
+                break;
+            case 5:
+            case "Playlist must use UTF-8":
+                text = _("Playlist must use UTF-8");
+                break;
+            default:
+                text = _("Unsupported source");
+        }
+        message(text);
     }
     function invoke(name: string, args: any): Promise<any> {
         var bridge = w.__TAURI__?.core || w.__TAURI__;

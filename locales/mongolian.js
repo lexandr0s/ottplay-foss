@@ -652,6 +652,8 @@ var keyStrings = {
     "Loading via proxy...": "Проксигоор ачаалж байна…",
     "Loading. Please wait...": "Ачаалж байна… түр хүлээнэ үү…",
     "Loading...": "Ачаалж байна…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Дотоод HLS манифест дэмжигдэхгүй; манифестын HTTP(S) URL ашиглана уу",
     "Local HTTP remote control": "Дотоод HTTP алсын удирдлага",
     "Local source did not respond": "Төхөөрөмжийн эх үүсвэр хариу өгсөнгүй",
     "Local source unavailable": "Төхөөрөмжийн эх үүсвэр ашиглах боломжгүй",
@@ -786,9 +788,17 @@ var keyStrings = {
     "Player info:": "Тоглуулагчийн мэдээлэл:",
     "Playing: %1": "Тоглуулж байна: %1",
     Playlist: "Тоглуулах жагсаалт",
+    "Playlist contains unsupported sources":
+        "Тоглуулах жагсаалтад дэмжигдэхгүй эх үүсвэр байна",
     "Playlist file": "Тоглуулах жагсаалтын файл",
+    "Playlist is empty or invalid":
+        "Тоглуулах жагсаалт хоосон эсвэл буруу байна",
     "Playlist is not loading directly...Loading via server...":
         "Тоглуулах жагсаалтыг шууд ачаалж чадсангүй. Серверээр ачаалж байна…",
+    "Playlist is too large": "Тоглуулах жагсаалт хэт том байна",
+    "Playlist local files must be dropped together with the playlist":
+        "Тоглуулах жагсаалтын дотоод файлуудыг жагсаалттай нь хамт чирж оруулна уу",
+    "Playlist must use UTF-8": "Тоглуулах жагсаалт UTF-8 ашиглах ёстой",
     "Playlist Name": "Тоглуулах жагсаалтын нэр",
     "Playlist URL": "Тоглуулах жагсаалтын URL",
     Plex: "Plex",

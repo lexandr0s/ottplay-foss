@@ -642,6 +642,8 @@ var keyStrings = {
     "Loading via proxy...": "Laster inn via proxy …",
     "Loading. Please wait...": "Laster... vennligst vent...",
     "Loading...": "Laster inn …",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Lokale HLS-manifester støttes ikke; bruk en HTTP(S)-adresse til manifestet",
     "Local HTTP remote control": "Lokal HTTP fjernkontroll",
     "Local source did not respond": "Den lokale kilden svarte ikke",
     "Local source unavailable": "Lokal kilde er utilgjengelig",
@@ -777,9 +779,16 @@ var keyStrings = {
     "Player info:": "mediespillerinformasjon:",
     "Playing: %1": "Spiller av: %1",
     Playlist: "Spilleliste",
+    "Playlist contains unsupported sources":
+        "Spillelisten inneholder kilder som ikke støttes",
     "Playlist file": "Spillelistefil",
+    "Playlist is empty or invalid": "Spillelisten er tom eller ugyldig",
     "Playlist is not loading directly...Loading via server...":
         "Spillelisten kunne ikke lastes inn direkte. Laster inn via server …",
+    "Playlist is too large": "Spillelisten er for stor",
+    "Playlist local files must be dropped together with the playlist":
+        "Lokale filer i spillelisten må slippes sammen med spillelisten",
+    "Playlist must use UTF-8": "Spillelisten må bruke UTF-8",
     "Playlist Name": "Spillelistenavn",
     "Playlist URL": "Spilleliste URL",
     Plex: "Plex",

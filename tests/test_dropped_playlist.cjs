@@ -273,12 +273,27 @@ test("playlist bytes decode strictly and use FileReader or text fallback asynchr
     );
 
     class Reader {
-        readAsText() {
-            this.result = "#EXTM3U\nhttps://x.test/a.mp4\n";
+        constructor(bytes) {
+            this.bytes = bytes;
+        }
+        readAsArrayBuffer() {
+            this.result = this.bytes.buffer.slice(
+                this.bytes.byteOffset,
+                this.bytes.byteOffset + this.bytes.byteLength
+            );
             queueMicrotask(() => this.onload());
         }
     }
-    const legacyReader = fixture({ FileReader: Reader });
+    const validUtf8 = new TextEncoder().encode(
+        "\ufeff#EXTM3U\nhttps://x.test/a.mp4\n"
+    );
+    const legacyReader = fixture({
+        FileReader: class extends Reader {
+            constructor() {
+                super(validUtf8);
+            }
+        },
+    });
     const readerFile = legacyReader.file("reader.m3u", "", "ignored");
     Object.defineProperty(readerFile, "arrayBuffer", { value: undefined });
     Object.defineProperty(readerFile, "text", { value: undefined });
@@ -288,6 +303,26 @@ test("playlist bytes decode strictly and use FileReader or text fallback asynchr
     );
     assert.equal(readLease.catalog.items[0].url, "https://x.test/a.mp4");
     readLease.release();
+
+    for (const bytes of [
+        new Uint8Array([0xff, 0xfe, 0x23, 0x00, 0x45, 0x00]),
+        new Uint8Array([0xfe, 0xff, 0x00, 0x23, 0x00, 0x45]),
+    ]) {
+        const badReader = fixture({
+            FileReader: class extends Reader {
+                constructor() {
+                    super(bytes);
+                }
+            },
+        });
+        const badFile = badReader.file("wide.m3u", "", "ignored");
+        Object.defineProperty(badFile, "arrayBuffer", { value: undefined });
+        Object.defineProperty(badFile, "text", { value: undefined });
+        await assert.rejects(
+            badReader.exports.createDroppedPlaylists(badReader.host, [badFile]),
+            (error) => error.droppedPlaylistCode === "playlist_invalid"
+        );
+    }
 
     const textFallback = fixture();
     textFallback.host.FileReader = undefined;
@@ -302,6 +337,59 @@ test("playlist bytes decode strictly and use FileReader or text fallback asynchr
     );
     assert.equal(textLease.catalog.items[0].url, "https://x.test/a.mp4");
     textLease.release();
+});
+
+test("aggregate playlist record cap is checked before any local path lookup", async () => {
+    const f = fixture();
+    let pathReads = 0;
+    function trackedPlaylist(name, count) {
+        const lines = Array.from({ length: count }, () => "clip.mp4");
+        const file = f.file(name, "", "#EXTM3U\n" + lines.join("\n") + "\n");
+        Object.defineProperty(file, "webkitRelativePath", {
+            get() {
+                pathReads++;
+                return name;
+            },
+        });
+        return file;
+    }
+    const first = trackedPlaylist("first.m3u", 2048);
+    const second = trackedPlaylist("second.m3u", 2049);
+    await assert.rejects(
+        f.exports.createDroppedPlaylists(f.host, [first, second]),
+        (error) => error.droppedPlaylistCode === "playlist_limit"
+    );
+    assert.equal(pathReads, 0);
+    assert.equal(f.created.length, 0);
+});
+
+test("aggregate cap includes standalone videos and admits the exact boundary", async () => {
+    for (const count of [4095, 4096]) {
+        const f = fixture();
+        const playlist = f.file(
+            "limit.m3u",
+            "",
+            "#EXTM3U\n" + "https://cdn.test/a.mp4\n".repeat(count)
+        );
+        const video = f.file("standalone.mp4", "video/mp4");
+        const pending = f.exports.createDroppedPlaylists(f.host, [
+            playlist,
+            video,
+        ]);
+        if (count === 4096) {
+            await assert.rejects(
+                pending,
+                (error) => error.droppedPlaylistCode === "playlist_limit"
+            );
+            assert.equal(f.created.length, 0);
+        } else {
+            const lease = await pending;
+            assert.equal(lease.catalog.items.length, 4096);
+            assert.equal(f.created.length, 1);
+            lease.release();
+            assert.equal(f.revoked.length, 1);
+        }
+    }
 });
 
 test("batch detection and input limits are synchronous and do not inspect contents", () => {

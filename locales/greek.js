@@ -104,6 +104,15 @@ var keyStrings = {
         "Η αυτόματη λειτουργία αναπαράγει απευθείας τα υποστηριζόμενα αρχεία και χρησιμοποιεί συμβατό HLS όταν χρειάζεται.",
     alhabet: "αάβγδεέζηήθιίϊΐκλμνξοόπρσςτυύϋΰφχψωώ",
     always: "πάντα",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Δεν υποστηρίζονται τοπικά αρχεία δήλωσης HLS· χρησιμοποιήστε URL δήλωσης HTTP(S)",
+    "Playlist contains unsupported sources":
+        "Η λίστα περιέχει μη υποστηριζόμενες πηγές",
+    "Playlist is empty or invalid": "Η λίστα είναι κενή ή μη έγκυρη",
+    "Playlist is too large": "Η λίστα είναι πολύ μεγάλη",
+    "Playlist local files must be dropped together with the playlist":
+        "Τα τοπικά αρχεία πρέπει να μεταφερθούν μαζί με τη λίστα αναπαραγωγής",
+    "Playlist must use UTF-8": "Η λίστα πρέπει να χρησιμοποιεί UTF-8",
     "and enter code": "και εισαγάγετε τον κωδικό",
     Back: "Πίσω",
     "Back / Forward for 1 minute": "Πίσω / μπροστά κατά 1 λεπτό",

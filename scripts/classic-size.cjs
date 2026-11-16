@@ -823,7 +823,7 @@ const DESKTOP_VIDEO_QUEUE_ALLOWANCE = Object.freeze({
     gzipBytes: 169,
 });
 // M3U admission, strict decoding and temporary mixed queues stay in the lazy
-// desktop-drop asset. Measured optional asset: 17401 raw / 5695 gzip on
+// desktop-drop asset. Measured optional asset: 17793 raw / 5794 gzip on
 // Node 26.8.2; allocate its delta over the existing 5807 / 2369 cap once.
 // Evidence: docs/evidence/desktop-playlist-drop-size.json.
 const DESKTOP_PLAYLIST_DROP_ALLOWANCE = Object.freeze({

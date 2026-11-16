@@ -623,6 +623,8 @@ var keyStrings = {
     "Loading via proxy...": "ప్రాక్సీ ద్వారా లోడ్ అవుతోంది…",
     "Loading. Please wait...": "లోడ్ అవుతోంది... దయచేసి వేచి ఉండండి...",
     "Loading...": "లోడ్ అవుతోంది…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "స్థానిక HLS మానిఫెస్ట్‌లకు మద్దతు లేదు; మానిఫెస్ట్ HTTP(S) URL ఉపయోగించండి",
     "Local HTTP remote control": "స్థానిక HTTP రిమోట్ కంట్రోల్",
     "Local source did not respond": "స్థానిక మూలం స్పందించలేదు",
     "Local source unavailable": "స్థానిక మూలం అందుబాటులో లేదు",
@@ -755,9 +757,15 @@ var keyStrings = {
     "Player info:": "ప్లేయర్ సమాచారం:",
     "Playing: %1": "ప్లే అవుతోంది: %1",
     Playlist: "ప్లేజాబితా",
+    "Playlist contains unsupported sources": "ప్లేలిస్ట్‌లో మద్దతులేని మూలాలు ఉన్నాయి",
     "Playlist file": "ప్లేజాబితా ఫైల్",
+    "Playlist is empty or invalid": "ప్లేలిస్ట్ ఖాళీగా ఉంది లేదా చెల్లదు",
     "Playlist is not loading directly...Loading via server...":
         "ప్లేజాబితా నేరుగా లోడ్ చేయబడలేదు. సర్వర్ ద్వారా లోడ్ అవుతోంది…",
+    "Playlist is too large": "ప్లేలిస్ట్ చాలా పెద్దది",
+    "Playlist local files must be dropped together with the playlist":
+        "ప్లేలిస్ట్‌లోని స్థానిక ఫైళ్లను ప్లేలిస్ట్‌తో పాటే డ్రాప్ చేయాలి",
+    "Playlist must use UTF-8": "ప్లేలిస్ట్ UTF-8 ఉపయోగించాలి",
     "Playlist Name": "ప్లేజాబితా పేరు",
     "Playlist URL": "ప్లేజాబితా URL",
     Plex: "Plex",

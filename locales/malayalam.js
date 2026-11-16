@@ -631,6 +631,8 @@ var keyStrings = {
     "Loading via proxy...": "പ്രോക്സി വഴി ലോഡുചെയ്യുന്നു...",
     "Loading. Please wait...": "ലോഡ് ചെയ്യുന്നു... ദയവായി കാത്തിരിക്കൂ...",
     "Loading...": "ലോഡ് ചെയ്യുന്നു…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "പ്രാദേശിക HLS മാനിഫെസ്റ്റുകൾ പിന്തുണയ്ക്കില്ല; HTTP(S) മാനിഫെസ്റ്റ് URL ഉപയോഗിക്കുക",
     "Local HTTP remote control": "പ്രാദേശിക HTTP റിമോട്ട് കൺട്രോൾ",
     "Local source did not respond": "പ്രാദേശിക ഉറവിടം പ്രതികരിച്ചില്ല",
     "Local source unavailable": "പ്രാദേശിക ഉറവിടം ലഭ്യമല്ല",
@@ -765,9 +767,15 @@ var keyStrings = {
     "Player info:": "പ്ലെയർ്റെ വിവരങ്ങൾ:",
     "Playing: %1": "പ്ലേ ചെയ്യുന്നു: %1",
     Playlist: "പ്ലേലിസ്റ്റ്",
+    "Playlist contains unsupported sources": "പ്ലേലിസ്റ്റിൽ പിന്തുണയ്ക്കാത്ത ഉറവിടങ്ങളുണ്ട്",
     "Playlist file": "പ്ലേലിസ്റ്റ് ഫയൽ",
+    "Playlist is empty or invalid": "പ്ലേലിസ്റ്റ് ശൂന്യമോ അസാധുവോ ആണ്",
     "Playlist is not loading directly...Loading via server...":
         "പ്ലേലിസ്റ്റ് നേരിട്ട് ലോഡുചെയ്യാൻ കഴിഞ്ഞില്ല. സെർവർ വഴി ലോഡ് ചെയ്യുന്നു...",
+    "Playlist is too large": "പ്ലേലിസ്റ്റ് വളരെ വലുതാണ്",
+    "Playlist local files must be dropped together with the playlist":
+        "പ്ലേലിസ്റ്റിലെ പ്രാദേശിക ഫയലുകൾ പ്ലേലിസ്റ്റിനൊപ്പം ചേർത്ത് ഡ്രോപ്പ് ചെയ്യണം",
+    "Playlist must use UTF-8": "പ്ലേലിസ്റ്റ് UTF-8 ഉപയോഗിക്കണം",
     "Playlist Name": "പ്ലേലിസ്റ്റ് പേര്",
     "Playlist URL": "പ്ലേലിസ്റ്റ് URL",
     Plex: "Plex",

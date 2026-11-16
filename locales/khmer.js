@@ -101,6 +101,14 @@ var keyStrings = {
     alhabet:
         "កខគឃងចឆជឈញដឋឌឍណតថទធនបផពភមយរឫឬលឭឮវសហឡអឥឦឧឩឪឯឰឱឲឳ០១២៣៤៥៦៧៨៩។៕ៗ៘៙៚៛‌‍័ៈ់៉៊៍ាិីឹឺុូួើឿៀេែៃោៅំះ្",
     always: "ជានិច្ច",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "មិនគាំទ្រ HLS manifest ក្នុងឧបករណ៍ទេ; សូមប្រើ URL manifest HTTP(S)",
+    "Playlist contains unsupported sources": "បញ្ជីចាក់មានប្រភពដែលមិនគាំទ្រ",
+    "Playlist is empty or invalid": "បញ្ជីចាក់ទទេ ឬមិនត្រឹមត្រូវ",
+    "Playlist is too large": "បញ្ជីចាក់ធំពេក",
+    "Playlist local files must be dropped together with the playlist":
+        "ត្រូវអូសឯកសារក្នុងឧបករណ៍មកទម្លាក់ជាមួយបញ្ជីចាក់",
+    "Playlist must use UTF-8": "បញ្ជីចាក់ត្រូវប្រើ UTF-8",
     "and enter code": "ហើយបញ្ចូលលេខកូដ",
     Back: "ថយក្រោយ",
     "Back / Forward for 1 minute": "រំលងថយក្រោយ / ទៅមុខ 1 នាទី។",

@@ -328,20 +328,25 @@ function readPlaylist(file: any, w: any): Promise<string> {
                         );
                     };
                     reader.onload = function () {
-                        var value =
-                            typeof reader.result === "string"
-                                ? reader.result
-                                : "";
-                        if (value.indexOf("\ufffd") >= 0)
+                        try {
+                            if (
+                                !reader.result ||
+                                typeof reader.result.byteLength !== "number"
+                            )
+                                throw new Error();
+                            resolve(
+                                decodeUtf8(new Uint8Array(reader.result), w)
+                            );
+                        } catch (_) {
                             reject(
                                 failure(
                                     "playlist_invalid",
                                     "Playlist text encoding is invalid"
                                 )
                             );
-                        else resolve(value);
+                        }
                     };
-                    reader.readAsText(file, "UTF-8");
+                    reader.readAsArrayBuffer(file);
                 });
             } else
                 return Promise.reject(
@@ -465,20 +470,29 @@ export function createDroppedPlaylists(
             failure("playlist_invalid", "No playlist was dropped")
         );
 
-    var reads: Promise<any>[] = [];
+    var parsedPlaylists: any[] = [];
+    var playlistRecordCount = 0;
+    var readChain: Promise<any> = Promise.resolve();
     for (var p = 0; p < playlistFiles.length; p++)
         (function (playlist: any) {
-            reads.push(
-                readPlaylist(playlist, w).then(function (text) {
-                    return {
-                        file: playlist,
-                        parsed: parseDroppedPlaylist(text),
-                    };
-                })
-            );
+            var read = function (): Promise<any> {
+                return readPlaylist(playlist, w).then(function (text) {
+                    var parsed = parseDroppedPlaylist(text);
+                    playlistRecordCount += parsed.records.length;
+                    if (playlistRecordCount > MAX_RECORDS)
+                        throw failure(
+                            "playlist_limit",
+                            "Playlist has too many entries"
+                        );
+                    parsedPlaylists.push({ file: playlist, parsed: parsed });
+                });
+            };
+            // Start the first read inside the file gesture; subsequent reads
+            // remain sequential so an over-limit batch stops work immediately.
+            readChain = p === 0 ? read() : readChain.then(read);
         })(playlistFiles[p]);
 
-    return Promise.all(reads).then(function (parsedPlaylists) {
+    return readChain.then(function () {
         var expanded: any[] = [];
         var localFiles: any[] = [];
         var localSeen: any[] = [];

@@ -374,6 +374,82 @@ test("drop errors use audited translated keys for failure, unsupported type and 
     );
     assert.ok(f.messages.every((text, i) => text !== translated[i]));
 });
+test("playlist failures translate every safe diagnostic and redact unknown native errors", async () => {
+    const context = {};
+    vm.runInNewContext(fs.readFileSync("locales/russian.js", "utf8"), context);
+    const cases = [
+        [
+            { droppedPlaylistCode: "playlist_hls_local_unsupported" },
+            "Local HLS manifests are not supported; use an HTTP(S) manifest URL",
+        ],
+        [
+            { droppedPlaylistCode: "playlist_local_unavailable" },
+            "Playlist local files must be dropped together with the playlist",
+        ],
+        [
+            { droppedPlaylistCode: "playlist_unsupported" },
+            "Playlist contains unsupported sources",
+        ],
+        [
+            { droppedPlaylistCode: "playlist_invalid" },
+            "Playlist is empty or invalid",
+        ],
+        [{ droppedPlaylistCode: "playlist_limit" }, "Playlist is too large"],
+        ["Dropped playlist must be UTF-8", "Playlist must use UTF-8"],
+        [
+            "Local HLS manifests are not supported; add the HTTP(S) manifest URL as a playlist entry",
+            "Local HLS manifests are not supported; use an HTTP(S) manifest URL",
+        ],
+        [
+            "Dropped playlist exceeds the 2 MiB file or 8 MiB batch limit",
+            "Playlist is too large",
+        ],
+        [
+            "Dropped playlists exceed 4096 entries or 128 local files",
+            "Playlist is too large",
+        ],
+        [
+            "Dropped playlist contains no playable entries",
+            "Playlist is empty or invalid",
+        ],
+        [
+            "Dropped playlist contains an invalid entry",
+            "Playlist is empty or invalid",
+        ],
+        [
+            new Error("https://private.test/token /private/secret.m3u"),
+            "Unsupported source",
+        ],
+        [
+            { droppedPlaylistCode: "toString", message: "/private/secret.m3u" },
+            "Unsupported source",
+        ],
+    ];
+    for (const [error, expected] of cases) {
+        const f = fixture(true);
+        const keys = [];
+        f.w._ = (key) => {
+            assert.ok(Object.hasOwn(context.keyStrings, key));
+            keys.push(key);
+            return context.keyStrings[key];
+        };
+        f.grant("grant-errors-1234567890");
+        f.requests[0].reject(error);
+        await flush();
+        assert.deepEqual(keys, [expected]);
+        assert.deepEqual(f.messages, [context.keyStrings[expected]]);
+        assert.notEqual(f.messages[0], expected);
+        assert.equal(f.messages[0].includes("/private/"), false);
+        assert.equal(f.messages[0].includes("private.test"), false);
+        assert.equal(f.played.length, 0);
+    }
+    const fallback = fixture(true);
+    fallback.w._ = undefined;
+    fallback.grant("grant-errors-1234567890");
+    fallback.requests[0].reject("Dropped playlist must be UTF-8");
+    await flush();
+    assert.deepEqual(fallback.messages, ["Playlist must use UTF-8"]);
+});
 test("native consumes only opaque OS grants and ignores duplicate DOM file delivery", async () => {
     const f = fixture(true);
     f.event("drop", [file()]);

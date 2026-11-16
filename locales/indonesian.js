@@ -103,6 +103,15 @@ var keyStrings = {
         "Otomatis memutar file yang didukung secara langsung dan menggunakan HLS yang kompatibel bila diperlukan.",
     alhabet: "abcdefghijklmnopqrstuvwxyz",
     always: "selalu",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Manifes HLS lokal tidak didukung; gunakan URL manifes HTTP(S)",
+    "Playlist contains unsupported sources":
+        "Daftar putar berisi sumber yang tidak didukung",
+    "Playlist is empty or invalid": "Daftar putar kosong atau tidak valid",
+    "Playlist is too large": "Daftar putar terlalu besar",
+    "Playlist local files must be dropped together with the playlist":
+        "File lokal harus diseret dan dilepas bersama daftar putar",
+    "Playlist must use UTF-8": "Daftar putar harus menggunakan UTF-8",
     "and enter code": "dan masukkan kode",
     Back: "Kembali",
     "Back / Forward for 1 minute": "Mundur / maju 1 menit",

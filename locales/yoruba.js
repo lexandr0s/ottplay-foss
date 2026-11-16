@@ -633,6 +633,8 @@ var keyStrings = {
     "Loading via proxy...": "Ń gbé wọlé nípasẹ̀ aṣojú nẹ́tíwọ́ọ̀kì…",
     "Loading. Please wait...": "Ń gbé wọlé… jọ̀wọ́ dúró…",
     "Loading...": "Ń gbé wọlé…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "A kò ṣe àtìlẹ́yìn fún àwọn manifest HLS agbègbè; lo URL HTTP(S) manifest náà",
     "Local HTTP remote control": "Ìṣàkóso HTTP láti ọ̀nà jíjìn nínú nẹ́tíwọ́ọ̀kì",
     "Local source did not respond": "Orísun inú ẹ̀rọ kò dáhùn",
     "Local source unavailable": "Orísun inú ẹ̀rọ kò sí lárọ̀ọ́wọ́tó",
@@ -766,9 +768,16 @@ var keyStrings = {
     "Player info:": "Ìwífún ẹ̀rọ ìṣeré:",
     "Playing: %1": "Ń ṣeré: %1",
     Playlist: "Àkójọ ìṣeré",
+    "Playlist contains unsupported sources":
+        "Playlist ní àwọn orísun tí a kò ṣe àtìlẹ́yìn fún",
     "Playlist file": "Fáìlì àkójọ ìṣeré",
+    "Playlist is empty or invalid": "Playlist ṣófo tàbí kò bófin mu",
     "Playlist is not loading directly...Loading via server...":
         "A kò lè gbé àkójọ ìṣeré wọlé tààrà. Ń gbé wọlé nípasẹ̀ sáfà…",
+    "Playlist is too large": "Playlist tóbi jù",
+    "Playlist local files must be dropped together with the playlist":
+        "Gbọ́dọ̀ ju àwọn fáìlì agbègbè playlist sílẹ̀ pọ̀ mọ́ playlist náà",
+    "Playlist must use UTF-8": "Playlist gbọ́dọ̀ lo UTF-8",
     "Playlist Name": "Orúkọ àkójọ ìṣeré",
     "Playlist URL": "URL àkójọ ìṣeré",
     Plex: "Plex",

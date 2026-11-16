@@ -650,6 +650,8 @@ var keyStrings = {
     "Loading via proxy...": "Боркунӣ тавассути прокси…",
     "Loading. Please wait...": "Боркунӣ… лутфан интизор шавед…",
     "Loading...": "Боркунӣ…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Манифестҳои маҳаллии HLS дастгирӣ намешаванд; URL-и HTTP(S)-и манифестро истифода баред",
     "Local HTTP remote control": "Идоракунии маҳаллии дурдасти HTTP",
     "Local source did not respond": "Манбаи маҳаллӣ ҷавоб надод",
     "Local source unavailable": "Манбаи маҳаллӣ дастрас нест",
@@ -784,9 +786,16 @@ var keyStrings = {
     "Player info:": "Маълумоти плеер:",
     "Playing: %1": "Дар ҳоли пахш: %1",
     Playlist: "Рӯйхати пахш",
+    "Playlist contains unsupported sources":
+        "Рӯйхати навозиш манбаъҳои дастгиринашаванда дорад",
     "Playlist file": "Файли рӯйхати пахш",
+    "Playlist is empty or invalid": "Рӯйхати навозиш холӣ ё нодуруст аст",
     "Playlist is not loading directly...Loading via server...":
         "Рӯйхати пахш мустақим бор нашуд. Боркунӣ тавассути сервер…",
+    "Playlist is too large": "Рӯйхати навозиш хеле калон аст",
+    "Playlist local files must be dropped together with the playlist":
+        "Файлҳои маҳаллии рӯйхати навозишро ҳамроҳи худи рӯйхат партоед",
+    "Playlist must use UTF-8": "Рӯйхати навозиш бояд UTF-8 истифода барад",
     "Playlist Name": "Номи рӯйхати пахш",
     "Playlist URL": "URL-и рӯйхати пахш",
     Plex: "Plex",

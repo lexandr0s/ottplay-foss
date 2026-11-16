@@ -5,8 +5,8 @@
   },
   "asset": "dist/local-drop.js",
   "measured": {
-    "bytes": 17401,
-    "gzipBytes": 5695
+    "bytes": 17793,
+    "gzipBytes": 5794
   },
   "previousBudget": {
     "bytes": 5807,
@@ -38,5 +38,6 @@
       "gzipBytes": 388
     },
     "purpose": "Retain catalog membership while distinguishing adaptive HTTP from direct media for Main and PiP. Measured complete entry feature delta, not cap overrun."
-  }
+  },
+  "measurementNote": "Includes strict FileReader decoding, early aggregate bounds and literal localized failure messages. Existing allowance unchanged."
 }

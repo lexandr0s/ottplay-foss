@@ -583,6 +583,7 @@ function companionCoreFixture() {
         true
     );
     const names = [
+        "coreCall",
         "cancelCoreSourcePreparation",
         "cancelCoreStreamAttempt",
         "coreNormalizedMse",

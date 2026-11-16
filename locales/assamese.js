@@ -101,6 +101,14 @@ var keyStrings = {
     alhabet:
         "অআইঈউঊঋএঐওঔকখগঘঙচছজঝঞটঠডঢণতথদধনপফবভমযৰলৱশষসহ‌‍৲ৎরঌৠৡ০১২৩৪৫৬৭৮৯।॥়ংঁঃ্ািীুূৃেৈোৌৄৗৢৣড়ঢ়য়",
     always: "সদায়",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "স্থানীয় HLS মেনিফেষ্ট সমৰ্থিত নহয়; HTTP(S) মেনিফেষ্ট URL ব্যৱহাৰ কৰক",
+    "Playlist contains unsupported sources": "প্লেলিষ্টত অসমৰ্থিত উৎস আছে",
+    "Playlist is empty or invalid": "প্লেলিষ্ট খালী বা অবৈধ",
+    "Playlist is too large": "প্লেলিষ্ট অতি ডাঙৰ",
+    "Playlist local files must be dropped together with the playlist":
+        "স্থানীয় ফাইলবোৰ প্লেলিষ্টৰ সৈতে একেলগে টানি এৰিব লাগিব",
+    "Playlist must use UTF-8": "প্লেলিষ্টত UTF-8 ব্যৱহাৰ কৰিব লাগিব",
     "and enter code": "আৰু ক’ড লিখক",
     Back: "পিছলৈ",
     "Back / Forward for 1 minute": "1 মিনিট পিছলৈ / আগলৈ যাওক",
