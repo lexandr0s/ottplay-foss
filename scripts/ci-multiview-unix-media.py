@@ -249,7 +249,7 @@ def _audio(raw, source, minimum):
     full = _ownership(values[begin:], source)
     bad = [row for row in selected if row['rms'] < 20 or row['coherence'] < .97]
     steps = []
-    for before, after in zip(pure, pure[1:]):
+    for before, after in zip(selected, selected[1:]):
         delta = math.remainder(after['phase'] - before['phase'], 2 * math.pi)
         if abs(delta) > .1:
             steps.append({'before_seconds': before['start_seconds'],
@@ -277,13 +277,13 @@ def _original_b_diagnostic(raw):
         return {'pass': False, 'reason': 'No first pure owner bin', 'windows_50ms': windows}
     start = round(pure[0]['start_seconds'] * RATE)
     full = _ownership(values[start:], 2)
+    selected = [row for row in windows if row['start_seconds'] >= start / RATE]
     steps = []
-    for before, after in zip(pure, pure[1:]):
+    for before, after in zip(selected, selected[1:]):
         delta = math.remainder(after['phase'] - before['phase'], 2 * math.pi)
         if abs(delta) > .1:
             steps.append({'before_seconds': before['start_seconds'],
                           'after_seconds': after['start_seconds'], 'delta': delta})
-    selected = [row for row in windows if row['start_seconds'] >= start / RATE]
     bad = [row['start_seconds'] for row in selected if row['rms'] < 20 or row['coherence'] < .97]
     duration = (len(values) - start) / RATE
     end = bool(windows) and round(windows[-1]['start_seconds'] * RATE) + WINDOW == len(values)

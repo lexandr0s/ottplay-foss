@@ -1777,6 +1777,25 @@ mod runtime {
             }
         }
     }
+    // Advisory readiness only: all stop, authority, and time checks remain in
+    // the write loop. The File stays owned by this thread throughout poll.
+    fn wait_capture_writable(writer: &mut File) {
+        let borrowed = writer.as_fd();
+        let mut descriptor = libc::pollfd {
+            fd: borrowed.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: descriptor is initialized and the borrowed File outlives this
+        // synchronous call. No descriptor is stored, duplicated, or closed here.
+        // Timeout, interruption, and error/hangup events all return to the
+        // original checks and write, which retains error classification.
+        unsafe {
+            libc::poll(&mut descriptor, 1, 2);
+        }
+    }
+
+    #[cfg(test)]
     fn write_capture_complete_detail(
         writer: &mut impl Write,
         bytes: &[u8],
@@ -1798,10 +1817,56 @@ mod runtime {
             || thread::sleep(Duration::from_millis(2)),
         )
     }
+    fn write_capture_complete_detail_with_wait<W: Write>(
+        writer: &mut W,
+        bytes: &[u8],
+        shared: &Shared,
+        stall: Duration,
+        absolute: Instant,
+        authorized: impl FnMut() -> Result<bool, EncoderError>,
+        lane: EncoderFailureLane,
+        wait: &mut impl FnMut(&mut W),
+    ) -> Result<(), EncoderFailureDetail> {
+        write_capture_complete_detail_clocked_wait(
+            writer,
+            bytes,
+            shared,
+            stall,
+            absolute,
+            authorized,
+            lane,
+            Instant::now,
+            wait,
+        )
+    }
     // Clock/pause injection is private and only makes the real write loop's
     // deadline branches deterministic in ordinary in-memory tests.
+    #[cfg(test)]
     fn write_capture_complete_detail_clocked(
         writer: &mut impl Write,
+        bytes: &[u8],
+        shared: &Shared,
+        stall: Duration,
+        absolute: Instant,
+        authorized: impl FnMut() -> Result<bool, EncoderError>,
+        lane: EncoderFailureLane,
+        now: impl FnMut() -> Instant,
+        mut pause: impl FnMut(),
+    ) -> Result<(), EncoderFailureDetail> {
+        write_capture_complete_detail_clocked_wait(
+            writer,
+            bytes,
+            shared,
+            stall,
+            absolute,
+            authorized,
+            lane,
+            now,
+            |_| pause(),
+        )
+    }
+    fn write_capture_complete_detail_clocked_wait<W: Write>(
+        writer: &mut W,
         bytes: &[u8],
         shared: &Shared,
         stall: Duration,
@@ -1809,7 +1874,7 @@ mod runtime {
         mut authorized: impl FnMut() -> Result<bool, EncoderError>,
         lane: EncoderFailureLane,
         mut now: impl FnMut() -> Instant,
-        mut pause: impl FnMut(),
+        mut pause: impl FnMut(&mut W),
     ) -> Result<(), EncoderFailureDetail> {
         let mut offset = 0;
         let entered = now();
@@ -1897,7 +1962,7 @@ mod runtime {
                 Ok(_) => return Err(EncoderError::Io.into()),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     blocked = blocked.saturating_add(1);
-                    pause();
+                    pause(writer);
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {
                     interrupted = interrupted.saturating_add(1);
@@ -1922,6 +1987,7 @@ mod runtime {
         }
         Ok(())
     }
+    #[cfg(test)]
     fn write_black_complete_detail(
         writer: &mut impl Write,
         bytes: usize,
@@ -1931,11 +1997,32 @@ mod runtime {
         mut authorized: impl FnMut() -> Result<bool, EncoderError>,
         lane: EncoderFailureLane,
     ) -> Result<(), EncoderFailureDetail> {
+        write_black_complete_detail_with_wait(
+            writer,
+            bytes,
+            shared,
+            stall,
+            absolute,
+            &mut authorized,
+            lane,
+            &mut |_| thread::sleep(Duration::from_millis(2)),
+        )
+    }
+    fn write_black_complete_detail_with_wait<W: Write>(
+        writer: &mut W,
+        bytes: usize,
+        shared: &Shared,
+        stall: Duration,
+        absolute: Instant,
+        mut authorized: impl FnMut() -> Result<bool, EncoderError>,
+        lane: EncoderFailureLane,
+        wait: &mut impl FnMut(&mut W),
+    ) -> Result<(), EncoderFailureDetail> {
         let zeros = [0u8; 4096];
         let mut remaining = bytes;
         while remaining != 0 {
             let count = remaining.min(zeros.len());
-            write_capture_complete_detail(
+            write_capture_complete_detail_with_wait(
                 writer,
                 &zeros[..count],
                 shared,
@@ -1943,6 +2030,7 @@ mod runtime {
                 absolute,
                 &mut authorized,
                 lane,
+                wait,
             )
             .map_err(|mut detail| {
                 if let Some(write) = &mut detail.write_failure {
@@ -1998,12 +2086,25 @@ mod runtime {
         feed.commit_full(lease, &mut modeled_committed, repeats)?;
         Ok(frame)
     }
+    #[cfg(test)]
     fn capture_video_loop(
-        mut writer: impl Write,
+        writer: impl Write,
         feed: Arc<CaptureVideoFeed>,
         canvas: CanvasSpec,
         stall: Duration,
         shared: Arc<Shared>,
+    ) {
+        capture_video_loop_with_wait(writer, feed, canvas, stall, shared, |_| {
+            thread::sleep(Duration::from_millis(2))
+        });
+    }
+    fn capture_video_loop_with_wait<W: Write>(
+        mut writer: W,
+        feed: Arc<CaptureVideoFeed>,
+        canvas: CanvasSpec,
+        stall: Duration,
+        shared: Arc<Shared>,
+        mut wait: impl FnMut(&mut W),
     ) {
         let generation = lock(&shared.snapshot).generation;
         let debt = capture_debt(canvas, stall);
@@ -2016,7 +2117,7 @@ mod runtime {
                 .as_ref()
                 .ok_or(EncoderError::InvalidConfig)?;
             for _ in 0..startup.video_units {
-                write_black_complete_detail(
+                write_black_complete_detail_with_wait(
                     &mut writer,
                     canvas.width as usize * canvas.height as usize * 3,
                     &shared,
@@ -2024,6 +2125,7 @@ mod runtime {
                     startup.deadline,
                     || feed.empty_sources(generation),
                     EncoderFailureLane::Video,
+                    &mut wait,
                 )?;
                 shared.video_frames_written.fetch_add(1, Ordering::Relaxed);
             }
@@ -2067,7 +2169,7 @@ mod runtime {
                     Some(CapturePixels::Rgb(bytes))
                         if bytes.len() == canvas.width as usize * canvas.height as usize * 3 =>
                     {
-                        write_capture_complete_detail(
+                        write_capture_complete_detail_with_wait(
                             &mut writer,
                             bytes,
                             &shared,
@@ -2075,9 +2177,10 @@ mod runtime {
                             absolute,
                             || Ok(true),
                             EncoderFailureLane::Video,
+                            &mut wait,
                         )
                     }
-                    Some(CapturePixels::Black(bytes)) => write_black_complete_detail(
+                    Some(CapturePixels::Black(bytes)) => write_black_complete_detail_with_wait(
                         &mut writer,
                         *bytes,
                         &shared,
@@ -2085,8 +2188,9 @@ mod runtime {
                         absolute,
                         || Ok(true),
                         EncoderFailureLane::Video,
+                        &mut wait,
                     ),
-                    None => write_black_complete_detail(
+                    None => write_black_complete_detail_with_wait(
                         &mut writer,
                         canvas.width as usize * canvas.height as usize * 3,
                         &shared,
@@ -2094,6 +2198,7 @@ mod runtime {
                         absolute,
                         || feed.empty_sources(generation),
                         EncoderFailureLane::Video,
+                        &mut wait,
                     ),
                     _ => Err(EncoderError::InvalidConfig.into()),
                 };
@@ -2130,12 +2235,25 @@ mod runtime {
             }
         }
     }
+    #[cfg(test)]
     fn capture_audio_loop(
-        mut writer: impl Write,
+        writer: impl Write,
         feed: AudioInput,
         canvas: CanvasSpec,
         stall: Duration,
         shared: Arc<Shared>,
+    ) {
+        capture_audio_loop_with_wait(writer, feed, canvas, stall, shared, |_| {
+            thread::sleep(Duration::from_millis(2))
+        });
+    }
+    fn capture_audio_loop_with_wait<W: Write>(
+        mut writer: W,
+        feed: AudioInput,
+        canvas: CanvasSpec,
+        stall: Duration,
+        shared: Arc<Shared>,
+        mut wait: impl FnMut(&mut W),
     ) {
         let debt = capture_debt(canvas, stall);
         let result = (|| -> Result<(), EncoderFailureDetail> {
@@ -2146,7 +2264,7 @@ mod runtime {
             let generation = lock(&shared.snapshot).generation;
             let silent = [0u8; 3840];
             for _ in 0..startup.audio_units {
-                write_capture_complete_detail(
+                write_capture_complete_detail_with_wait(
                     &mut writer,
                     &silent,
                     &shared,
@@ -2154,6 +2272,7 @@ mod runtime {
                     startup.deadline,
                     || startup.feed.empty_sources(generation),
                     EncoderFailureLane::Audio,
+                    &mut wait,
                 )?;
                 shared
                     .audio_samples_written
@@ -2187,7 +2306,7 @@ mod runtime {
                         .checked_add(debt)
                         .ok_or(EncoderError::InvalidConfig)?
                 };
-                let written = write_capture_complete_detail(
+                let written = write_capture_complete_detail_with_wait(
                     &mut writer,
                     &bytes,
                     &shared,
@@ -2201,6 +2320,7 @@ mod runtime {
                         }
                     },
                     EncoderFailureLane::Audio,
+                    &mut wait,
                 );
                 if let Err(mut error) = written {
                     if let Some(write) = &mut error.write_failure {
@@ -3146,9 +3266,14 @@ mod runtime {
                     VideoInput::Legacy(video) => {
                         video_loop(video_writer, video, canvas, stall, shared_video)
                     }
-                    VideoInput::Capture(video) => {
-                        capture_video_loop(video_writer, video, canvas, stall, shared_video)
-                    }
+                    VideoInput::Capture(video) => capture_video_loop_with_wait(
+                        video_writer,
+                        video,
+                        canvas,
+                        stall,
+                        shared_video,
+                        wait_capture_writable,
+                    ),
                 }) {
                 Ok(handle) => encoder.video = Some(handle),
                 Err(_) => {
@@ -3162,7 +3287,14 @@ mod runtime {
                 .name("multiview-audio".into())
                 .spawn(move || {
                     if capture_mode {
-                        capture_audio_loop(audio_writer, audio, canvas, stall, shared_audio);
+                        capture_audio_loop_with_wait(
+                            audio_writer,
+                            audio,
+                            canvas,
+                            stall,
+                            shared_audio,
+                            wait_capture_writable,
+                        );
                     } else {
                         audio_loop(audio_writer, audio, stall, shared_audio);
                     }
@@ -3965,6 +4097,98 @@ mod runtime {
         }
 
         #[test]
+        fn capture_readiness_model_wakes_early_and_preserves_write_guards() {
+            use std::cell::Cell;
+            struct FiniteReader<'a> {
+                clock: &'a Cell<Instant>,
+                ready: Instant,
+                accepted: Vec<u8>,
+                waits: Vec<Duration>,
+            }
+            impl Write for FiniteReader<'_> {
+                fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                    if self.clock.get() < self.ready {
+                        return Err(io::ErrorKind::WouldBlock.into());
+                    }
+                    // One byte of finite reader capacity becomes available at
+                    // each event; never alter or replay the remaining bytes.
+                    self.accepted.push(bytes[0]);
+                    self.ready = self.clock.get() + Duration::from_micros(250);
+                    Ok(1)
+                }
+                fn flush(&mut self) -> io::Result<()> {
+                    Ok(())
+                }
+            }
+            let epoch = Instant::now();
+            for mode in 0..5 {
+                let clock = Cell::new(epoch);
+                let shared = shared_at(epoch);
+                let authorized = Cell::new(true);
+                let mut writer = FiniteReader {
+                    clock: &clock,
+                    ready: epoch + Duration::from_micros(250),
+                    accepted: Vec::new(),
+                    waits: Vec::new(),
+                };
+                let result = write_capture_complete_detail_clocked_wait(
+                    &mut writer,
+                    &[1, 7, 3, 9],
+                    &shared,
+                    if mode == 2 {
+                        Duration::from_micros(200)
+                    } else {
+                        Duration::from_secs(1)
+                    },
+                    epoch
+                        + if mode == 1 {
+                            Duration::from_micros(200)
+                        } else {
+                            Duration::from_secs(1)
+                        },
+                    || Ok(authorized.get()),
+                    EncoderFailureLane::Video,
+                    || clock.get(),
+                    |writer| {
+                        let elapsed = writer
+                            .ready
+                            .saturating_duration_since(clock.get())
+                            .min(Duration::from_millis(2));
+                        assert!(elapsed > Duration::ZERO);
+                        writer.waits.push(elapsed);
+                        clock.set(clock.get() + elapsed);
+                        if mode == 3 {
+                            authorized.set(false);
+                        }
+                        if mode == 4 {
+                            shared.stop.store(true, Ordering::Release);
+                        }
+                    },
+                );
+                assert!(writer
+                    .waits
+                    .iter()
+                    .all(|wait| *wait == Duration::from_micros(250)));
+                if mode == 0 {
+                    assert_eq!(result, Ok(()));
+                    assert_eq!(writer.accepted, [1, 7, 3, 9]);
+                    assert_eq!(writer.waits.len(), 4);
+                    assert_eq!(clock.get().duration_since(epoch), Duration::from_millis(1));
+                } else {
+                    assert!(writer.accepted.is_empty());
+                    assert_eq!(writer.waits.len(), 1);
+                    let detail = result.unwrap_err();
+                    match mode {
+                        1 => assert_eq!(detail.site, EncoderFailureSite::WriteAbsolute),
+                        2 => assert_eq!(detail.site, EncoderFailureSite::WriteNoProgress),
+                        3 | 4 => assert_eq!(detail.error, EncoderError::Cancelled),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+
+        #[test]
         fn capture_write_absolute_trace_distinguishes_zero_partial_and_complete_without_sleep() {
             use std::cell::Cell;
             enum Step {
@@ -3997,7 +4221,17 @@ mod runtime {
                 }
             }
             let epoch = Instant::now();
-            for (entry_ns, deadline_ns, steps, phase, offset, calls, blocked, elapsed, progress_age) in [
+            for (
+                entry_ns,
+                deadline_ns,
+                steps,
+                phase,
+                offset,
+                calls,
+                blocked,
+                elapsed,
+                progress_age,
+            ) in [
                 (
                     11,
                     10,

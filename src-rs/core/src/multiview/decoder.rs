@@ -85,21 +85,24 @@ fn probe_error_class(error: DecoderError) -> &'static str {
     }
 }
 #[derive(Clone, Copy)]
-struct ProbeFailureRecord {
+/// Opaque closed failure evidence; retaining this Copy value performs no I/O.
+/// The host must finish owned probe/producer/operation cleanup before emission.
+pub struct ProbeDiagnostic {
     stage: ProbeStage,
     error: DecoderError,
     elapsed_ms: u64,
     remaining_ms: u64,
     stage_ms: [u64; 4],
 }
-impl std::fmt::Display for ProbeFailureRecord {
+impl std::fmt::Display for ProbeDiagnostic {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(out, "multiview_probe stage={} error={} elapsed_ms={} remaining_ms={} protocol_ffmpeg_ms={} protocol_ffprobe_ms={} stats_help_ms={} metadata_ms={}",
             self.stage.code(), probe_error_class(self.error), self.elapsed_ms, self.remaining_ms,
             self.stage_ms[0], self.stage_ms[1], self.stage_ms[2], self.stage_ms[3])
     }
 }
-fn write_probe_failure(record: ProbeFailureRecord) {
+/// Emit only after the caller has released owned probe and operation resources.
+pub fn emit_probe_diagnostic(record: ProbeDiagnostic) {
     #[cfg(panic = "unwind")]
     {
         let _ = std::panic::catch_unwind(|| eprintln!("{record}"));
@@ -115,6 +118,7 @@ fn observe_probe_stage<T>(
     started: Instant,
     deadline: Instant,
     stage_ms: &mut [u64; 4],
+    diagnostic: &mut Option<ProbeDiagnostic>,
     operation: impl FnOnce() -> Result<T, DecoderError>,
 ) -> Result<T, DecoderError> {
     let began = Instant::now();
@@ -125,7 +129,7 @@ fn observe_probe_stage<T>(
         .as_millis()
         .min(u64::MAX as u128) as u64;
     if let Err(error) = result.as_ref() {
-        write_probe_failure(ProbeFailureRecord {
+        *diagnostic = Some(ProbeDiagnostic {
             stage,
             error: *error,
             elapsed_ms: now
@@ -2544,6 +2548,14 @@ fn rate(value: &str) -> Result<f64, DecoderError> {
     }
     Ok(result)
 }
+// FFprobe's average is the decoded-frame rate; nominal may describe fields
+// or a VFR time base. Only its explicit unknown sentinel (or absence) falls back.
+fn metadata_rate(avg: Option<&str>, nominal: Option<&str>) -> Result<f64, DecoderError> {
+    match avg {
+        None | Some("0/0") => rate(nominal.ok_or(DecoderError::ProbeFailed)?),
+        Some(value) => rate(value),
+    }
+}
 fn metadata(bytes: &[u8]) -> Result<MediaInfo, DecoderError> {
     let text = std::str::from_utf8(bytes).map_err(|_| DecoderError::ProbeFailed)?;
     let (mut in_stream, mut streams, mut video, mut audio) = (false, 0, false, false);
@@ -2570,8 +2582,7 @@ fn metadata(bytes: &[u8]) -> Result<MediaInfo, DecoderError> {
                     if w == 0 || h == 0 || w > 1920 || h > 1080 {
                         return Err(DecoderError::InvalidInput);
                     }
-                    let fps = rate(avg.ok_or(DecoderError::ProbeFailed)?)?
-                        .max(rate(nominal.ok_or(DecoderError::ProbeFailed)?)?);
+                    let fps = metadata_rate(avg, nominal)?;
                     selected = Some(MediaInfo {
                         width: w,
                         height: h,
@@ -2937,6 +2948,20 @@ pub fn probe_stream(
     cancel: &AtomicBool,
     deadline: Instant,
 ) -> Result<PreparedStreamInfo, DecoderError> {
+    probe_stream_with_diagnostic(config, source, input, cancel, deadline, &mut None)
+}
+
+/// Capture closed probe evidence without I/O. The output is cleared before any
+/// validation; the host may emit it only after all owned cleanup completes.
+pub fn probe_stream_with_diagnostic(
+    config: &DecoderConfig,
+    source: &GrantedStream,
+    input: StreamInput,
+    cancel: &AtomicBool,
+    deadline: Instant,
+    diagnostic: &mut Option<ProbeDiagnostic>,
+) -> Result<PreparedStreamInfo, DecoderError> {
+    *diagnostic = None;
     checked_frame_bytes(config)?;
     if input.phase != StreamPhase::Probe || !Arc::ptr_eq(&input.identity, &source.identity) {
         return Err(DecoderError::BindingMismatch);
@@ -2963,6 +2988,7 @@ pub fn probe_stream(
         probe_started,
         deadline,
         &mut stage_ms,
+        diagnostic,
         || stream_fd_tool(&config.ffmpeg, deadline, &check),
     )?;
     let ffprobe = observe_probe_stage(
@@ -2970,6 +2996,7 @@ pub fn probe_stream(
         probe_started,
         deadline,
         &mut stage_ms,
+        diagnostic,
         || stream_fd_tool(&config.ffprobe, deadline, &check),
     )?;
     observe_probe_stage(
@@ -2977,6 +3004,7 @@ pub fn probe_stream(
         probe_started,
         deadline,
         &mut stage_ms,
+        diagnostic,
         || require_stream_stats(&ffmpeg, deadline, &check),
     )?;
     let information = observe_probe_stage(
@@ -2984,6 +3012,7 @@ pub fn probe_stream(
         probe_started,
         deadline,
         &mut stage_ms,
+        diagnostic,
         || {
             let bytes = captured_until(
         Command::new(&ffprobe)
@@ -7057,6 +7086,43 @@ mod tests {
     }
 
     #[test]
+    fn probe_average_rate_precedes_field_rate_and_only_unknown_average_falls_back() {
+        for (avg, nominal, expected) in [
+            (Some("25/1"), Some("50/1"), 25.0),
+            (Some("30/1"), Some("60/1"), 30.0),
+            (Some("24000/1001"), Some("60/1"), 24000.0 / 1001.0),
+            (None, Some("25/1"), 25.0),
+            (Some("0/0"), Some("30/1"), 30.0),
+            (Some("25/1"), None, 25.0),
+            (Some("25/1"), Some("not-a-rate"), 25.0),
+        ] {
+            assert_eq!(metadata_rate(avg, nominal).unwrap(), expected);
+            let avg_line = avg.map_or(String::new(), |rate| format!("avg_frame_rate={rate}\n"));
+            let nominal_line =
+                nominal.map_or(String::new(), |rate| format!("r_frame_rate={rate}\n"));
+            let text = format!("[STREAM]\ncodec_type=video\nwidth=320\nheight=180\n{avg_line}{nominal_line}[/STREAM]\n");
+            let info = metadata(text.as_bytes()).unwrap();
+            assert_eq!(info.fps, expected);
+            assert_eq!(info.pixel_rate(), (320.0 * 180.0 * expected).ceil() as u64);
+        }
+        for avg in [
+            "60/1",
+            "0/1",
+            "1/0",
+            "bad",
+            "NaN",
+            "1e2/1",
+            "18446744073709551616/1",
+        ] {
+            assert!(metadata_rate(Some(avg), Some("25/1")).is_err());
+        }
+        for nominal in [None, Some("0/0"), Some("60/1"), Some("bad")] {
+            assert!(metadata_rate(None, nominal).is_err());
+            assert!(metadata_rate(Some("0/0"), nominal).is_err());
+        }
+    }
+
+    #[test]
     fn actual_probe_metadata_rejects_unknown_and_excessive_video_cost() {
         let document = |width, height, avg: &str, nominal: &str| {
             format!("[STREAM]\ncodec_type=video\nwidth={width}\nheight={height}\navg_frame_rate={avg}\nr_frame_rate={nominal}\n[/STREAM]\n[STREAM]\ncodec_type=audio\n[/STREAM]\n")
@@ -7067,8 +7133,8 @@ mod tests {
         for invalid in [
             document(1921, 1080, "30/1", "30/1"),
             document(1920, 1081, "30/1", "30/1"),
-            document(320, 180, "0/0", "30/1"),
-            document(320, 180, "30/1", "31/1"),
+            document(320, 180, "0/0", "0/0"),
+            document(320, 180, "60/1", "30/1"),
         ] {
             assert_eq!(
                 metadata(invalid.as_bytes()),
@@ -7110,7 +7176,7 @@ mod probe_diagnostic_tests {
 
     #[test]
     fn probe_failure_record_is_closed_and_keeps_each_stage_duration() {
-        let record = ProbeFailureRecord {
+        let record = ProbeDiagnostic {
             stage: ProbeStage::Metadata,
             error: DecoderError::ProbeTimeout,
             elapsed_ms: 5000,
@@ -7128,23 +7194,43 @@ mod probe_diagnostic_tests {
         let end = start + Duration::from_secs(5);
         let mut counters = [41, 42, 43, 44];
         let mut calls = 0;
+        let mut diagnostic = None;
         assert_eq!(
-            observe_probe_stage(ProbeStage::Metadata, start, end, &mut counters, || {
-                calls += 1;
-                Ok::<_, DecoderError>(73)
-            }),
+            observe_probe_stage(
+                ProbeStage::Metadata,
+                start,
+                end,
+                &mut counters,
+                &mut diagnostic,
+                || {
+                    calls += 1;
+                    Ok::<_, DecoderError>(73)
+                }
+            ),
             Ok(73)
         );
         assert_eq!(calls, 1);
+        assert!(diagnostic.is_none());
         assert_eq!(&counters[..3], &[41, 42, 43]);
         assert_eq!(
-            observe_probe_stage::<()>(ProbeStage::StatsHelp, start, end, &mut counters, || {
-                calls += 1;
-                Err(DecoderError::PublicationDenied)
-            }),
+            observe_probe_stage::<()>(
+                ProbeStage::StatsHelp,
+                start,
+                end,
+                &mut counters,
+                &mut diagnostic,
+                || {
+                    calls += 1;
+                    Err(DecoderError::PublicationDenied)
+                }
+            ),
             Err(DecoderError::PublicationDenied)
         );
         assert_eq!(calls, 2);
+        let record = diagnostic.expect("closed diagnostic retained without emission");
+        assert_eq!(record.error, DecoderError::PublicationDenied);
+        assert_eq!(record.stage.index(), ProbeStage::StatsHelp.index());
+        assert_eq!(record.stage_ms, counters);
         assert_eq!(&counters[..2], &[41, 42]);
         // An elapsed diagnostic deadline does not add an admission policy: the
         // original operation remains responsible for its unchanged deadline.
@@ -7154,6 +7240,7 @@ mod probe_diagnostic_tests {
                 start,
                 start,
                 &mut counters,
+                &mut diagnostic,
                 || Ok::<_, DecoderError>(11)
             ),
             Ok(11)

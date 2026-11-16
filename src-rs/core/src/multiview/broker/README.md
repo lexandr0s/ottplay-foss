@@ -190,7 +190,11 @@ ordinary controls continue to require their full exact context.
 
 The transport checks the initial MPEG-TS packet headers before exposing bytes.
 First-response and idle defaults are eight seconds; each is capped at 30 seconds.
-Backpressure does not extend the absolute hard end. Probe forwarding is capped at
+Backpressure does not extend the absolute hard end. For HLS, the playlist progress
+deadline excludes only the actual ownership interval of a returned chunk, through
+the last retained clone/slice being dropped. Time before handoff and after release
+still counts; a deadline already expired before handoff is not revived. This does
+not relax response idle, authorization, cancellation or missing-segment checks. Probe forwarding is capped at
 8 MiB. Returned chunks are at most 64 KiB, with one outstanding chunk per stream;
 retained clones/slices retain their source and request admission permits. The
 transport retains at most one inbound frame up to 512 KiB while splitting it,

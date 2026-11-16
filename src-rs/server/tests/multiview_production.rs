@@ -42,7 +42,9 @@ thread_local! {
     // Bound only this test thread's owned normal-server stderr, never an arbitrary file.
     static FAILURE_STDERR_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
-struct FailureStderrGuard;
+struct FailureStderrGuard {
+    emit: fn(&str),
+}
 impl FailureStderrGuard {
     fn install(root: &Path) -> Self {
         FAILURE_STDERR_ROOT.with(|slot| {
@@ -52,12 +54,35 @@ impl FailureStderrGuard {
             );
             *slot.borrow_mut() = Some(root.to_owned());
         });
-        Self
+        Self {
+            emit: |record| eprintln!("normal_server_unwind {record}"),
+        }
     }
 }
 impl Drop for FailureStderrGuard {
     fn drop(&mut self) {
-        FAILURE_STDERR_ROOT.with(|slot| *slot.borrow_mut() = None);
+        // Take the owned path and release the borrow before any diagnostic I/O.
+        // Server/upstream guards were declared later and have already dropped;
+        // OwnedRoot was declared earlier and has not removed this file yet.
+        let root = FAILURE_STDERR_ROOT
+            .try_with(|slot| {
+                slot.try_borrow_mut()
+                    .ok()
+                    .and_then(|mut value| value.take())
+            })
+            .ok()
+            .flatten();
+        if std::thread::panicking() {
+            if let Some(root) = root {
+                // A diagnostic failure must never replace the original panic.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    (self.emit)(&fixture_stderr_diagnostic(
+                        &root,
+                        &root.join("server.stderr"),
+                    ));
+                }));
+            }
+        }
     }
 }
 fn request_stderr_diagnostic() -> String {
@@ -132,14 +157,76 @@ fn fixture_stderr_diagnostic(root: &Path, path: &Path) -> String {
         Ok(bytes)
     };
     match read() {
-        Ok(bytes) => format!(
-            "stderr_bytes={} stderr_sha256={:x} stderr_tail={:?}",
-            bytes.len(),
-            Sha256::digest(&bytes),
-            redacted_startup_tail(&bytes, root)
-        ),
+        Ok(bytes) => format_owned_stderr(&bytes, root),
         Err(_) => "stderr_unavailable_or_outside_owned_bound".to_owned(),
     }
+}
+
+fn format_owned_stderr(bytes: &[u8], root: &Path) -> String {
+    // A killed process may leave a token or URL only partly written. Never
+    // expose that incomplete line; redact complete input before tail truncation.
+    let complete = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |i| i + 1);
+    format!(
+        "stderr_bytes={} stderr_sha256={:x} stderr_incomplete_tail_bytes={} stderr_tail={:?}",
+        bytes.len(),
+        Sha256::digest(bytes),
+        bytes.len() - complete,
+        redacted_startup_tail(&bytes[..complete], root),
+    )
+}
+
+#[test]
+fn unwind_stderr_capture_preserves_original_panic_and_clears_registration() {
+    use std::sync::atomic::AtomicUsize;
+    static REPORTS: AtomicUsize = AtomicUsize::new(0);
+    fn observe(record: &str) {
+        assert_eq!(request_stderr_diagnostic(), "stderr_not_registered");
+        assert_eq!(record, "stderr_unavailable_or_outside_owned_bound");
+        REPORTS.fetch_add(1, Ordering::SeqCst);
+    }
+    let before = REPORTS.load(Ordering::SeqCst);
+    let original = std::panic::catch_unwind(|| {
+        let mut guard = FailureStderrGuard::install(Path::new("/nonexistent-owned-unwind-fixture"));
+        guard.emit = observe;
+        panic!("original direct expectation failure");
+    })
+    .unwrap_err();
+    assert_eq!(
+        original.downcast_ref::<&str>(),
+        Some(&"original direct expectation failure")
+    );
+    assert_eq!(REPORTS.load(Ordering::SeqCst), before + 1);
+    assert_eq!(request_stderr_diagnostic(), "stderr_not_registered");
+    let original = std::panic::catch_unwind(|| {
+        let mut guard = FailureStderrGuard::install(Path::new("/nonexistent-owned-unwind-fixture"));
+        guard.emit = |_| panic!("synthetic diagnostic writer failure");
+        panic!("original remains authoritative");
+    })
+    .unwrap_err();
+    assert_eq!(
+        original.downcast_ref::<&str>(),
+        Some(&"original remains authoritative")
+    );
+    assert_eq!(request_stderr_diagnostic(), "stderr_not_registered");
+}
+
+#[test]
+fn owned_stderr_drops_incomplete_secret_line_before_bounded_redaction() {
+    let root = Path::new("/owned/synthetic-fixture");
+    let fragment = &TOKEN[..TOKEN.len() / 2];
+    let bytes = format!("safe complete line\n{fragment}");
+    let report = format_owned_stderr(bytes.as_bytes(), root);
+    assert!(report.contains("safe complete line"));
+    assert!(!report.contains(fragment));
+    assert!(report.contains(&format!("stderr_incomplete_tail_bytes={}", fragment.len())));
+    let complete = format!("{TOKEN} https://fixture.invalid/private?token=hidden\n");
+    let report = format_owned_stderr(complete.as_bytes(), root);
+    assert!(!report.contains(TOKEN) && !report.contains("token=hidden"));
+    assert!(report.contains("[control-token]") && report.contains("[url]"));
+    assert_eq!(redacted_startup_tail(&vec![b'x'; 65536], root).len(), 8192);
 }
 
 #[test]
@@ -502,6 +589,86 @@ fn write_not_found(stream: &mut TcpStream) -> std::io::Result<()> {
     stream.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FixtureReadStage {
+    HttpSend,
+    HttpBody,
+    HttpDeadline,
+    HttpStatus,
+    PlaylistUrl,
+    BaseUrl,
+    Utf8,
+    MissingSequence,
+    InvalidSequence,
+    SegmentJoin,
+    SegmentUrl,
+}
+impl FixtureReadStage {
+    fn code(self) -> &'static str {
+        match self {
+            Self::HttpSend => "transport_send",
+            Self::HttpBody => "transport_body",
+            Self::HttpDeadline => "transport_deadline",
+            Self::HttpStatus => "http_status",
+            Self::PlaylistUrl => "playlist_url",
+            Self::BaseUrl => "base_url",
+            Self::Utf8 => "utf8",
+            Self::MissingSequence => "missing_sequence",
+            Self::InvalidSequence => "invalid_sequence",
+            Self::SegmentJoin => "segment_join",
+            Self::SegmentUrl => "segment_url",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug)]
+struct FixtureReadFailure {
+    stage: FixtureReadStage,
+    status: Option<u16>,
+    response_bytes: Option<usize>,
+    response_sha256: Option<[u8; 32]>,
+}
+impl FixtureReadFailure {
+    fn without_body(
+        stage: FixtureReadStage,
+        status: Option<u16>,
+        response_bytes: Option<usize>,
+    ) -> Self {
+        Self {
+            stage,
+            status,
+            response_bytes,
+            response_sha256: None,
+        }
+    }
+    fn response(stage: FixtureReadStage, status: u16, bytes: &[u8]) -> Self {
+        Self {
+            stage,
+            status: Some(status),
+            response_bytes: Some(bytes.len()),
+            response_sha256: Some(Sha256::digest(bytes).into()),
+        }
+    }
+}
+impl std::fmt::Display for FixtureReadFailure {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            out,
+            "stage={} status={:?} response_bytes={:?} response_sha256=",
+            self.stage.code(),
+            self.status,
+            self.response_bytes
+        )?;
+        if let Some(digest) = self.response_sha256 {
+            for byte in digest {
+                write!(out, "{byte:02x}")?;
+            }
+            Ok(())
+        } else {
+            write!(out, "none")
+        }
+    }
+}
+
 fn http(
     method: &str,
     url: &str,
@@ -510,6 +677,18 @@ fn http(
     body: Option<&Value>,
     limit: usize,
 ) -> (u16, Vec<u8>) {
+    // Existing callers keep the exact status0/empty-body failure convention.
+    http_checked(method, url, token, request_id, body, limit).unwrap_or((0, Vec::new()))
+}
+
+fn http_checked(
+    method: &str,
+    url: &str,
+    token: Option<&str>,
+    request_id: Option<&str>,
+    body: Option<&Value>,
+    limit: usize,
+) -> Result<(u16, Vec<u8>), FixtureReadFailure> {
     let fixture = fixture_http();
     let timeout = if method == "POST" {
         Duration::from_secs(30)
@@ -534,9 +713,9 @@ fn http(
             if let Some(value) = body {
                 request = request.json(value);
             }
-            let Ok(mut response) = request.send().await else {
-                return (0, Vec::new());
-            };
+            let mut response = request.send().await.map_err(|_| {
+                FixtureReadFailure::without_body(FixtureReadStage::HttpSend, None, None)
+            })?;
             if response
                 .content_length()
                 .is_some_and(|size| size > limit as u64)
@@ -549,18 +728,30 @@ fn http(
                 let chunk = match response.chunk().await {
                     Ok(Some(chunk)) => chunk,
                     Ok(None) => break,
-                    Err(_) => return (0, Vec::new()),
+                    Err(_) => {
+                        return Err(FixtureReadFailure::without_body(
+                            FixtureReadStage::HttpBody,
+                            Some(status),
+                            Some(bytes.len()),
+                        ))
+                    }
                 };
                 if bytes.len().saturating_add(chunk.len()) > limit {
                     panic!("fixture response exceeds byte limit");
                 }
                 bytes.extend_from_slice(&chunk);
             }
-            (status, bytes)
+            Ok((status, bytes))
         };
         tokio::time::timeout(timeout, operation)
             .await
-            .unwrap_or((0, Vec::new()))
+            .unwrap_or_else(|_| {
+                Err(FixtureReadFailure::without_body(
+                    FixtureReadStage::HttpDeadline,
+                    None,
+                    None,
+                ))
+            })
     })
 }
 
@@ -640,8 +831,16 @@ fn post(base: &str, endpoint: &str, token: &str, id: &str, body: &Value) -> Valu
     serde_json::from_slice(&bytes).expect("valid private API response JSON")
 }
 fn get_url(url: &str, token: Option<&str>, limit: usize) -> (u16, Vec<u8>) {
-    let response = http("GET", url, token, None, None, limit);
-    if response.0 == 200 && reqwest::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == "https")
+    get_url_checked(url, token, limit).unwrap_or((0, Vec::new()))
+}
+fn get_url_checked(
+    url: &str,
+    token: Option<&str>,
+    limit: usize,
+) -> Result<(u16, Vec<u8>), FixtureReadFailure> {
+    let response = http_checked("GET", url, token, None, None, limit);
+    if response.as_ref().is_ok_and(|(status, _)| *status == 200)
+        && reqwest::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == "https")
     {
         fixture_http()
             .https_media_requests
@@ -1056,13 +1255,24 @@ fn wait_all_slots(
 }
 
 fn playlist_snapshot(base: &str, playlist_path: &str) -> Option<(u64, Vec<String>)> {
+    playlist_snapshot_checked(base, playlist_path).ok()
+}
+fn playlist_snapshot_checked(
+    base: &str,
+    playlist_path: &str,
+) -> Result<(u64, Vec<String>), FixtureReadFailure> {
     let playlist_url =
         if playlist_path.starts_with("http://") || playlist_path.starts_with("https://") {
-            reqwest::Url::parse(playlist_path).ok()?
+            reqwest::Url::parse(playlist_path).map_err(|_| {
+                FixtureReadFailure::without_body(FixtureReadStage::PlaylistUrl, None, None)
+            })?
         } else {
-            reqwest::Url::parse(&format!("{base}{playlist_path}")).ok()?
+            reqwest::Url::parse(&format!("{base}{playlist_path}")).map_err(|_| {
+                FixtureReadFailure::without_body(FixtureReadStage::PlaylistUrl, None, None)
+            })?
         };
-    let expected = reqwest::Url::parse(base).ok()?;
+    let expected = reqwest::Url::parse(base)
+        .map_err(|_| FixtureReadFailure::without_body(FixtureReadStage::BaseUrl, None, None))?;
     assert_eq!(
         (
             playlist_url.scheme(),
@@ -1081,23 +1291,38 @@ fn playlist_snapshot(base: &str, playlist_path: &str) -> Option<(u64, Vec<String
         "https",
         "HLS media must use the selected HTTPS listener"
     );
-    let (code, playlist) = get_url(playlist_url.as_str(), None, 1024 * 1024);
+    let (code, playlist) = get_url_checked(playlist_url.as_str(), None, 1024 * 1024)?;
+    parse_playlist_snapshot_response(&playlist_url, &expected, code, &playlist)
+}
+fn parse_playlist_snapshot_response(
+    playlist_url: &reqwest::Url,
+    expected: &reqwest::Url,
+    code: u16,
+    playlist: &[u8],
+) -> Result<(u64, Vec<String>), FixtureReadFailure> {
+    let failure = |stage| FixtureReadFailure::response(stage, code, playlist);
     if code != 200 {
-        return None;
+        return Err(failure(FixtureReadStage::HttpStatus));
     }
-    let text = std::str::from_utf8(&playlist).ok()?;
+    let text = std::str::from_utf8(playlist).map_err(|_| failure(FixtureReadStage::Utf8))?;
     let sequence = text
         .lines()
-        .find_map(|line| line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:"))?
+        .find_map(|line| line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:"))
+        .ok_or_else(|| failure(FixtureReadStage::MissingSequence))?
         .parse()
-        .ok()?;
+        .map_err(|_| failure(FixtureReadStage::InvalidSequence))?;
     let segments = text
         .lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|line| playlist_url.join(line).ok().map(|url| url.to_string()))
-        .collect::<Option<Vec<_>>>()?;
+        .map(|line| {
+            playlist_url
+                .join(line)
+                .map(|url| url.to_string())
+                .map_err(|_| failure(FixtureReadStage::SegmentJoin))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     for url in &segments {
-        let parsed = reqwest::Url::parse(url).ok()?;
+        let parsed = reqwest::Url::parse(url).map_err(|_| failure(FixtureReadStage::SegmentUrl))?;
         assert_eq!(
             (
                 parsed.scheme(),
@@ -1112,7 +1337,91 @@ fn playlist_snapshot(base: &str, playlist_path: &str) -> Option<(u64, Vec<String
             "HLS segment escaped the selected API/media listener origin"
         );
     }
-    Some((sequence, segments))
+    Ok((sequence, segments))
+}
+
+#[test]
+fn playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts() {
+    let base = reqwest::Url::parse("https://fixture.invalid").unwrap();
+    let path = base.join("/owned/index.m3u8").unwrap();
+    for (status, bytes, stage) in [
+        (503, b"closed body".as_slice(), FixtureReadStage::HttpStatus),
+        (200, b"\xff".as_slice(), FixtureReadStage::Utf8),
+        (
+            200,
+            b"#EXTM3U\n".as_slice(),
+            FixtureReadStage::MissingSequence,
+        ),
+        (
+            200,
+            b"#EXT-X-MEDIA-SEQUENCE:bad\n".as_slice(),
+            FixtureReadStage::InvalidSequence,
+        ),
+        (
+            200,
+            b"#EXT-X-MEDIA-SEQUENCE:5\nhttp://[invalid\n".as_slice(),
+            FixtureReadStage::SegmentJoin,
+        ),
+    ] {
+        let error = parse_playlist_snapshot_response(&path, &base, status, bytes).unwrap_err();
+        assert_eq!(error.stage, stage);
+        assert_eq!(error.status, Some(status));
+        assert_eq!(error.response_bytes, Some(bytes.len()));
+        assert_eq!(error.response_sha256, Some(Sha256::digest(bytes).into()));
+        let record = error.to_string();
+        assert!(record.len() < 256 && !record.contains("closed body") && !record.contains("://"));
+    }
+    let good = b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:5\nsegment-000005.ts\n";
+    assert_eq!(
+        parse_playlist_snapshot_response(&path, &base, 200, good).unwrap(),
+        (
+            5,
+            vec!["https://fixture.invalid/owned/segment-000005.ts".to_owned()]
+        )
+    );
+    // Preserve the former parser's empty-list behavior, rather than inventing a retry oracle.
+    assert!(
+        parse_playlist_snapshot_response(&path, &base, 200, b"#EXT-X-MEDIA-SEQUENCE:5\n")
+            .unwrap()
+            .1
+            .is_empty()
+    );
+    for stage in [
+        FixtureReadStage::HttpSend,
+        FixtureReadStage::HttpBody,
+        FixtureReadStage::HttpDeadline,
+    ] {
+        let error = FixtureReadFailure::without_body(stage, None, None);
+        let record = error.to_string();
+        assert!(record.contains(stage.code()) && record.ends_with("response_sha256=none"));
+    }
+    let escaped = std::panic::catch_unwind(|| {
+        parse_playlist_snapshot_response(
+            &path,
+            &base,
+            200,
+            b"#EXT-X-MEDIA-SEQUENCE:5\nhttps://other.invalid/secret\n",
+        )
+    })
+    .unwrap_err();
+    let message = escaped.downcast_ref::<String>().unwrap();
+    assert!(message.contains("HLS segment escaped the selected API/media listener origin"));
+    for (base, path, expected) in [
+        (
+            "https://fixture.invalid",
+            "https://other.invalid/list",
+            "HLS playlist escaped",
+        ),
+        (
+            "http://fixture.invalid",
+            "/list",
+            "HLS media must use the selected HTTPS listener",
+        ),
+    ] {
+        let escaped =
+            std::panic::catch_unwind(|| playlist_snapshot_checked(base, path)).unwrap_err();
+        assert!(escaped.downcast_ref::<String>().unwrap().contains(expected));
+    }
 }
 
 fn fetch_segment(base: &str, url: &str) -> Option<Vec<u8>> {
@@ -2176,13 +2485,13 @@ fn run_normal_production(mode: ProductionMode) {
     let mut replacement_b_baseline = None;
     let mut first_replacement_sequence = None;
     let mut last_b_frames = slot(&first_b, 1)["frames"].as_u64().unwrap();
-    let mut main_seen = playlist_snapshot(
+    let mut main_seen = playlist_snapshot_checked(
         &api_origin,
         first_b["output"]["playlist_path"]
             .as_str()
             .expect("initial HLS playlist"),
     )
-    .expect("initial HLS playlist snapshot")
+    .unwrap_or_else(|failure| panic!("initial HLS playlist snapshot: {failure}"))
     .1
     .into_iter()
     .collect::<HashSet<_>>();

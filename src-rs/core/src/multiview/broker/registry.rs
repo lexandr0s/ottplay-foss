@@ -316,6 +316,20 @@ fn grant_context(request: &GrantRequest) -> Result<Binding> {
     Ok(committed)
 }
 
+/// Keep a pending one-use grant only while its complete issued binding is the
+/// current binding of that same slot. Shared scene revisions can legitimately
+/// invalidate every slot grant, while a source transition in one slot must not
+/// discard an unchanged sibling slot's grant.
+fn retain_current_session_grants(s: &mut State, session_id: &str) {
+    let slots = s.sessions.get(session_id).map(|session| &session.slots);
+    s.grants.retain(|_, grant| {
+        grant.context.session_id != session_id
+            || slots.is_some_and(|slots| {
+                slots.get(&grant.context.native_expected.slot_id) == Some(&grant.context)
+            })
+    });
+}
+
 /// All fallible admission and the bounded backend callback happen before this
 /// mutation. The caller holds the registry barrier throughout.
 fn apply_binding(s: &mut State, expected: &Binding, next: &Binding) {
@@ -328,8 +342,7 @@ fn apply_binding(s: &mut State, expected: &Binding, next: &Binding) {
     session
         .slots
         .insert(next.native_expected.slot_id, next.clone());
-    s.grants
-        .retain(|_, grant| grant.context.session_id != expected.session_id);
+    retain_current_session_grants(s, &expected.session_id);
     s.cursors
         .retain(|_, cursor| cursor.context.session_id != expected.session_id);
     let ids: Vec<_> = s
@@ -1557,8 +1570,7 @@ impl RegistryPublication {
             lease.context = next.clone();
             lease.phase = Phase::Active;
             lease.promotion = None;
-            s.grants
-                .retain(|_, grant| grant.context.session_id != next.session_id);
+            retain_current_session_grants(&mut s, &next.session_id);
             s.cursors
                 .retain(|_, cursor| cursor.context.session_id != next.session_id);
             let ids: Vec<_> = s
@@ -1767,5 +1779,264 @@ mod try_authority_tests {
             Err(RegistryError::Revoked)
         );
         assert!(!called);
+    }
+}
+
+#[cfg(test)]
+mod pending_grant_retention_tests {
+    use super::*;
+
+    fn player() -> Principal {
+        Principal {
+            subject: "pending-owner".into(),
+            installation_id: "pending-tv".into(),
+            permissions: BTreeSet::from([Permission::MultiviewControl]),
+        }
+    }
+
+    fn manager() -> Principal {
+        Principal {
+            permissions: BTreeSet::from([Permission::SourcesManage]),
+            ..player()
+        }
+    }
+
+    fn slot_binding(slot_id: u8) -> Binding {
+        Binding {
+            server_epoch: "pending-epoch".into(),
+            session_id: "pending-session".into(),
+            backend_expected: wire::BackendExpected {
+                runtime: 11,
+                scene: "pending-scene".into(),
+                geometry_revision: 3,
+                focus_revision: 4,
+                audio_revision: 5,
+            },
+            native_expected: wire::NativeExpected {
+                runtime: "pending-native".into(),
+                expected: wire::NativeRevisions {
+                    scene: "pending-scene".into(),
+                    layout_revision: "pending-layout".into(),
+                    focus_revision: "pending-focus".into(),
+                    audio_revision: "pending-audio".into(),
+                },
+                slot_id,
+                slot_generation: format!("pending-generation-{slot_id}"),
+                source_revision: format!("pending-source-{slot_id}"),
+            },
+            backend_slot_revision: 9,
+        }
+    }
+
+    fn enrollment() -> Enrollment {
+        Enrollment {
+            source_ref: "pending-source".into(),
+            profile_uuid: Uuid::from_u128(77),
+            config_revision: "pending-config-1".into(),
+            policy_revision: "pending-policy-1".into(),
+            allowed: BTreeSet::from([SourcePrincipal::from(&player())]),
+            items: vec![ItemEnrollment {
+                item_ref: "pending-item".into(),
+                identity_version: 1,
+                favorite_sha256: "c".repeat(64),
+                kind: "vod".into(),
+                input_adapter: "http-finite".into(),
+                protection: Protection {
+                    known: true,
+                    restricted: false,
+                },
+                descriptor: Descriptor {
+                    title: "Pending fixture".into(),
+                    provider: "fixture".into(),
+                },
+                input: EnrolledInput { config_index: 12 },
+            }],
+        }
+    }
+
+    fn setup() -> (Registry, String, Binding, Binding) {
+        let registry = Registry::new("pending-server".into(), "pending-epoch".into()).unwrap();
+        let revision = registry.enroll(&manager(), enrollment(), None).unwrap();
+        let slot0 = slot_binding(0);
+        let slot1 = slot_binding(1);
+        registry.create_session(&player(), &slot0).unwrap();
+        registry.add_slot(&player(), &slot1).unwrap();
+        (registry, revision, slot0, slot1)
+    }
+
+    fn mint(registry: &Registry, context: &Binding) -> GrantResponse {
+        let catalog = registry
+            .sources(
+                &player(),
+                &SourcesRequest {
+                    version: wire::VERSION,
+                    context: context.clone(),
+                    cursor: None,
+                },
+            )
+            .unwrap();
+        let item = catalog.items.first().unwrap();
+        registry
+            .mint(
+                &player(),
+                &GrantRequest {
+                    version: wire::VERSION,
+                    context: context.clone(),
+                    next_native: None,
+                    source_ref: item.source_ref.clone(),
+                    item_ref: item.item_ref.clone(),
+                    item_revision: item.item_revision.clone(),
+                    identity_version: item.identity_version,
+                    favorite_sha256: item.favorite_sha256.clone(),
+                    catalog_revision: catalog.catalog_revision,
+                    remaining_budget_ms: 30_000,
+                },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn attachment_promotion_keeps_only_exact_unchanged_sibling_binding_grants() {
+        let (registry, _, slot0, slot1) = setup();
+        let consumed = mint(&registry, &slot0);
+        let stale_same_slot = mint(&registry, &slot0);
+        let sibling = mint(&registry, &slot1);
+        let reservation = registry
+            .redeem(&player(), &slot0, &consumed.input_grant)
+            .unwrap();
+        let mut promoted = slot0.clone();
+        promoted.backend_slot_revision += 1;
+        registry
+            .prepare_attachment(&player(), &slot0, &promoted, &reservation)
+            .unwrap();
+        reservation
+            .publication_authority()
+            .attach(&reservation.decoder_context(), &mut || Ok(()))
+            .unwrap();
+
+        {
+            let state = registry.lock().unwrap();
+            assert!(!state.grants.contains_key(&consumed.input_grant));
+            assert!(!state.grants.contains_key(&stale_same_slot.input_grant));
+            assert_eq!(
+                state.grants[&sibling.input_grant].context, slot1,
+                "the sibling's complete issued binding remains unchanged"
+            );
+        }
+        assert!(matches!(
+            registry.redeem(&player(), &promoted, &stale_same_slot.input_grant),
+            Err(RegistryError::Expired)
+        ));
+        assert!(
+            matches!(
+                registry.redeem(&player(), &promoted, &consumed.input_grant),
+                Err(RegistryError::Expired)
+            ),
+            "consumption is not revived by attachment"
+        );
+        let sibling_reservation = registry
+            .redeem(&player(), &slot1, &sibling.input_grant)
+            .unwrap();
+        assert!(
+            matches!(
+                registry.redeem(&player(), &slot1, &sibling.input_grant),
+                Err(RegistryError::Expired)
+            ),
+            "a preserved sibling grant remains one-use"
+        );
+        assert!(!sibling_reservation.revoked().load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn binding_updates_retain_exact_siblings_but_global_source_and_session_revokes_fail_closed() {
+        let (registry, source_revision, slot0, slot1) = setup();
+        let stale_target = mint(&registry, &slot0);
+        let preserved_sibling = mint(&registry, &slot1);
+        let mut target_update = slot0.clone();
+        target_update.backend_slot_revision += 1;
+        registry
+            .update_binding(&player(), &slot0, &target_update)
+            .unwrap();
+        {
+            let state = registry.lock().unwrap();
+            assert!(!state.grants.contains_key(&stale_target.input_grant));
+            assert!(state.grants.contains_key(&preserved_sibling.input_grant));
+        }
+        assert!(matches!(
+            registry.redeem(&player(), &slot0, &stale_target.input_grant),
+            Err(RegistryError::Stale)
+        ));
+        assert!(matches!(
+            registry.redeem(&player(), &target_update, &stale_target.input_grant),
+            Err(RegistryError::Expired)
+        ));
+        registry
+            .redeem(&player(), &slot1, &preserved_sibling.input_grant)
+            .unwrap();
+
+        let stale_global0 = mint(&registry, &target_update);
+        let stale_global1 = mint(&registry, &slot1);
+        let mut global_update = target_update.clone();
+        global_update.backend_expected.focus_revision += 1;
+        global_update.native_expected.expected.focus_revision = "pending-focus-next".into();
+        registry
+            .update_binding(&player(), &target_update, &global_update)
+            .unwrap();
+        let global_slot1 = Binding {
+            backend_expected: global_update.backend_expected.clone(),
+            native_expected: wire::NativeExpected {
+                runtime: global_update.native_expected.runtime.clone(),
+                expected: global_update.native_expected.expected.clone(),
+                slot_id: slot1.native_expected.slot_id,
+                slot_generation: slot1.native_expected.slot_generation.clone(),
+                source_revision: slot1.native_expected.source_revision.clone(),
+            },
+            ..slot1.clone()
+        };
+        {
+            let state = registry.lock().unwrap();
+            assert!(!state.grants.contains_key(&stale_global0.input_grant));
+            assert!(!state.grants.contains_key(&stale_global1.input_grant));
+        }
+        assert!(matches!(
+            registry.redeem(&player(), &slot1, &stale_global1.input_grant),
+            Err(RegistryError::Stale)
+        ));
+        assert!(matches!(
+            registry.redeem(&player(), &global_slot1, &stale_global1.input_grant),
+            Err(RegistryError::Expired)
+        ));
+
+        let stale_source = mint(&registry, &global_slot1);
+        let mut changed_enrollment = enrollment();
+        changed_enrollment.policy_revision = "pending-policy-2".into();
+        let new_revision = registry
+            .enroll(&manager(), changed_enrollment, Some(&source_revision))
+            .unwrap();
+        assert_ne!(new_revision, source_revision);
+        assert!(
+            matches!(
+                registry.redeem(&player(), &global_slot1, &stale_source.input_grant),
+                Err(RegistryError::Expired)
+            ),
+            "source policy replacement must revoke preserved-context grants"
+        );
+
+        let revoked = mint(&registry, &global_slot1);
+        registry
+            .revoke_session(&player(), &global_slot1.session_id)
+            .unwrap();
+        assert!(
+            matches!(
+                registry.redeem(&player(), &global_slot1, &revoked.input_grant),
+                Err(RegistryError::Revoked)
+            ),
+            "session revocation remains global even for a current slot binding"
+        );
+        assert!(!registry
+            .lock()
+            .unwrap()
+            .grants
+            .contains_key(&revoked.input_grant));
     }
 }

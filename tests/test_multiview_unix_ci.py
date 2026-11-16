@@ -30,6 +30,9 @@ EXPECTED_PRODUCTION_TEST = 'normal_server_private_http_mpegts_renew_replace_and_
 EXPECTED_HLS_PRODUCTION_TEST = 'normal_server_private_http_hls_renew_replace_and_cleanup'
 
 EXPECTED_BROKER_CLOSE_DIAGNOSTIC_TESTS = frozenset({
+    'broker::live::close_diagnostic_tests::diagnostic_queue_preserves_order_and_reports_bounded_overflow_after_completion',
+    'broker::live::close_diagnostic_tests::empty_diagnostic_queue_completes_without_entering_writer',
+    'broker::live::close_diagnostic_tests::watchdog_success_releases_owners_and_failed_cleanup_emits_nothing',
     'broker::live::close_diagnostic_tests::operation_receipts_and_sink_release_precede_a_blocked_diagnostic_writer',
     'broker::live::close_diagnostic_tests::first_close_record_preserves_initiator_and_output_across_retirement',
     'broker::live::close_diagnostic_tests::close_observation_distinguishes_live_authority_failure_and_preserves_closed_trace',
@@ -85,6 +88,8 @@ def suite_passed(names, ignored=()):
 
 
 CORE_REQUIRED_NAMES = (
+    'multiview::broker::registry::pending_grant_retention_tests::attachment_promotion_keeps_only_exact_unchanged_sibling_binding_grants',
+    'multiview::broker::registry::pending_grant_retention_tests::binding_updates_retain_exact_siblings_but_global_source_and_session_revokes_fail_closed',
     'multiview::broker::registry::try_authority_tests::try_session_authority_returns_busy_without_callback_then_recovers',
     'multiview::broker::registry::try_authority_tests::try_session_authority_maps_poison_to_unavailable_without_callback',
     'multiview::broker::registry::try_authority_tests::try_session_authority_preserves_authorization_and_output_block',
@@ -1087,10 +1092,27 @@ class BoundaryContracts(unittest.TestCase):
                         attempt.run()
                         self.assertTrue(any(row['name'] == 'broker-ordinary' for row in attempt.driver.commands))
 
+    def test_play_and_probe_diagnostics_have_no_precompletion_writer(self):
+        source = (ROOT / 'src-rs/server/src/multiview_broker_live.rs').read_text()
+        play = source.split('    async fn play(', 1)[1].split('    fn finish_reservation(', 1)[0]
+        for forbidden in ('write_play_failure(', 'write_close_diagnostic(',
+                          'write_operation_diagnostic(', 'emit_probe_diagnostic(', 'eprintln!('):
+            self.assertNotIn(forbidden, play)
+        self.assertNotRegex(play, r'(?<!record_)\bplay_failure\(')
+        self.assertNotIn('decoder::probe_stream(', play)
+        self.assertIn('decoder::probe_stream_with_diagnostic(', play)
+        self.assertRegex(play, r'record_diagnostic\(\s*diagnostic,\s*OperationDiagnostic::Probe\(\*record\)')
+        task = source.split('    async fn operation_with_diagnostic<F>(', 1)[1].split('    pub async fn create(', 1)[0]
+        self.assertLess(task.index('.catch_unwind()'), task.index('complete_then_emit_diagnostics('))
+        self.assertLess(task.index('completed.send_replace(Some(result))'), task.index('drop(completed)'))
+        completion = source.split('fn complete_then_emit_diagnostics(', 1)[1].split('fn write_operation_diagnostic(', 1)[0]
+        self.assertLess(completion.index('complete();'), completion.index('pending = sink.lock()'))
+        self.assertLess(completion.index('drop(sink);'), completion.index('emit(record);'))
+
     def test_first_close_diagnostics_are_mandatory_and_nonignored(self):
         required = EXPECTED_BROKER_CLOSE_DIAGNOSTIC_TESTS
         frozen = ci.BROKER_TESTS
-        self.assertEqual(len(required), 3)
+        self.assertEqual(len(required), 6)
         self.assertTrue(required <= frozen)
         # Exercise the real exact-inventory equality, not a smaller synthetic set.
         variants = [(frozenset(), frozenset())]
@@ -1375,7 +1397,7 @@ class CoreRequiredContracts(unittest.TestCase):
 
     def test_each_frozen_authority_regression_is_mandatory_and_cannot_be_ignored(self):
         self.assertEqual(ci.CORE_REQUIRED_TESTS, frozenset(CORE_REQUIRED_NAMES))
-        self.assertEqual(len(CORE_REQUIRED_NAMES), 3)
+        self.assertEqual(len(CORE_REQUIRED_NAMES), 5)
         for required in (*CORE_REQUIRED_NAMES, *sorted(ci.CORE_REQUIRED_HLS_TESTS), *sorted(ci.CORE_REQUIRED_PRIVATE_HTTP_TESTS), *CORE_REMAINING_BUDGET_NAMES):
             for state in ('missing', 'ignored'):
                 with self.subTest(required=required, state=state), Attempt() as attempt:
@@ -1806,7 +1828,7 @@ class ParsingTests(unittest.TestCase):
                          "6e92eb3d53b6de4ae38ec7bdfdef92883e87f4a2e887efe2c4539b20a1fc4f9f")
 
     def test_exact_mandatory_production_broker_inventory(self):
-        self.assertEqual(len(ci.BROKER_TESTS), 76)
+        self.assertEqual(len(ci.BROKER_TESTS), 79)
         self.assertEqual(len(ci.BROKER_PRODUCTION_TESTS), 13)
         self.assertEqual(ci.BROKER_HLS_TESTS, frozenset({'broker::live::tests::production_adapter_set_is_unique_explicit_and_keeps_other_guards'}))
         self.assertEqual(ci.BROKER_PRODUCTION_TESTS, frozenset({

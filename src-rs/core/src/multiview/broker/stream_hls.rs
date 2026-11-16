@@ -9,7 +9,12 @@ use super::{
     stream_transport::{check_packets, StreamLimits, CHUNK_BYTES},
 };
 use axum::body::Bytes;
-use std::{collections::VecDeque, future::Future, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    future::Future,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
     time::Instant,
@@ -146,7 +151,28 @@ struct Segment {
     duration: Duration,
     started: bool,
 }
+#[derive(Clone, Copy)]
+struct ConsumerHold {
+    started: Instant,
+    released: Instant,
+}
+impl ConsumerHold {
+    fn exclude_from(self, deadline: Instant) -> Result<Instant, Error> {
+        // A pause cannot revive progress that had already expired at handoff.
+        if deadline <= self.started {
+            return Ok(deadline);
+        }
+        let elapsed = self
+            .released
+            .checked_duration_since(self.started)
+            .ok_or(Error::InvalidResponse)?;
+        deadline.checked_add(elapsed).ok_or(Error::Timeout)
+    }
+}
+
 struct ChunkOwner {
+    handed_off: Instant,
+    released: Arc<Mutex<Option<ConsumerHold>>>,
     bytes: Bytes,
     // Retained slices keep source and per-source stream custody after Drop.
     // Factory::finish must report Busy until the last slice is released.
@@ -157,6 +183,20 @@ struct ChunkOwner {
 impl AsRef<[u8]> for ChunkOwner {
     fn as_ref(&self) -> &[u8] {
         &self.bytes
+    }
+}
+
+impl Drop for ChunkOwner {
+    fn drop(&mut self) {
+        // Bytes retains this owner until its LAST clone/slice is dropped. Record
+        // release before the chunk permit is released; later polling is not hold time.
+        *self
+            .released
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(ConsumerHold {
+            started: self.handed_off,
+            released: Instant::now(),
+        });
     }
 }
 
@@ -171,6 +211,7 @@ pub(super) struct HlsTsStream {
     cursor: Cursor,
     segment: Option<Segment>,
     chunks: Arc<Semaphore>,
+    released: Arc<Mutex<Option<ConsumerHold>>>,
     next_due: Instant,
     progress_deadline: Instant,
     failure: Option<Error>,
@@ -234,6 +275,7 @@ impl HlsTsStream {
             cursor,
             segment: None,
             chunks: Arc::new(Semaphore::new(1)),
+            released: Arc::new(Mutex::new(None)),
             next_due: now,
             progress_deadline,
             failure: None,
@@ -279,9 +321,22 @@ impl HlsTsStream {
             .clone()
             .try_acquire_owned()
             .map_err(|_| Error::Busy)?;
+        let hold = self
+            .released
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(hold) = hold {
+            match hold.exclude_from(self.progress_deadline) {
+                Ok(deadline) => self.progress_deadline = deadline.min(self.limits.hard_end),
+                Err(error) => return self.fail(error),
+            }
+        }
         let result = self.next_bytes().await;
         match result {
             Ok(Some(bytes)) => Ok(Some(Bytes::from_owner(ChunkOwner {
+                handed_off: Instant::now(),
+                released: self.released.clone(),
                 bytes,
                 _source: self.source.clone(),
                 _stream: self.stream.clone(),

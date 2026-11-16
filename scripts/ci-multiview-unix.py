@@ -55,6 +55,9 @@ ACTIVATION_TESTS = frozenset({
 })
 # Source-derived Unix inventory from the reviewed broker/connection freeze.
 BROKER_TESTS = frozenset({
+    'broker::live::close_diagnostic_tests::diagnostic_queue_preserves_order_and_reports_bounded_overflow_after_completion',
+    'broker::live::close_diagnostic_tests::empty_diagnostic_queue_completes_without_entering_writer',
+    'broker::live::close_diagnostic_tests::watchdog_success_releases_owners_and_failed_cleanup_emits_nothing',
     'broker::live::close_diagnostic_tests::operation_receipts_and_sink_release_precede_a_blocked_diagnostic_writer',
     'broker::live::close_diagnostic_tests::first_close_record_preserves_initiator_and_output_across_retirement',
     'broker::live::close_diagnostic_tests::close_observation_distinguishes_live_authority_failure_and_preserves_closed_trace',
@@ -142,6 +145,8 @@ BROKER_SHUTDOWN_TESTS = frozenset({
 })
 BROKER_HLS_TESTS = frozenset({'broker::live::tests::production_adapter_set_is_unique_explicit_and_keeps_other_guards'})
 CORE_REQUIRED_TESTS = frozenset({
+    'multiview::broker::registry::pending_grant_retention_tests::attachment_promotion_keeps_only_exact_unchanged_sibling_binding_grants',
+    'multiview::broker::registry::pending_grant_retention_tests::binding_updates_retain_exact_siblings_but_global_source_and_session_revokes_fail_closed',
     'multiview::broker::registry::try_authority_tests::try_session_authority_returns_busy_without_callback_then_recovers',
     'multiview::broker::registry::try_authority_tests::try_session_authority_maps_poison_to_unavailable_without_callback',
     'multiview::broker::registry::try_authority_tests::try_session_authority_preserves_authorization_and_output_block',

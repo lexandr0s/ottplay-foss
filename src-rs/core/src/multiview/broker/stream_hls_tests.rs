@@ -653,7 +653,9 @@ async fn expired_progress_or_hard_end_never_starts_another_fetch() {
             panic!("HLS kind")
         };
         if progress {
-            hls.progress_deadline = Instant::now();
+            // Expire before the preceding handoff: consumer ownership cannot
+            // revive an already-expired upstream budget.
+            hls.progress_deadline = Instant::now() - Duration::from_secs(1);
         } else {
             hls.limits.hard_end = Instant::now();
         }
@@ -691,4 +693,88 @@ async fn cancellation_interrupts_unchanged_playlist_reload_without_source_retire
     drop(stream);
     assert!(source.check_authority().is_ok());
     finish(source).await;
+}
+
+#[test]
+fn consumer_hold_excludes_only_owned_time_and_never_revives_expired_progress() {
+    let start = Instant::now();
+    let hold = ConsumerHold {
+        started: start + Duration::from_secs(1),
+        released: start + Duration::from_secs(5),
+    };
+    // One second of budget was consumed before handoff; a second after release
+    // still counts. Reconciliation itself does not restart a full progress wait.
+    let deadline = hold.exclude_from(start + Duration::from_secs(3)).unwrap();
+    assert_eq!(deadline, start + Duration::from_secs(7));
+    assert!(start + Duration::from_secs(6) < deadline);
+    assert!(start + Duration::from_secs(8) > deadline);
+    for expired in [start, hold.started] {
+        assert_eq!(hold.exclude_from(expired).unwrap(), expired);
+    }
+}
+
+#[tokio::test]
+async fn final_retained_hls_slice_can_outlive_progress_wait_without_timing_out_reload() {
+    let fixture = Fixture::start(vec![
+        Reply::ok("/root", playlist(1, 1, false)),
+        Reply::ok("/s1.ts", packets(7, 0x51)),
+        Reply::ok("/root", playlist(1, 2, true)),
+        Reply::ok("/s2.ts", packets(7, 0x52)),
+    ])
+    .await;
+    let (source, _) = source(&fixture).await;
+    let mut configured = limits();
+    configured.hard_end = Instant::now() + Duration::from_secs(10);
+    let mut stream = source.open_input(configured).await.unwrap();
+    let chunk = stream.next_chunk().await.unwrap().unwrap();
+    let slice = chunk.slice(1..20);
+    drop(chunk);
+    tokio::time::sleep(Duration::from_millis(3100)).await;
+    assert!(matches!(stream.next_chunk().await, Err(Error::Busy)));
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), 2);
+    drop(slice);
+    let next = stream.next_chunk().await.unwrap().unwrap();
+    assert_eq!(next.as_ref(), packets(7, 0x52).as_slice());
+    drop(next);
+    assert!(stream.next_chunk().await.unwrap().is_none());
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), 4);
+    drop(stream);
+    finish(source).await;
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn retained_hls_chunk_does_not_extend_hard_end_or_revocation() {
+    for revoke in [false, true] {
+        let fixture = Fixture::start(vec![
+            Reply::ok("/root", playlist(1, 1, false)),
+            Reply::ok("/s1.ts", packets(7, 0x51)),
+        ])
+        .await;
+        let (source, registry) = source(&fixture).await;
+        let mut stream = source.open_input(limits()).await.unwrap();
+        let chunk = stream.next_chunk().await.unwrap().unwrap();
+        if revoke {
+            registry
+                .revoke_session(&player(), &binding().session_id)
+                .unwrap();
+        } else {
+            let super::super::stream_transport::InputStream::HlsTs(hls) = &mut stream else {
+                panic!("HLS kind")
+            };
+            hls.limits.hard_end = Instant::now();
+        }
+        drop(chunk);
+        let expected = if revoke {
+            Error::Cancelled
+        } else {
+            Error::Timeout
+        };
+        assert!(matches!(stream.next_chunk().await, Err(error) if error == expected));
+        assert!(matches!(stream.next_chunk().await, Err(error) if error == expected));
+        assert_eq!(fixture.requests.load(Ordering::SeqCst), 2);
+        drop(stream);
+        finish(source).await;
+        fixture.finish().await;
+    }
 }

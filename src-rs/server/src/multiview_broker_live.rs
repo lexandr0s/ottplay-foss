@@ -196,11 +196,13 @@ fn remember_first_close(
 #[derive(Clone, Copy)]
 enum CloseObservationStage {
     ProbeFailure,
+    WatchdogClosed,
 }
 impl CloseObservationStage {
     fn code(self) -> &'static str {
         match self {
             Self::ProbeFailure => "probe_failure",
+            Self::WatchdogClosed => "watchdog_closed",
         }
     }
 }
@@ -229,7 +231,10 @@ impl std::fmt::Display for CloseDiagnostic {
             self.stage.code(), observed.is_some(), first.map_or("none", |value| value.reason.code()),
             observed.is_some_and(|value| value.session_cancelled), observed.is_some_and(|value| value.closing),
             observed.is_some_and(|value| value.closed), observed.is_some_and(|value| value.cleanup_failed),
-            match self.stage { CloseObservationStage::ProbeFailure => "source",  }, self.cleanup_confirmed)?;
+            match self.stage {
+                CloseObservationStage::ProbeFailure => "source",
+                CloseObservationStage::WatchdogClosed => "session",
+            }, self.cleanup_confirmed)?;
         // These Debug values are exclusively closed enums and bounded numeric
         // structs; never format Session, Snapshot, a request or an OS error.
         for (prefix, output) in [("first", prior), ("observed", current)] {
@@ -242,26 +247,111 @@ impl std::fmt::Display for CloseDiagnostic {
         Ok(())
     }
 }
-type DeferredCloseDiagnostic = Arc<Mutex<Option<CloseDiagnostic>>>;
+const MAX_OPERATION_DIAGNOSTICS: usize = 8;
+#[derive(Clone, Copy)]
+enum OperationDiagnostic {
+    Probe(decoder::ProbeDiagnostic),
+    Play(PlayFailureRecord),
+    Close(CloseDiagnostic),
+    Overflow(u64),
+}
+#[derive(Clone, Copy)]
+struct DiagnosticQueue {
+    entries: [Option<OperationDiagnostic>; MAX_OPERATION_DIAGNOSTICS],
+    len: usize,
+    dropped: u64,
+}
+impl Default for DiagnosticQueue {
+    fn default() -> Self {
+        Self {
+            entries: [None; MAX_OPERATION_DIAGNOSTICS],
+            len: 0,
+            dropped: 0,
+        }
+    }
+}
+impl DiagnosticQueue {
+    fn push(&mut self, record: OperationDiagnostic) {
+        if self.len < self.entries.len() {
+            self.entries[self.len] = Some(record);
+            self.len += 1;
+        } else {
+            self.dropped = self.dropped.saturating_add(1);
+        }
+    }
+}
+type DeferredDiagnostics = Arc<Mutex<DiagnosticQueue>>;
 
-// The caller's complete callback publishes the actual operation receipt and
-// drops its sender. Only then take the Copy record; drop all sink custody before
-// entering a potentially blocking stderr writer. No diagnostic worker is added.
-fn complete_then_emit_close(
+fn record_diagnostic(sink: &DeferredDiagnostics, record: OperationDiagnostic) {
+    if let Ok(mut pending) = sink.lock() {
+        pending.push(record);
+    }
+}
+
+// The largest ordinary failure path records Probe, Play result, Play retirement
+// and Close; eight entries also leave room for a closed panic observation.
+// Overflow never changes cleanup or the operation result. No record owns a
+// request, source, worker, credential, arbitrary string or resource handle.
+// Publish the actual operation receipt and drop its sender before taking this
+// fixed Copy queue; release the mutex and sink Arc before any writer is called.
+fn complete_then_emit_diagnostics(
     complete: impl FnOnce(),
-    diagnostic: Option<DeferredCloseDiagnostic>,
-    emit: impl FnOnce(CloseDiagnostic),
+    diagnostic: Option<DeferredDiagnostics>,
+    mut emit: impl FnMut(OperationDiagnostic),
 ) {
     complete();
-    let record = diagnostic.and_then(|sink| {
-        let record = {
+    let records = diagnostic.and_then(|sink| {
+        let records = {
             let mut pending = sink.lock().ok()?;
-            pending.take()
+            std::mem::take(&mut *pending)
         };
         drop(sink);
-        record
+        Some(records)
     });
-    if let Some(record) = record {
+    if let Some(records) = records {
+        for record in records.entries.into_iter().flatten() {
+            emit(record);
+        }
+        if records.dropped != 0 {
+            emit(OperationDiagnostic::Overflow(records.dropped));
+        }
+    }
+}
+
+fn write_operation_diagnostic(record: OperationDiagnostic) {
+    match record {
+        OperationDiagnostic::Probe(record) => decoder::emit_probe_diagnostic(record),
+        OperationDiagnostic::Play(record) => write_play_failure(record),
+        OperationDiagnostic::Close(record) => write_close_diagnostic(record),
+        OperationDiagnostic::Overflow(dropped) => {
+            #[cfg(panic = "unwind")]
+            {
+                let _ = std::panic::catch_unwind(|| {
+                    eprintln!("multiview_diagnostics stage=operation_complete dropped={dropped}");
+                });
+            }
+            #[cfg(panic = "abort")]
+            {
+                use std::io::Write as _;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "multiview_diagnostics stage=operation_complete dropped={dropped}"
+                );
+            }
+        }
+    }
+}
+
+// The successful watchdog has no remaining retry or cleanup obligation. Drop
+// all three of its owners before entering the existing potentially blocking
+// writer; failed/exhausted cleanup passes None and never emits here.
+fn release_watchdog_then_emit<A, B, C>(
+    owners: (A, B, C),
+    diagnostic: Option<CloseDiagnostic>,
+    emit: impl FnOnce(CloseDiagnostic),
+) {
+    drop(owners);
+    if let Some(record) = diagnostic {
         emit(record);
     }
 }
@@ -531,6 +621,7 @@ impl PlayFailure {
         }
     }
 }
+#[derive(Clone, Copy)]
 struct PlayFailureRecord {
     stage: PlayStage,
     error: PlayFailure,
@@ -570,13 +661,17 @@ fn write_play_failure(record: PlayFailureRecord) {
         let _ = writeln!(std::io::stderr().lock(), "{record}");
     }
 }
-fn play_failure(
+fn record_play_failure(
+    diagnostic: &DeferredDiagnostics,
     stage: PlayStage,
     error: PlayFailure,
     started: Instant,
     producer: Option<ProducerRetirement>,
 ) {
-    write_play_failure(play_failure_record(stage, error, started, producer));
+    record_diagnostic(
+        diagnostic,
+        OperationDiagnostic::Play(play_failure_record(stage, error, started, producer)),
+    );
 }
 
 fn media_error(value: persistent::Error) -> BoundaryError {
@@ -936,7 +1031,7 @@ impl LiveBackend {
         key: String,
         digest: [u8; 32],
         future: F,
-        diagnostic: Option<DeferredCloseDiagnostic>,
+        diagnostic: Option<DeferredDiagnostics>,
     ) -> Result<Reply, BoundaryError>
     where
         F: Future<Output = Result<Reply, BoundaryError>> + Send + 'static,
@@ -974,13 +1069,13 @@ impl LiveBackend {
                         .unwrap_or(Err(BoundaryError::Unavailable));
                     // The awaited future has returned and dropped its captures:
                     // Play already removed Pending and published its done receipt.
-                    complete_then_emit_close(
+                    complete_then_emit_diagnostics(
                         move || {
                             completed.send_replace(Some(result));
                             drop(completed);
                         },
                         diagnostic,
-                        write_close_diagnostic,
+                        write_operation_diagnostic,
                     );
                 });
                 receive
@@ -1241,7 +1336,7 @@ impl LiveBackend {
         let watchdog_broker = broker.clone();
         tokio::spawn(async move {
             let mut retirement_attempts = 0u8;
-            loop {
+            let diagnostic = loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 // Keep the original left-to-right checks and short-circuiting.
                 // Only the first already-required close captures extra scalars.
@@ -1308,14 +1403,25 @@ impl LiveBackend {
                 if expired.is_some() || invalid {
                     let closed = task.close_owned(&watchdog_broker, &watchdog_session).await;
                     if closed.is_ok() {
-                        break;
+                        // The first cause was copied before Core removal. The
+                        // current observation follows confirmed session cleanup.
+                        break Some(CloseDiagnostic {
+                            stage: CloseObservationStage::WatchdogClosed,
+                            observation: observe_close(&watchdog_session),
+                            cleanup_confirmed: true,
+                        });
                     }
                     retirement_attempts += 1;
                     if retirement_attempts >= 20 {
-                        break;
+                        break None;
                     }
                 }
-            }
+            };
+            release_watchdog_then_emit(
+                (task, watchdog_session, watchdog_broker),
+                diagnostic,
+                write_close_diagnostic,
+            );
         });
         self.snapshot(&broker, &session, &binding.native_expected)
     }
@@ -1572,7 +1678,7 @@ impl LiveBackend {
         let task = self.clone();
         let task_broker = broker.clone();
         let task_owner = owner.clone();
-        let diagnostic = Arc::new(Mutex::new(None));
+        let diagnostic = Arc::new(Mutex::new(DiagnosticQueue::default()));
         let task_diagnostic = diagnostic.clone();
         let result = self
             .operation_with_diagnostic(
@@ -1604,7 +1710,7 @@ impl LiveBackend {
         owner: Authenticated,
         request: ControlRequest,
         operation_id: String,
-        diagnostic: DeferredCloseDiagnostic,
+        diagnostic: DeferredDiagnostics,
     ) -> Result<ControlResponse, BoundaryError> {
         if request.version != wire::VERSION {
             return Err(BoundaryError::Invalid);
@@ -1782,7 +1888,7 @@ impl LiveBackend {
         session: &Arc<LiveSession>,
         context: &Binding,
         grant: &str,
-        diagnostic: &DeferredCloseDiagnostic,
+        diagnostic: &DeferredDiagnostics,
     ) -> Result<(), BoundaryError> {
         let started = Instant::now();
         let slot = context.native_expected.slot_id;
@@ -1815,9 +1921,9 @@ impl LiveBackend {
                         started,
                         None,
                     );
-                    // Stderr may block: release host custody before emitting.
+                    // Store only scalars; the owned operation emits after completion.
                     drop(state);
-                    write_play_failure(record);
+                    record_diagnostic(diagnostic, OperationDiagnostic::Play(record));
                     return Err(media_error(error));
                 }
             };
@@ -1848,7 +1954,13 @@ impl LiveBackend {
         let result = match outcome {
             Ok(result) => result,
             Err(_) => {
-                play_failure(PlayStage::Panic, PlayFailure::Panic, started, None);
+                record_play_failure(
+                    diagnostic,
+                    PlayStage::Panic,
+                    PlayFailure::Panic,
+                    started,
+                    None,
+                );
                 if let Ok(mut state) = session.control.lock() {
                     state.cleanup_failed = true;
                 }
@@ -1873,7 +1985,7 @@ impl LiveBackend {
         preparation: persistent::StreamPreparation,
         cancel: CancellationToken,
         started: Instant,
-        diagnostic: &DeferredCloseDiagnostic,
+        diagnostic: &DeferredDiagnostics,
     ) -> Result<(), BoundaryError> {
         let source = match self
             .sources
@@ -1882,7 +1994,8 @@ impl LiveBackend {
         {
             Ok(source) => source,
             Err(failure) => {
-                play_failure(
+                record_play_failure(
+                    diagnostic,
                     PlayStage::Resolve,
                     PlayFailure::Runtime(failure.error),
                     started,
@@ -1906,7 +2019,8 @@ impl LiveBackend {
         let mut factory = match StreamFactory::new(source, session.end) {
             Ok(factory) => factory,
             Err(failure) => {
-                play_failure(
+                record_play_failure(
+                    diagnostic,
                     PlayStage::Factory,
                     PlayFailure::Stream(failure.error),
                     started,
@@ -1925,7 +2039,13 @@ impl LiveBackend {
         ) {
             Ok(granted) => granted,
             Err(error) => {
-                play_failure(PlayStage::Grant, PlayFailure::Decoder(error), started, None);
+                record_play_failure(
+                    diagnostic,
+                    PlayStage::Grant,
+                    PlayFailure::Decoder(error),
+                    started,
+                    None,
+                );
                 let cleaned = factory.finish().await.is_ok();
                 self.finish_reservation(session, &reservation, cleaned, true);
                 return Err(BoundaryError::Unavailable);
@@ -1939,7 +2059,8 @@ impl LiveBackend {
         let mut probe = match factory.open(StreamPhase::Probe).await {
             Ok(probe) => probe,
             Err(error) => {
-                play_failure(
+                record_play_failure(
+                    diagnostic,
                     PlayStage::ProbeOpen,
                     PlayFailure::Stream(error),
                     started,
@@ -1957,7 +2078,7 @@ impl LiveBackend {
         {
             Ok(input) => input,
             Err(error) => {
-                play_failure(PlayStage::ProbeWrap, error, started, None);
+                record_play_failure(diagnostic, PlayStage::ProbeWrap, error, started, None);
                 let _ = probe.retire().await;
                 let cleaned = factory.finish().await.is_ok();
                 self.finish_reservation(session, &reservation, cleaned, true);
@@ -1967,31 +2088,44 @@ impl LiveBackend {
         let revoked = reservation.revoked();
         let deadline = session.end.min(Instant::now() + Duration::from_secs(5));
         let probed = tokio::task::spawn_blocking(move || {
-            let result = decoder::probe_stream(
+            let mut probe_diagnostic = None;
+            let result = decoder::probe_stream_with_diagnostic(
                 preparation.decoder_config(),
                 &granted,
                 probe_input,
                 revoked.as_ref(),
                 deadline,
+                &mut probe_diagnostic,
             );
-            (preparation, granted, result)
+            (preparation, granted, result, probe_diagnostic)
         })
         .await;
+        if let Ok((_, _, _, Some(record))) = &probed {
+            record_diagnostic(diagnostic, OperationDiagnostic::Probe(*record));
+        }
         let retirement = probe.retire().await;
         let joined = retirement.as_ref().is_ok_and(|r| r.joined);
         let producer = retirement.as_ref().ok().copied();
         match &probed {
-            Ok((_, _, Err(error))) => play_failure(
+            Ok((_, _, Err(error), _)) => record_play_failure(
+                diagnostic,
                 PlayStage::ProbeResult,
                 PlayFailure::Decoder(*error),
                 started,
                 producer,
             ),
-            Err(_) => play_failure(PlayStage::ProbeResult, PlayFailure::Join, started, producer),
+            Err(_) => record_play_failure(
+                diagnostic,
+                PlayStage::ProbeResult,
+                PlayFailure::Join,
+                started,
+                producer,
+            ),
             _ => {}
         }
         if !joined {
-            play_failure(
+            record_play_failure(
+                diagnostic,
                 PlayStage::ProbeRetire,
                 retirement
                     .as_ref()
@@ -2003,7 +2137,7 @@ impl LiveBackend {
             );
         }
         let (preparation, granted, info) = match probed {
-            Ok((p, g, Ok(info))) if joined => (p, g, info),
+            Ok((p, g, Ok(info), _)) if joined => (p, g, info),
             _ => {
                 // Copy before factory cleanup can obscure the initiating state.
                 // The retained first-close record survives Core removal.
@@ -2012,13 +2146,14 @@ impl LiveBackend {
                 self.finish_reservation(session, &reservation, cleaned, true);
                 // Store scalars only. Emission must wait for Pending/done and
                 // operation completion, which the outer owned task publishes.
-                if let Ok(mut record) = diagnostic.lock() {
-                    record.get_or_insert(CloseDiagnostic {
+                record_diagnostic(
+                    diagnostic,
+                    OperationDiagnostic::Close(CloseDiagnostic {
                         stage: CloseObservationStage::ProbeFailure,
                         observation,
                         cleanup_confirmed: cleaned,
-                    });
-                }
+                    }),
+                );
                 return Err(BoundaryError::Unavailable);
             }
         };
@@ -2030,7 +2165,8 @@ impl LiveBackend {
         let mut decode = match factory.open(StreamPhase::Decode).await {
             Ok(decode) => decode,
             Err(error) => {
-                play_failure(
+                record_play_failure(
+                    diagnostic,
                     PlayStage::DecodeOpen,
                     PlayFailure::Stream(error),
                     started,
@@ -2048,7 +2184,7 @@ impl LiveBackend {
         {
             Ok(input) => input,
             Err(error) => {
-                play_failure(PlayStage::DecodeWrap, error, started, None);
+                record_play_failure(diagnostic, PlayStage::DecodeWrap, error, started, None);
                 let _ = decode.retire().await;
                 let cleaned = factory.finish().await.is_ok();
                 self.finish_reservation(session, &reservation, cleaned, true);
@@ -2126,7 +2262,7 @@ impl LiveBackend {
             Ok::<_, BoundaryError>((result.map(|_| ()).map_err(media_error), diagnostic))
         })
         .await;
-        let (result, worker_reaped, diagnostic) = match commit {
+        let (result, worker_reaped, commit_diagnostic) = match commit {
             Ok(Ok((result, diagnostic))) => (result, true, diagnostic),
             Ok(Err(error)) => (Err(error), true, None),
             Err(_) => (
@@ -2144,10 +2280,10 @@ impl LiveBackend {
             let _ = decode.retire().await;
             let cleaned = factory.finish().await.is_ok();
             self.finish_reservation(session, &reservation, cleaned, worker_reaped);
-            // The control guard and the original source-cleanup sequence are
-            // finished before any potentially blocking diagnostic write.
-            if let Some(record) = diagnostic {
-                write_play_failure(record);
+            // Source cleanup is finished; pending/done and the operation
+            // receipt still belong to the caller, so retain scalars only here.
+            if let Some(record) = commit_diagnostic {
+                record_diagnostic(diagnostic, OperationDiagnostic::Play(record));
             }
             return Err(error);
         }
@@ -3692,12 +3828,27 @@ mod close_diagnostic_tests {
     #[test]
     fn operation_receipts_and_sink_release_precede_a_blocked_diagnostic_writer() {
         use std::sync::mpsc;
-        let diagnostic = Arc::new(Mutex::new(Some(CloseDiagnostic {
-            stage: CloseObservationStage::ProbeFailure,
-            observation: None,
-            cleanup_confirmed: false,
-        })));
+        let diagnostic = Arc::new(Mutex::new(DiagnosticQueue::default()));
+        record_diagnostic(
+            &diagnostic,
+            OperationDiagnostic::Play(PlayFailureRecord {
+                stage: PlayStage::Resolve,
+                error: PlayFailure::Join,
+                elapsed_ms: 7,
+                producer: None,
+            }),
+        );
+        record_diagnostic(
+            &diagnostic,
+            OperationDiagnostic::Close(CloseDiagnostic {
+                stage: CloseObservationStage::ProbeFailure,
+                observation: None,
+                cleanup_confirmed: false,
+            }),
+        );
         let observer = diagnostic.clone();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let observed = seen.clone();
         let (done, observe_done) = mpsc::channel();
         let (completed, observe_completed) = mpsc::channel();
         let (entered, observe_entered) = mpsc::channel();
@@ -3710,13 +3861,128 @@ mod close_diagnostic_tests {
             done.send(()).unwrap();
             drop(done);
             drop(pending);
-            complete_then_emit_close(
+            complete_then_emit_diagnostics(
                 move || {
                     completed.send(()).unwrap();
                     drop(completed);
                 },
                 Some(diagnostic),
-                move |_| {
+                move |record| match record {
+                    OperationDiagnostic::Play(record) => {
+                        seen.lock().unwrap().push("play");
+                        assert_eq!(record.elapsed_ms, 7);
+                        entered.send(()).unwrap();
+                        wait_release.recv_timeout(Duration::from_secs(2)).unwrap();
+                    }
+                    OperationDiagnostic::Close(_) => seen.lock().unwrap().push("close"),
+                    _ => panic!("unexpected diagnostic variant"),
+                },
+            );
+        });
+        observe_entered
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        // The first (Play) writer remains held; no cleanup depends on it.
+        assert!(observe_pending.try_lock().unwrap().is_none());
+        assert!(observe_done.try_recv().is_ok());
+        assert!(observe_completed.try_recv().is_ok());
+        assert!(matches!(
+            observe_completed.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+        assert_eq!(observer.try_lock().unwrap().len, 0);
+        assert_eq!(Arc::strong_count(&observer), 1);
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(*observed.lock().unwrap(), vec!["play", "close"]);
+    }
+
+    #[test]
+    fn diagnostic_queue_preserves_order_and_reports_bounded_overflow_after_completion() {
+        let diagnostic = Arc::new(Mutex::new(DiagnosticQueue::default()));
+        for elapsed_ms in 0..11 {
+            record_diagnostic(
+                &diagnostic,
+                OperationDiagnostic::Play(PlayFailureRecord {
+                    stage: PlayStage::ProbeResult,
+                    error: PlayFailure::Join,
+                    elapsed_ms,
+                    producer: None,
+                }),
+            );
+        }
+        let observer = diagnostic.clone();
+        let completed = std::cell::Cell::new(false);
+        let mut elapsed = Vec::new();
+        let mut dropped = None;
+        complete_then_emit_diagnostics(
+            || completed.set(true),
+            Some(diagnostic),
+            |record| {
+                assert!(completed.get());
+                assert_eq!(Arc::strong_count(&observer), 1);
+                assert_eq!(observer.try_lock().unwrap().len, 0);
+                match record {
+                    OperationDiagnostic::Play(record) => elapsed.push(record.elapsed_ms),
+                    OperationDiagnostic::Overflow(value) => {
+                        assert_eq!(elapsed.len(), MAX_OPERATION_DIAGNOSTICS);
+                        dropped = Some(value);
+                    }
+                    _ => panic!("unexpected diagnostic variant"),
+                }
+            },
+        );
+        assert_eq!(elapsed, (0..8).collect::<Vec<_>>());
+        assert_eq!(dropped, Some(3));
+        let mut saturated = DiagnosticQueue::default();
+        saturated.len = MAX_OPERATION_DIAGNOSTICS;
+        saturated.dropped = u64::MAX;
+        saturated.push(OperationDiagnostic::Overflow(0));
+        assert_eq!(saturated.dropped, u64::MAX);
+    }
+
+    #[test]
+    fn empty_diagnostic_queue_completes_without_entering_writer() {
+        for diagnostic in [None, Some(Arc::new(Mutex::new(DiagnosticQueue::default())))] {
+            let completed = std::cell::Cell::new(false);
+            complete_then_emit_diagnostics(
+                || completed.set(true),
+                diagnostic,
+                |_| panic!("empty diagnostic queue must not enter writer"),
+            );
+            assert!(completed.get());
+        }
+    }
+
+    #[test]
+    fn watchdog_success_releases_owners_and_failed_cleanup_emits_nothing() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        };
+        struct Owner(Arc<AtomicUsize>);
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let observer = drops.clone();
+        let (entered, observe_entered) = mpsc::channel();
+        let (release, wait_release) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let owners = (Owner(drops.clone()), Owner(drops.clone()), Owner(drops));
+            release_watchdog_then_emit(
+                owners,
+                Some(CloseDiagnostic {
+                    stage: CloseObservationStage::WatchdogClosed,
+                    observation: None,
+                    cleanup_confirmed: true,
+                }),
+                move |record| {
+                    let line = record.to_string();
+                    assert!(line.contains("stage=watchdog_closed"));
+                    assert!(line.contains("cleanup_scope=session cleanup_confirmed=true"));
                     entered.send(()).unwrap();
                     wait_release.recv_timeout(Duration::from_secs(2)).unwrap();
                 },
@@ -3725,17 +3991,20 @@ mod close_diagnostic_tests {
         observe_entered
             .recv_timeout(Duration::from_secs(2))
             .unwrap();
-        // The writer remains held: cleanup observations must not depend on it.
-        assert!(observe_pending.try_lock().unwrap().is_none());
-        assert!(observe_done.try_recv().is_ok());
-        assert!(observe_completed.try_recv().is_ok());
-        assert!(matches!(
-            observe_completed.try_recv(),
-            Err(mpsc::TryRecvError::Disconnected)
-        ));
-        assert!(observer.try_lock().unwrap().is_none());
+        assert_eq!(observer.load(Ordering::SeqCst), 3);
         assert_eq!(Arc::strong_count(&observer), 1);
         release.send(()).unwrap();
         worker.join().unwrap();
+        let failed = Arc::new(AtomicUsize::new(0));
+        release_watchdog_then_emit(
+            (
+                Owner(failed.clone()),
+                Owner(failed.clone()),
+                Owner(failed.clone()),
+            ),
+            None,
+            |_| panic!("failed or exhausted cleanup must not enter the diagnostic writer"),
+        );
+        assert_eq!(failed.load(Ordering::SeqCst), 3);
     }
 }
