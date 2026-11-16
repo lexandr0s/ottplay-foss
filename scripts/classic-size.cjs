@@ -831,7 +831,7 @@ const DESKTOP_PLAYLIST_DROP_ALLOWANCE = Object.freeze({
     gzipBytes: 3500,
 });
 // Preserve adaptive-stream routing for playlist entries in the shared core.
-// Measured entry delta: 978 raw / at most 379 gzip bytes on Node 26.8.2.
+// Measured entry delta: 996 raw / at most 388 gzip bytes on Node 26.8.2.
 // Evidence: docs/evidence/desktop-playlist-drop-size.json.
 const DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE = Object.freeze({
     bytes: 1000,

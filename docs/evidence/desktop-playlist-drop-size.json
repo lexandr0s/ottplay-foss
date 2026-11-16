@@ -29,13 +29,13 @@
       "sha256": "e38270ddf198cb76f2ba441f2095cabdcfaac603f1feb2aa9186510aeea9b998"
     },
     "candidateWeb": {
-      "bytes": 1219020,
-      "gzipBytes": 372138,
-      "sha256": "8835472fb65da9611dea19caafd54e1ac8bd0022192c6f9f2c57d29b1ae7b8f6"
+      "bytes": 1219038,
+      "gzipBytes": 372147,
+      "sha256": "a817b477ff0b8b8828fa0057542c9a85343f0dd060fbc4be05bf3ca056d128ce"
     },
     "maximumDelta": {
-      "bytes": 978,
-      "gzipBytes": 379
+      "bytes": 996,
+      "gzipBytes": 388
     },
     "purpose": "Retain catalog membership while distinguishing adaptive HTTP from direct media for Main and PiP. Measured complete entry feature delta, not cap overrun."
   }

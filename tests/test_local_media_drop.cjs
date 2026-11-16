@@ -725,6 +725,32 @@ test("actual Local catalogs reach main and PiP HLS selection while direct files 
                 adaptive ? 1 : 0,
                 "adaptive entries also retain the selected Shaka engine"
             );
+            if (adaptive) {
+                for (const mode of [1, 2]) {
+                    const preview = coreFixture({
+                        nativeHls: false,
+                        savedPlayerMode: mode,
+                    });
+                    preview.w.__ottLocalMedia = f.api;
+                    preview.w.startCoreEngine(
+                        url,
+                        undefined,
+                        undefined,
+                        false,
+                        url,
+                        true
+                    );
+                    await Promise.resolve();
+                    await Promise.resolve();
+                    assert.equal(
+                        mode === 1
+                            ? preview.players.length
+                            : preview.shakaPlayers.length,
+                        1,
+                        "temporary preview ownership must not force adaptive media through HTML5"
+                    );
+                }
+            }
             assert.deepEqual(f.saved, f.before);
         }
     }
