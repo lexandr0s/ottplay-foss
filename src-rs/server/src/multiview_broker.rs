@@ -133,6 +133,7 @@ pub enum BoundaryError {
     Invalid,
     Conflict,
     Unavailable,
+    TemporaryBusy,
     Limit,
     Revoked,
 }
@@ -142,6 +143,7 @@ impl BoundaryError {
             Self::Configuration | Self::Unavailable => {
                 (StatusCode::SERVICE_UNAVAILABLE, "backend_unavailable")
             }
+            Self::TemporaryBusy => (StatusCode::SERVICE_UNAVAILABLE, "temporary_busy"),
             Self::UnsupportedPlatform => (StatusCode::SERVICE_UNAVAILABLE, "unsupported_platform"),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
@@ -644,16 +646,16 @@ impl Broker {
                 result = match self.0.mutable.try_lock() {
                     Ok(mut state) if self.current_credential(&state, owner) => callback(&mut state),
                     Ok(_) => Err(BoundaryError::Unauthorized),
-                    Err(_) => Err(BoundaryError::Unavailable),
+                    Err(std::sync::TryLockError::WouldBlock) => Err(BoundaryError::TemporaryBusy),
+                    Err(std::sync::TryLockError::Poisoned(_)) => Err(BoundaryError::Unavailable),
                 };
             }
             Ok(())
         });
         match checked {
             Ok(()) => result,
-            Err(RegistryError::Busy | RegistryError::Unavailable) => {
-                Err(BoundaryError::Unavailable)
-            }
+            Err(RegistryError::Busy) => Err(BoundaryError::TemporaryBusy),
+            Err(RegistryError::Unavailable) => Err(BoundaryError::Unavailable),
             Err(_) => Err(BoundaryError::Revoked),
         }
     }
@@ -1743,7 +1745,10 @@ async fn media(
             .0
             .mutable
             .try_lock()
-            .map_err(|_| BoundaryError::Unavailable)?
+            .map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => BoundaryError::TemporaryBusy,
+                std::sync::TryLockError::Poisoned(_) => BoundaryError::Unavailable,
+            })?
             .outputs
             .get(nonce)
             .cloned()

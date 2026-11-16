@@ -1593,7 +1593,7 @@ async fn media_mutex_contention_fails_closed_then_recovers(registry_lock: bool) 
         .is_none());
     assert_eq!(
         json_body(denied).await,
-        json!({"version": 1, "error": "backend_unavailable"})
+        json!({"version": 1, "error": "temporary_busy"})
     );
 
     tokio::time::timeout(

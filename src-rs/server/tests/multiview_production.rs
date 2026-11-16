@@ -626,6 +626,7 @@ struct FixtureReadFailure {
     status: Option<u16>,
     response_bytes: Option<usize>,
     response_sha256: Option<[u8; 32]>,
+    temporary_busy: bool,
 }
 impl FixtureReadFailure {
     fn without_body(
@@ -638,6 +639,7 @@ impl FixtureReadFailure {
             status,
             response_bytes,
             response_sha256: None,
+            temporary_busy: false,
         }
     }
     fn response(stage: FixtureReadStage, status: u16, bytes: &[u8]) -> Self {
@@ -646,6 +648,11 @@ impl FixtureReadFailure {
             status: Some(status),
             response_bytes: Some(bytes.len()),
             response_sha256: Some(Sha256::digest(bytes).into()),
+            // Retry only the exact closed media-admission response. Do not
+            // parse or retain arbitrary server error bodies as retry signals.
+            temporary_busy: stage == FixtureReadStage::HttpStatus
+                && status == 503
+                && bytes == br#"{"error":"temporary_busy","version":1}"#,
         }
     }
 }
@@ -689,12 +696,24 @@ fn http_checked(
     body: Option<&Value>,
     limit: usize,
 ) -> Result<(u16, Vec<u8>), FixtureReadFailure> {
-    let fixture = fixture_http();
     let timeout = if method == "POST" {
         Duration::from_secs(30)
     } else {
         Duration::from_secs(8)
     };
+    http_checked_with_timeout(method, url, token, request_id, body, limit, timeout)
+}
+
+fn http_checked_with_timeout(
+    method: &str,
+    url: &str,
+    token: Option<&str>,
+    request_id: Option<&str>,
+    body: Option<&Value>,
+    limit: usize,
+    timeout: Duration,
+) -> Result<(u16, Vec<u8>), FixtureReadFailure> {
+    let fixture = fixture_http();
     fixture.runtime.block_on(async {
         let operation = async {
             let mut request = fixture
@@ -838,7 +857,15 @@ fn get_url_checked(
     token: Option<&str>,
     limit: usize,
 ) -> Result<(u16, Vec<u8>), FixtureReadFailure> {
-    let response = http_checked("GET", url, token, None, None, limit);
+    get_url_checked_with_timeout(url, token, limit, Duration::from_secs(8))
+}
+fn get_url_checked_with_timeout(
+    url: &str,
+    token: Option<&str>,
+    limit: usize,
+    timeout: Duration,
+) -> Result<(u16, Vec<u8>), FixtureReadFailure> {
+    let response = http_checked_with_timeout("GET", url, token, None, None, limit, timeout);
     if response.as_ref().is_ok_and(|(status, _)| *status == 200)
         && reqwest::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == "https")
     {
@@ -1261,6 +1288,13 @@ fn playlist_snapshot_checked(
     base: &str,
     playlist_path: &str,
 ) -> Result<(u64, Vec<String>), FixtureReadFailure> {
+    playlist_snapshot_checked_with_timeout(base, playlist_path, Duration::from_secs(8))
+}
+fn playlist_snapshot_checked_with_timeout(
+    base: &str,
+    playlist_path: &str,
+    timeout: Duration,
+) -> Result<(u64, Vec<String>), FixtureReadFailure> {
     let playlist_url =
         if playlist_path.starts_with("http://") || playlist_path.starts_with("https://") {
             reqwest::Url::parse(playlist_path).map_err(|_| {
@@ -1291,8 +1325,54 @@ fn playlist_snapshot_checked(
         "https",
         "HLS media must use the selected HTTPS listener"
     );
-    let (code, playlist) = get_url_checked(playlist_url.as_str(), None, 1024 * 1024)?;
+    let (code, playlist) =
+        get_url_checked_with_timeout(playlist_url.as_str(), None, 1024 * 1024, timeout)?;
     parse_playlist_snapshot_response(&playlist_url, &expected, code, &playlist)
+}
+
+fn seed_busy_retry_delay(
+    failure: &FixtureReadFailure,
+    now: Instant,
+    deadline: Instant,
+) -> Option<Duration> {
+    let remaining = deadline.checked_duration_since(now)?;
+    (failure.temporary_busy && !remaining.is_zero())
+        .then_some(remaining.min(Duration::from_millis(250)))
+}
+
+fn seed_request_timeout(now: Instant, deadline: Instant) -> Option<Duration> {
+    let remaining = deadline.checked_duration_since(now)?;
+    (!remaining.is_zero()).then_some(remaining.min(Duration::from_secs(8)))
+}
+
+fn seed_deadline_failure(last_busy: Option<FixtureReadFailure>) -> FixtureReadFailure {
+    last_busy.unwrap_or_else(|| {
+        FixtureReadFailure::without_body(FixtureReadStage::HttpDeadline, None, None)
+    })
+}
+
+fn playlist_snapshot_seed_until(
+    base: &str,
+    playlist_path: &str,
+    deadline: Instant,
+) -> Result<(u64, Vec<String>), FixtureReadFailure> {
+    let mut last_busy = None;
+    loop {
+        let now = Instant::now();
+        let Some(timeout) = seed_request_timeout(now, deadline) else {
+            return Err(seed_deadline_failure(last_busy));
+        };
+        match playlist_snapshot_checked_with_timeout(base, playlist_path, timeout) {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(failure) => {
+                let Some(delay) = seed_busy_retry_delay(&failure, Instant::now(), deadline) else {
+                    return Err(failure);
+                };
+                last_busy = Some(failure);
+                thread::sleep(delay);
+            }
+        }
+    }
 }
 fn parse_playlist_snapshot_response(
     playlist_url: &reqwest::Url,
@@ -1344,6 +1424,58 @@ fn parse_playlist_snapshot_response(
 fn playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts() {
     let base = reqwest::Url::parse("https://fixture.invalid").unwrap();
     let path = base.join("/owned/index.m3u8").unwrap();
+    let now = Instant::now();
+    let deadline = now + Duration::from_millis(100);
+    let busy_body = br#"{"error":"temporary_busy","version":1}"#;
+    let busy = FixtureReadFailure::response(FixtureReadStage::HttpStatus, 503, busy_body);
+    assert!(busy.temporary_busy);
+    assert!(!FixtureReadFailure::response(FixtureReadStage::Utf8, 503, busy_body).temporary_busy);
+    let retained_busy = seed_deadline_failure(Some(busy));
+    assert_eq!(retained_busy.stage, FixtureReadStage::HttpStatus);
+    assert_eq!(retained_busy.status, Some(503));
+    assert_eq!(retained_busy.response_bytes, Some(busy_body.len()));
+    assert_eq!(
+        retained_busy.response_sha256,
+        Some(Sha256::digest(busy_body).into())
+    );
+    let no_attempt = seed_deadline_failure(None);
+    assert_eq!(no_attempt.stage, FixtureReadStage::HttpDeadline);
+    assert_eq!(no_attempt.status, None);
+    assert_eq!(
+        seed_busy_retry_delay(&busy, now, deadline),
+        Some(Duration::from_millis(100))
+    );
+    assert_eq!(seed_busy_retry_delay(&busy, deadline, deadline), None);
+    assert_eq!(
+        seed_request_timeout(now, deadline),
+        Some(Duration::from_millis(100))
+    );
+    assert_eq!(seed_request_timeout(deadline, deadline), None);
+    assert_eq!(
+        seed_request_timeout(now, now + Duration::from_secs(20)),
+        Some(Duration::from_secs(8))
+    );
+    for (status, bytes) in [
+        (200, busy_body.as_slice()),
+        (401, busy_body.as_slice()),
+        (
+            503,
+            br#"{"error":"backend_unavailable","version":1}"#.as_slice(),
+        ),
+        (
+            503,
+            br#"{"error":"temporary_busy","version":1,"extra":true}"#.as_slice(),
+        ),
+        (503, br#"{"error":"temporary_busy","version":2}"#.as_slice()),
+        (
+            503,
+            br#"{ "error":"temporary_busy","version":1}"#.as_slice(),
+        ),
+    ] {
+        let failure = FixtureReadFailure::response(FixtureReadStage::HttpStatus, status, bytes);
+        assert!(!failure.temporary_busy);
+        assert_eq!(seed_busy_retry_delay(&failure, now, deadline), None);
+    }
     for (status, bytes, stage) in [
         (503, b"closed body".as_slice(), FixtureReadStage::HttpStatus),
         (200, b"\xff".as_slice(), FixtureReadStage::Utf8),
@@ -2347,10 +2479,8 @@ fn run_normal_production(mode: ProductionMode) {
     let playlist = grid_status["output"]["playlist_path"]
         .as_str()
         .expect("private grid HLS playlist");
-    let mut grid_seen = playlist_snapshot_checked(&api_origin, playlist)
-        .unwrap_or_else(|failure| {
-            panic!("grid HLS playlist before freshness barrier: {failure}")
-        })
+    let mut grid_seen = playlist_snapshot_seed_until(&api_origin, playlist, grid_end)
+        .unwrap_or_else(|failure| panic!("grid HLS playlist before freshness barrier: {failure}"))
         .1
         .into_iter()
         .collect::<HashSet<_>>();
@@ -2487,11 +2617,12 @@ fn run_normal_production(mode: ProductionMode) {
     let mut replacement_b_baseline = None;
     let mut first_replacement_sequence = None;
     let mut last_b_frames = slot(&first_b, 1)["frames"].as_u64().unwrap();
-    let mut main_seen = playlist_snapshot_checked(
+    let mut main_seen = playlist_snapshot_seed_until(
         &api_origin,
         first_b["output"]["playlist_path"]
             .as_str()
             .expect("initial HLS playlist"),
+        end,
     )
     .unwrap_or_else(|failure| panic!("initial HLS playlist snapshot: {failure}"))
     .1
@@ -2536,7 +2667,7 @@ fn run_normal_production(mode: ProductionMode) {
             let before_playlist = current["output"]["playlist_path"]
                 .as_str()
                 .expect("pre-replacement HLS playlist");
-            replacement_seen = playlist_snapshot_checked(&api_origin, before_playlist)
+            replacement_seen = playlist_snapshot_seed_until(&api_origin, before_playlist, end)
                 .unwrap_or_else(|failure| {
                     panic!("pre-replacement HLS playlist snapshot: {failure}")
                 })
