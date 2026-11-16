@@ -24,6 +24,9 @@ HLS_BATCH_SHA256 = '967ceaa7e7478c2488c3a984d4a4a15f968226ef82a7cd065b4a93b84aa1
 PRODUCTION_TEST = 'normal_server_private_http_mpegts_renew_replace_and_cleanup'
 HLS_PRODUCTION_TEST = 'normal_server_private_http_hls_renew_replace_and_cleanup'
 PRODUCTION_ORDINARY_TESTS = frozenset({
+    'unwind_stderr_capture_preserves_original_panic_and_clears_registration',
+    'owned_stderr_drops_incomplete_secret_line_before_bounded_redaction',
+    'playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts',
     'segment_video_proof_checks_count_timing_and_sampling_domain',
     'two_slot_fixture_geometry_passes_actual_core_validation',
     'nine_slot_fixture_geometry_passes_actual_core_and_old_odd_grid_is_rejected',

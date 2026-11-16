@@ -2224,25 +2224,52 @@ class MockMainTests(unittest.TestCase):
             self.assertFalse(attempt.terminal()['normal_server_hls_to_hls'])
 
     def test_normal_fixture_credential_and_startup_diagnostic_units_are_mandatory(self):
-        required={'segment_video_proof_checks_count_timing_and_sampling_domain',
+        required={'unwind_stderr_capture_preserves_original_panic_and_clears_registration',
+                  'owned_stderr_drops_incomplete_secret_line_before_bounded_redaction',
+                  'playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts',
+                  'segment_video_proof_checks_count_timing_and_sampling_domain',
                   'two_slot_fixture_geometry_passes_actual_core_validation',
                   'nine_slot_fixture_geometry_passes_actual_core_and_old_odd_grid_is_rejected',
                   'api_failure_diagnostics_bind_request_hash_and_closed_redacted_response',
                   'startup_diagnostic_tail_is_bounded_and_redacts_fixture_secrets_and_urls',
-                  'production_tls::leaf_request_has_explicit_distinguished_name_for_openssl_1_1_and_3'}
-        self.assertTrue(required <= ci.PRODUCTION_ORDINARY_TESTS)
-        self.assertEqual(len(ci.PRODUCTION_ORDINARY_TESTS),9)
-        for missing in required:
-            with self.subTest(missing=missing), Attempt() as attempt:
-                original=attempt.response
-                def response(name,argv,original=original,missing=missing):
-                    text=original(name,argv)
-                    if name=='production-inventory':
-                        return '\n'.join(line for line in text.splitlines() if line != missing+': test')+'\n'
-                    return text
-                with mock.patch.object(attempt,'response',side_effect=response), self.assertRaises(RuntimeError):attempt.run()
-                self.assertFalse(attempt.terminal()['normal_server_hls_to_hls'])
-                self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
+                  'production_tls::leaf_request_has_explicit_distinguished_name_for_openssl_1_1_and_3',
+                  'hls_production::tests::starts_with_three_complete_and_slides_six_without_exposing_future',
+                  'hls_production::tests::never_loops_or_serves_fifty_first_segment_and_keeps_original_duration',
+                  'hls_production::tests::exact_path_fence_and_master_child_are_self_contained'}
+        self.assertEqual(required, ci.PRODUCTION_ORDINARY_TESTS)
+        for missing in sorted(required):
+            for failure in ('missing', 'ignored'):
+                with self.subTest(missing=missing, failure=failure), Attempt() as attempt:
+                    original=attempt.response
+                    def response(name,argv,original=original,missing=missing,failure=failure):
+                        text=original(name,argv)
+                        if failure == 'missing' and name=='production-inventory':
+                            return '\n'.join(line for line in text.splitlines() if line != missing+': test')+'\n'
+                        if failure == 'ignored' and name=='production-ignored-inventory':
+                            return text + missing + ': test\n'
+                        return text
+                    with mock.patch.object(attempt,'response',side_effect=response), self.assertRaises(RuntimeError):attempt.run()
+                    self.assertFalse(attempt.terminal()['normal_server_hls_to_hls'])
+                    self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
+
+    def test_normal_inventory_matches_current_rust_fixture_and_support_sources(self):
+        # Check the actual closed fixture modules, independently of Attempt's synthetic --list.
+        sources = (
+            ('src-rs/server/tests/multiview_production.rs', ''),
+            ('src-rs/server/tests/support/hls_production.rs', 'hls_production::tests::'),
+            ('src-rs/server/tests/support/multiview_production_tls.rs', 'production_tls::'),
+        )
+        ordinary, ignored = set(), set()
+        for path, prefix in sources:
+            text = (ROOT / path).read_text()
+            rows = re.findall(r'(?m)^\s*#\[test\]\s*((?:#\[[^\n]+\]\s*)*)fn\s+(\w+)\s*\(', text)
+            self.assertEqual(len(rows), text.count('#[test]'), path)
+            for attributes, name in rows:
+                target = ignored if re.search(r'#\[ignore(?:\s*=|\])', attributes) else ordinary
+                self.assertNotIn(prefix + name, ordinary | ignored)
+                target.add(prefix + name)
+        self.assertEqual(ordinary, ci.PRODUCTION_ORDINARY_TESTS)
+        self.assertEqual(ignored, {EXPECTED_PRODUCTION_TEST, EXPECTED_HLS_PRODUCTION_TEST})
 
     def test_private_tool_custody_preserves_selected_bytes_without_uploading_binaries(self):
         with Attempt() as attempt:
