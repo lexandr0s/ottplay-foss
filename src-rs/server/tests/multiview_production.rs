@@ -31,6 +31,7 @@ use std::{
 
 const STARTUP_LIMIT: Duration = Duration::from_secs(12);
 const RUN_LIMIT: Duration = Duration::from_secs(600);
+const NORMAL_SERVER_SHUTDOWN_LIMIT: Duration = Duration::from_secs(10);
 use production_config::{EXPIRING_TOKEN, TOKEN};
 const PROFILE: &str = "http-mpegts-v1-640x360-10fps";
 const INPUTS: &str = "OTTPLAY_MULTIVIEW_PRODUCTION_INPUTS";
@@ -403,6 +404,45 @@ impl Drop for ChildGuard {
     }
 }
 
+struct NormalServerGuard(Child);
+impl Drop for NormalServerGuard {
+    fn drop(&mut self) {
+        // Unlike the short FFmpeg filter guard above, the owned normal server
+        // supervises decoder children. Give its normal SIGTERM shutdown path
+        // up to the same grace period used by the explicit success-path
+        // assertion, then use the owned-child fallback. Reaping may add time;
+        // the outer fixture driver remains the final total-runtime bound.
+        // Never signal a PID after try_wait has reaped it, and never signal the
+        // process group: both would risk affecting a reused/unowned process.
+        match self.0.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => {}
+        }
+        let pid = self.0.id() as libc::pid_t;
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + NORMAL_SERVER_SHUTDOWN_LIMIT;
+        loop {
+            match self.0.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if !remaining.is_zero() {
+                        thread::sleep(Duration::from_millis(100).min(remaining));
+                        continue;
+                    }
+                    // The child is still owned and unreaped. Fall back through
+                    // Child's handle, then reap it; no group/PID signal follows.
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                    return;
+                }
+            }
+        }
+    }
+}
+
 struct Upstream {
     address: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -439,6 +479,16 @@ impl Upstream {
             while !worker_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // On macOS, accepted sockets inherit O_NONBLOCK from
+                        // the listener. The HTTP handler below is deliberately
+                        // blocking with finite read/write timeouts, so normalize
+                        // each accepted stream before handing it to a worker.
+                        // A failed normalization closes this socket without
+                        // incrementing the active-worker count.
+                        if stream.set_nonblocking(false).is_err() {
+                            drop(stream);
+                            continue;
+                        }
                         let stop = worker_stop.clone();
                         let requests = worker_requests.clone();
                         let files = files.clone();
@@ -2166,7 +2216,7 @@ fn run_normal_production(mode: ProductionMode) {
     .document();
     let config_path = root.write_private("operator.json", &serde_json::to_vec(&config).unwrap());
     drop((api_listener, decoy_listener));
-    let mut server = ChildGuard(
+    let mut server = NormalServerGuard(
         Command::new(env!("CARGO_BIN_EXE_ottplay-server"))
             .current_dir(&public)
             .env_clear()
@@ -2937,7 +2987,7 @@ fn run_normal_production(mode: ProductionMode) {
     assert!(upstream.source_was_read(mode));
     let signal = unsafe { libc::kill(server.0.id() as i32, libc::SIGTERM) };
     assert_eq!(signal, 0, "send daemon SIGTERM to owned normal server");
-    let shutdown_deadline = Instant::now() + Duration::from_secs(10);
+    let shutdown_deadline = Instant::now() + NORMAL_SERVER_SHUTDOWN_LIMIT;
     let exit = loop {
         if let Some(exit) = server.0.try_wait().expect("owned server status") {
             break exit;
