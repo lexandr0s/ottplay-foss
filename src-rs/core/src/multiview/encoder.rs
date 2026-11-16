@@ -844,16 +844,22 @@ pub enum EncoderError {
     InvalidManifest,
 }
 
-// Use libtest's standard capture in unit builds. Production retains a
-// best-effort writer: diagnostic IO failure must never replace the real error.
-#[cfg(any(not(test), target_os = "linux", target_os = "macos"))]
+// Standard capture must work even when Core is a non-test dependency. In
+// unwind builds catch diagnostic printing failure; abort builds use the raw
+// best-effort sink instead of a printing macro which could abort the process.
+#[cfg(any(
+    panic = "abort",
+    all(test, any(target_os = "linux", target_os = "macos"))
+))]
 fn write_startup_record(writer: &mut impl std::io::Write, record: &str) {
     let _ = writeln!(writer, "{record}");
 }
 pub(super) fn emit_startup_record(record: &str) {
-    #[cfg(test)]
-    eprintln!("{record}");
-    #[cfg(not(test))]
+    #[cfg(panic = "unwind")]
+    {
+        let _ = std::panic::catch_unwind(|| eprintln!("{record}"));
+    }
+    #[cfg(panic = "abort")]
     write_startup_record(&mut std::io::stderr().lock(), record);
 }
 

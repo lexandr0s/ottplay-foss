@@ -721,9 +721,13 @@ impl LiveBackend {
                 return Err(match result {
                     Ok(Err(error)) => {
                         // Core errors are closed enums; never log owner/config/source data.
-                        #[cfg(test)]
-                        eprintln!("multiview_startup stage=core_session error={error:?}");
-                        #[cfg(not(test))]
+                        #[cfg(panic = "unwind")]
+                        {
+                            let _ = std::panic::catch_unwind(|| {
+                                eprintln!("multiview_startup stage=core_session error={error:?}")
+                            });
+                        }
+                        #[cfg(panic = "abort")]
                         {
                             use std::io::Write as _;
                             let _ = writeln!(
@@ -734,9 +738,13 @@ impl LiveBackend {
                         media_error(error)
                     }
                     _ => {
-                        #[cfg(test)]
-                        eprintln!("multiview_startup stage=core_join error=join_failed");
-                        #[cfg(not(test))]
+                        #[cfg(panic = "unwind")]
+                        {
+                            let _ = std::panic::catch_unwind(|| {
+                                eprintln!("multiview_startup stage=core_join error=join_failed")
+                            });
+                        }
+                        #[cfg(panic = "abort")]
                         {
                             use std::io::Write as _;
                             let _ = writeln!(
