@@ -9,7 +9,7 @@ const { createRequire } = require("node:module");
 const { spawnSync } = require("node:child_process");
 function probeSymlinks(api = fs) {
     const dir = api.mkdtempSync(
-        path.join(api.realpathSync(os.tmpdir()), "ott-home-symlink-probe-"),
+        path.join(api.realpathSync(os.tmpdir()), "ott-home-symlink-probe-")
     );
     try {
         const file = path.join(dir, "file"),
@@ -34,13 +34,13 @@ const SYMLINKS_AVAILABLE = probeSymlinks();
 function symlinkCases(
     kinds,
     nonLinkKinds = [],
-    supported = SYMLINKS_AVAILABLE,
+    supported = SYMLINKS_AVAILABLE
 ) {
     return kinds.filter((kind) => supported || nonLinkKinds.includes(kind));
 }
 const root = path.resolve(__dirname, "..");
 const dependencies = createRequire(
-    path.join(process.env.OTT_HOME_TEST_REPO || root, "package.json"),
+    path.join(process.env.OTT_HOME_TEST_REPO || root, "package.json")
 );
 const ts = dependencies("typescript");
 const acorn = dependencies("acorn");
@@ -58,27 +58,27 @@ function addRuntime(source) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.copyFileSync(
         path.join(root, "src/plugins/home-integration-runtime.ts"),
-        file,
+        file
     );
 }
 const bootstrapSource = fs.readFileSync(
     path.join(process.env.OTT_HOME_TEST_REPO || root, "index.html"),
-    "utf8",
+    "utf8"
 );
 const bootstrap = bootstrapSource.slice(
     bootstrapSource.indexOf("function packagedTizenAssetBase()"),
     bootstrapSource.indexOf(
         "var host =",
-        bootstrapSource.indexOf("function packagedTizenAssetBase()"),
-    ),
+        bootstrapSource.indexOf("function packagedTizenAssetBase()")
+    )
 );
 function bootPackage(w) {
     assert.ok(
-        bootstrap.includes("window.__ottPkgBase = packagedTizenAssetBase()"),
+        bootstrap.includes("window.__ottPkgBase = packagedTizenAssetBase()")
     );
     vm.runInNewContext(
         bootstrap + ";window.packagedTizenAssetBase=packagedTizenAssetBase;",
-        { window: w },
+        { window: w }
     );
 }
 function packaged(f) {
@@ -98,7 +98,7 @@ acorn.parse(HOST, { ecmaVersion: 5 });
 function load() {
     const source = fs.readFileSync(
         path.join(root, "src/plugins/home-integration.ts"),
-        "utf8",
+        "utf8"
     );
     const result = ts.transpileModule(source, {
         compilerOptions: {
@@ -373,14 +373,14 @@ test("navigated frame is rejected; stale frame callbacks cannot close a replacem
     assert.equal(
         home.open(),
         true,
-        "reopening retires stale session before polling",
+        "reopening retires stale session before polling"
     );
     home.close();
     assert.equal(f.w.aboutKeyHandler, foreign);
 });
 test("asset staging includes five public files plus generated ES5 host and integrity manifest", () => {
     const dir = fs.mkdtempSync(
-        path.join(fs.realpathSync(os.tmpdir()), "ott-home-stage-"),
+        path.join(fs.realpathSync(os.tmpdir()), "ott-home-stage-")
     );
     try {
         const source = path.join(dir, "source"),
@@ -391,22 +391,22 @@ test("asset staging includes five public files plus generated ES5 host and integ
         for (const name of FILES)
             fs.writeFileSync(
                 path.join(source, "integrations", "home", name),
-                "public " + name,
+                "public " + name
             );
         fs.writeFileSync(
             path.join(source, "integrations", "home", "config.private.json"),
-            "SECRET",
+            "SECRET"
         );
         addRuntime(source);
         fs.writeFileSync(
             path.join(source, "integrations/home/host.js"),
-            "SECRET_HOST_OVERRIDE",
+            "SECRET_HOST_OVERRIDE"
         );
         const manifest = stageHomeIntegration(source, target);
         assert.equal(manifest.files.length, 6);
         const generated = fs.readFileSync(
             path.join(target, "home/host.js"),
-            "utf8",
+            "utf8"
         );
         assert.ok(!generated.includes("SECRET_HOST_OVERRIDE"));
         assert.ok(generated.includes("__ottHomeHostInstall"));
@@ -414,11 +414,11 @@ test("asset staging includes five public files plus generated ES5 host and integ
         for (const name of [...OUTPUT_FILES, "assets.json"])
             assert.deepEqual(
                 fs.readFileSync(path.join(target, "home", name)),
-                fs.readFileSync(path.join(target, "dist", "home", name)),
+                fs.readFileSync(path.join(target, "dist", "home", name))
             );
         assert.deepEqual(
             fs.readdirSync(path.join(target, "dist", "home")).sort(),
-            [...OUTPUT_FILES, "assets.json"].sort(),
+            [...OUTPUT_FILES, "assets.json"].sort()
         );
         if (SYMLINKS_AVAILABLE) {
             fs.unlinkSync(path.join(source, "integrations", "home", "app.js"));
@@ -427,13 +427,13 @@ test("asset staging includes five public files plus generated ES5 host and integ
                     source,
                     "integrations",
                     "home",
-                    "config.private.json",
+                    "config.private.json"
                 ),
-                path.join(source, "integrations", "home", "app.js"),
+                path.join(source, "integrations", "home", "app.js")
             );
             assert.throws(
                 () => stageHomeIntegration(source, target),
-                /Invalid public/,
+                /Invalid public/
             );
         }
     } finally {
@@ -444,7 +444,7 @@ test("asset staging rejects dangling output symlinks without writing their targe
     skip: !SYMLINKS_AVAILABLE,
 }, () => {
     const dir = fs.mkdtempSync(
-        path.join(fs.realpathSync(os.tmpdir()), "ott-home-link-"),
+        path.join(fs.realpathSync(os.tmpdir()), "ott-home-link-")
     );
     try {
         const source = path.join(dir, "source"),
@@ -456,14 +456,14 @@ test("asset staging rejects dangling output symlinks without writing their targe
         for (const name of FILES)
             fs.writeFileSync(
                 path.join(source, "integrations", "home", name),
-                "public",
+                "public"
             );
         addRuntime(source);
         const victim = path.join(dir, "must-not-exist");
         fs.symlinkSync(victim, path.join(target, "dist", "home", "app.js"));
         assert.throws(
             () => stageHomeIntegration(source, target),
-            /Unsafe Home/,
+            /Unsafe Home/
         );
         assert.equal(fs.existsSync(victim), false);
     } finally {
@@ -477,7 +477,7 @@ test("canonical index and all export stages are wired without private bridge imp
     assert.match(index, /name: "Home"/);
     assert.match(
         fs.readFileSync(path.join(root, "scripts/classic-bundle.cjs"), "utf8"),
-        /build\/plugins\/home-integration.js/,
+        /build\/plugins\/home-integration.js/
     );
     assert.match(vite, /stageHomeIntegration\(__dirname, outDir\)/);
     assert.match(vite, /stageHomeIntegration\(srcRoot, stageDir\)/);
@@ -485,7 +485,7 @@ test("canonical index and all export stages are wired without private bridge imp
 });
 function assetFixture(run) {
     const root = fs.mkdtempSync(
-        path.join(fs.realpathSync(os.tmpdir()), "ott-home-race-"),
+        path.join(fs.realpathSync(os.tmpdir()), "ott-home-race-")
     );
     try {
         const source = path.join(root, "source"),
@@ -506,18 +506,18 @@ function assetFixture(run) {
 test("source ancestors, leaf nonregular files and hardlinks cannot export private bytes", () => {
     for (const kind of symlinkCases(
         ["ancestor", "home", "leaf", "directory", "hardlink"],
-        ["directory", "hardlink"],
+        ["directory", "hardlink"]
     ))
         assetFixture((f) => {
             if (kind === "ancestor") {
                 fs.renameSync(
                     path.join(f.source, "integrations"),
-                    path.join(f.source, "original"),
+                    path.join(f.source, "original")
                 );
                 fs.symlinkSync(
                     path.join(f.source, "original"),
                     path.join(f.source, "integrations"),
-                    "dir",
+                    "dir"
                 );
             } else if (kind === "home") {
                 fs.renameSync(f.home, f.home + "-original");
@@ -589,7 +589,7 @@ test("source leaf and parent swaps before open or after fd admission never expor
 test("incremental staging rejects output leaf/parent swaps and hardlinks without altering private bytes", () => {
     for (const phase of symlinkCases(
         ["leaf-open", "parent-open", "leaf-write", "parent-write", "hardlink"],
-        ["hardlink"],
+        ["hardlink"]
     ))
         assetFixture((f) => {
             stageHomeIntegration(f.source, f.target);
@@ -639,7 +639,7 @@ test("incremental staging rejects output leaf/parent swaps and hardlinks without
             for (const name of [...OUTPUT_FILES, "assets.json"])
                 assert.equal(
                     fs.readFileSync(path.join(privateDir, name), "utf8"),
-                    f.sentinel,
+                    f.sentinel
                 );
         });
 });
@@ -653,7 +653,7 @@ test("unchanged regular incremental outputs remain supported and match public in
             for (const output of ["home", path.join("dist", "home")])
                 assert.deepEqual(
                     fs.readFileSync(path.join(f.target, output, name)),
-                    fs.readFileSync(path.join(f.home, name)),
+                    fs.readFileSync(path.join(f.home, name))
                 );
     }));
 
@@ -734,12 +734,12 @@ test("generated ES5 host only installs a factory; fixed runtime source admission
     home.close();
     for (const kind of symlinkCases(
         ["symlink", "parent", "import"],
-        ["import"],
+        ["import"]
     ))
         assetFixture((a) => {
             const runtime = path.join(
                 a.source,
-                "src/plugins/home-integration-runtime.ts",
+                "src/plugins/home-integration-runtime.ts"
             );
             if (kind === "symlink") {
                 fs.unlinkSync(runtime);
@@ -751,7 +751,7 @@ test("generated ES5 host only installs a factory; fixed runtime source admission
             } else
                 fs.writeFileSync(
                     runtime,
-                    'import secret from "private-config"; export function installHomeIntegrationRuntime(){ return secret; }',
+                    'import secret from "private-config"; export function installHomeIntegrationRuntime(){ return secret; }'
                 );
             assert.throws(() => stageHomeIntegration(a.source, a.target));
             assert.equal(fs.existsSync(a.target), false);
@@ -764,13 +764,13 @@ test("validated Tizen file package uses only its actual boot base", () => {
     assert.equal(home.open(), true);
     assert.equal(
         f.scripts[0].src,
-        "file:///opt/apps/test/res/wgt/dist/home/host.js",
+        "file:///opt/apps/test/res/wgt/dist/home/host.js"
     );
     f.complete();
     const frame = f.frame();
     assert.equal(
         frame.src,
-        "file:///opt/apps/test/res/wgt/dist/home/index.html",
+        "file:///opt/apps/test/res/wgt/dist/home/index.html"
     );
     frame.onload();
     assert.equal(typeof frame.contentWindow.OTTHomeHost.close, "function");
@@ -828,7 +828,7 @@ test("non-file clients ignore package globals and keep fixed root assets", () =>
         f.frame().onload();
         assert.equal(
             typeof f.frame().contentWindow.OTTHomeHost.close,
-            "function",
+            "function"
         );
     }
 });
@@ -842,11 +842,11 @@ test("encoded package directory remains exact in script and frame admission", ()
     assert.equal(load().showHomeIntegration(f.w), true);
     assert.equal(
         f.scripts[0].src,
-        "file:///opt/apps/test%20package/res/wgt/dist/home/host.js",
+        "file:///opt/apps/test%20package/res/wgt/dist/home/host.js"
     );
     assert.equal(
         f.frame().src,
-        "file:///opt/apps/test%20package/res/wgt/dist/home/index.html",
+        "file:///opt/apps/test%20package/res/wgt/dist/home/index.html"
     );
     f.frame().onload();
     assert.equal(typeof f.frame().contentWindow.OTTHomeHost.close, "function");
@@ -881,7 +881,7 @@ test("symlink capability probe covers files and directories and suppresses only 
     assert.equal(probeSymlinks(capable), true);
     assert.deepEqual(
         capable.links.map((link) => link.type),
-        ["file", "dir"],
+        ["file", "dir"]
     );
     assert.equal(capable.cleaned, 1);
     for (const [code, failAt] of [
@@ -901,11 +901,11 @@ test("symlink capability probe covers files and directories and suppresses only 
     const cases = ["ancestor", "leaf", "directory", "hardlink", "import"];
     assert.deepEqual(
         symlinkCases(cases, ["directory", "hardlink", "import"], true),
-        cases,
+        cases
     );
     assert.deepEqual(
         symlinkCases(cases, ["directory", "hardlink", "import"], false),
-        ["directory", "hardlink", "import"],
+        ["directory", "hardlink", "import"]
     );
 });
 
@@ -948,7 +948,7 @@ test("unprivileged hosts run every non-link security check and probe symlinks on
         ])
             assert.ok(
                 child.stdout.includes(name),
-                "non-link coverage must remain visible: " + name,
+                "non-link coverage must remain visible: " + name
             );
     }
 });
