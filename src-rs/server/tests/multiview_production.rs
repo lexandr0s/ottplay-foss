@@ -671,12 +671,37 @@ impl FixtureReadStage {
     }
 }
 #[derive(Clone, Copy, Debug)]
+struct FixtureTransportClass {
+    timeout: bool,
+    connect: bool,
+    request: bool,
+    body: bool,
+    builder: bool,
+    decode: bool,
+    redirect: bool,
+}
+impl FixtureTransportClass {
+    fn from_error(error: &reqwest::Error) -> Self {
+        Self {
+            timeout: error.is_timeout(),
+            connect: error.is_connect(),
+            request: error.is_request(),
+            body: error.is_body(),
+            builder: error.is_builder(),
+            decode: error.is_decode(),
+            redirect: error.is_redirect(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 struct FixtureReadFailure {
     stage: FixtureReadStage,
     status: Option<u16>,
     response_bytes: Option<usize>,
     response_sha256: Option<[u8; 32]>,
     temporary_busy: bool,
+    transport: Option<FixtureTransportClass>,
 }
 impl FixtureReadFailure {
     fn without_body(
@@ -690,7 +715,18 @@ impl FixtureReadFailure {
             response_bytes,
             response_sha256: None,
             temporary_busy: false,
+            transport: None,
         }
+    }
+    fn transport_error(
+        stage: FixtureReadStage,
+        status: Option<u16>,
+        response_bytes: Option<usize>,
+        error: &reqwest::Error,
+    ) -> Self {
+        let mut failure = Self::without_body(stage, status, response_bytes);
+        failure.transport = Some(FixtureTransportClass::from_error(error));
+        failure
     }
     fn response(stage: FixtureReadStage, status: u16, bytes: &[u8]) -> Self {
         Self {
@@ -698,6 +734,7 @@ impl FixtureReadFailure {
             status: Some(status),
             response_bytes: Some(bytes.len()),
             response_sha256: Some(Sha256::digest(bytes).into()),
+            transport: None,
             // Retry only the exact closed media-admission response. Do not
             // parse or retain arbitrary server error bodies as retry signals.
             temporary_busy: stage == FixtureReadStage::HttpStatus
@@ -710,11 +747,17 @@ impl std::fmt::Display for FixtureReadFailure {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             out,
-            "stage={} status={:?} response_bytes={:?} response_sha256=",
+            "stage={} status={:?} response_bytes={:?} ",
             self.stage.code(),
             self.status,
             self.response_bytes
         )?;
+        if let Some(class) = self.transport {
+            write!(out, "transport_timeout={} transport_connect={} transport_request={} transport_body={} transport_builder={} transport_decode={} transport_redirect={} ",
+                class.timeout, class.connect, class.request, class.body,
+                class.builder, class.decode, class.redirect)?;
+        }
+        write!(out, "response_sha256=")?;
         if let Some(digest) = self.response_sha256 {
             for byte in digest {
                 write!(out, "{byte:02x}")?;
@@ -782,8 +825,8 @@ fn http_checked_with_timeout(
             if let Some(value) = body {
                 request = request.json(value);
             }
-            let mut response = request.send().await.map_err(|_| {
-                FixtureReadFailure::without_body(FixtureReadStage::HttpSend, None, None)
+            let mut response = request.send().await.map_err(|error| {
+                FixtureReadFailure::transport_error(FixtureReadStage::HttpSend, None, None, &error)
             })?;
             if response
                 .content_length()
@@ -797,11 +840,12 @@ fn http_checked_with_timeout(
                 let chunk = match response.chunk().await {
                     Ok(Some(chunk)) => chunk,
                     Ok(None) => break,
-                    Err(_) => {
-                        return Err(FixtureReadFailure::without_body(
+                    Err(error) => {
+                        return Err(FixtureReadFailure::transport_error(
                             FixtureReadStage::HttpBody,
                             Some(status),
                             Some(bytes.len()),
+                            &error,
                         ))
                     }
                 };
@@ -1664,6 +1708,47 @@ fn segment_video_proof_checks_count_timing_and_sampling_domain() {
     let (video, mut frames) = report(10);
     frames[9]["pkt_duration"] = json!(31 * 90000);
     assert!(segment_video_proof(&video, &frames).is_none());
+}
+
+#[test]
+fn request_transport_diagnostics_classify_actual_error_without_authority() {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap_or_else(|_| panic!("fixture HTTP client construction failed"));
+    let request = client
+        .get("http://127.0.0.1/")
+        .header("x-fixture-marker", "private-header-marker\n");
+    let error = match request.build() {
+        Err(error) => error.with_url(
+            reqwest::Url::parse(
+                "https://fixture.invalid/private-route?capability=transport-privacy-marker",
+            )
+            .expect("valid synthetic privacy URL"),
+        ),
+        Ok(_) => panic!("invalid fixture header was unexpectedly accepted"),
+    };
+    assert!(error.url().is_some());
+    let failure =
+        FixtureReadFailure::transport_error(FixtureReadStage::HttpSend, None, None, &error);
+    let class = failure.transport.expect("closed transport classification");
+    assert!(class.builder);
+    assert!(!failure.temporary_busy);
+    let now = Instant::now();
+    assert!(seed_busy_retry_delay(&failure, now, now + Duration::from_secs(1)).is_none());
+    let record = failure.to_string();
+    assert!(record.contains("transport_builder=true"));
+    assert!(record.ends_with("response_sha256=none"));
+    assert!(record.len() < 512);
+    for authority in [
+        "fixture.invalid",
+        "private-route",
+        "transport-privacy-marker",
+        "private-header-marker",
+        "://",
+    ] {
+        assert!(!record.contains(authority));
+    }
 }
 
 fn try_new_segment(
