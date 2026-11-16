@@ -719,8 +719,23 @@ impl LiveBackend {
                     .map_err(|_| BoundaryError::Unavailable)?
                     .creating = false;
                 return Err(match result {
-                    Ok(Err(error)) => media_error(error),
-                    _ => BoundaryError::Unavailable,
+                    Ok(Err(error)) => {
+                        // Core errors are closed enums; never log owner/config/source data.
+                        use std::io::Write as _;
+                        let _ = writeln!(
+                            std::io::stderr().lock(),
+                            "multiview_startup stage=core_session error={error:?}"
+                        );
+                        media_error(error)
+                    }
+                    _ => {
+                        use std::io::Write as _;
+                        let _ = writeln!(
+                            std::io::stderr().lock(),
+                            "multiview_startup stage=core_join error=join_failed"
+                        );
+                        BoundaryError::Unavailable
+                    }
                 });
             }
         };

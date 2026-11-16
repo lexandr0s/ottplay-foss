@@ -2236,6 +2236,61 @@ class MockMainTests(unittest.TestCase):
             self.assertFalse(any(row['name']=='production-normal-server' for row in attempt.driver.commands))
             self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
 
+    def test_selected_hardlinked_source_produces_single_link_same_hash_private_copy(self):
+        with Attempt() as attempt:
+            source=Path(attempt.supplied['mkfifo'])
+            os.link(source,attempt.directory/'mkfifo-package-hardlink')
+            self.assertEqual(source.stat().st_nlink,2)
+            attempt.run()
+            receipt=json.loads((attempt.output/'evidence/production-tool-custody.json').read_text())
+            tool=receipt['tools']['mkfifo']
+            self.assertEqual(tool['original']['nlink'],2)
+            self.assertEqual(tool['staged']['nlink'],1)
+            self.assertEqual(tool['original']['sha256'],tool['staged']['sha256'])
+            self.assertEqual(stat.S_IMODE(tool['staged']['mode']),0o500)
+            self.assertEqual(source.stat().st_nlink,2)
+
+    def test_hardlinked_source_link_count_or_content_mutation_during_copy_fails_closed(self):
+        for fault in ('link-count','content'):
+            with self.subTest(fault=fault), Attempt() as attempt:
+                source=Path(attempt.supplied['mkfifo'])
+                os.link(source,attempt.directory/'mkfifo-package-hardlink')
+                original_chmod=Path.chmod
+                fired=False
+                def chmod(path,mode,*args,fault=fault,original_chmod=original_chmod,source=source,attempt=attempt,**kwargs):
+                    nonlocal fired
+                    result=original_chmod(path,mode,*args,**kwargs)
+                    if not fired and mode==0o500 and path.name=='mkfifo' and path.parent.name.startswith('.ottplay-multiview-tools-'):
+                        fired=True
+                        if fault=='link-count':os.link(source,attempt.directory/'mkfifo-new-unapproved-hardlink')
+                        else:source.write_bytes(b'changed trusted supplier bytes')
+                    return result
+                with mock.patch.object(Path,'chmod',chmod), self.assertRaises(RuntimeError):attempt.run()
+                self.assertTrue(fired)
+                self.assertFalse(any(row['name']=='production-custody-ffmpeg-version' for row in attempt.driver.commands))
+                self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
+                cleanup=json.loads((attempt.output/'evidence/production-tool-custody-cleanup.json').read_text())
+                self.assertTrue(cleanup['cleanup_confirmed'])
+
+    def test_selected_source_unlinked_after_open_has_zero_links_and_is_denied(self):
+        with Attempt() as attempt:
+            source=Path(attempt.supplied['ffmpeg'])
+            inode=source.stat().st_ino
+            original_enter=ci.contextlib.ExitStack.enter_context
+            fired=False
+            def enter(stack,context):
+                nonlocal fired
+                value=original_enter(stack,context)
+                if hasattr(value,'fileno') and os.fstat(value.fileno()).st_ino==inode:
+                    source.unlink()
+                    self.assertEqual(os.fstat(value.fileno()).st_nlink,0)
+                    fired=True
+                return value
+            with mock.patch.object(ci.contextlib.ExitStack,'enter_context',enter), self.assertRaises(RuntimeError):attempt.run()
+            self.assertTrue(fired)
+            self.assertFalse(any(row['name']=='production-normal-server' for row in attempt.driver.commands))
+            self.assertFalse(attempt.terminal()['normal_server_mpegts_to_hls'])
+
     def test_mock_driver_log_names_are_exclusive_before_any_response_or_overwrite(self):
         with Attempt() as attempt:
             attempt.run()

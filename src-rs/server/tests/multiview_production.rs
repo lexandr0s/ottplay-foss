@@ -36,6 +36,37 @@ const PROFILE: &str = "http-mpegts-v1-640x360-10fps";
 const INPUTS: &str = "OTTPLAY_MULTIVIEW_PRODUCTION_INPUTS";
 use production_config::ProductionMode;
 
+thread_local! {
+    // Bound only this test thread's owned normal-server stderr, never an arbitrary file.
+    static FAILURE_STDERR_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+struct FailureStderrGuard;
+impl FailureStderrGuard {
+    fn install(root: &Path) -> Self {
+        FAILURE_STDERR_ROOT.with(|slot| {
+            assert!(
+                slot.borrow().is_none(),
+                "one owned normal fixture per thread"
+            );
+            *slot.borrow_mut() = Some(root.to_owned());
+        });
+        Self
+    }
+}
+impl Drop for FailureStderrGuard {
+    fn drop(&mut self) {
+        FAILURE_STDERR_ROOT.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+fn request_stderr_diagnostic() -> String {
+    FAILURE_STDERR_ROOT.with(|slot| {
+        slot.borrow().as_ref().map_or_else(
+            || "stderr_not_registered".to_owned(),
+            |root| fixture_stderr_diagnostic(root, &root.join("server.stderr")),
+        )
+    })
+}
+
 fn redacted_startup_tail(bytes: &[u8], root: &Path) -> String {
     // Redact before truncating, so a boundary cannot expose part of a secret.
     let text = String::from_utf8_lossy(bytes)
@@ -111,6 +142,17 @@ fn fixture_stderr_diagnostic(root: &Path, path: &Path) -> String {
 
 #[test]
 fn startup_diagnostic_tail_is_bounded_and_redacts_fixture_secrets_and_urls() {
+    assert_eq!(request_stderr_diagnostic(), "stderr_not_registered");
+    {
+        let _guard = FailureStderrGuard::install(Path::new("/nonexistent-owned-fixture"));
+        FAILURE_STDERR_ROOT.with(|slot| {
+            assert_eq!(
+                slot.borrow().as_deref(),
+                Some(Path::new("/nonexistent-owned-fixture"))
+            );
+        });
+    }
+    assert_eq!(request_stderr_diagnostic(), "stderr_not_registered");
     let root = Path::new("/owned/synthetic-fixture");
     let text=format!("{} {} production_fixture_signing_key_aaaaaaaaaaaaaaaa /owned/synthetic-fixture/operator.json http://fixture.invalid/path?token=hidden \u{1b}[31m invalid source credential policy",TOKEN,EXPIRING_TOKEN);
     let redacted = redacted_startup_tail(text.as_bytes(), root);
@@ -579,6 +621,13 @@ fn post(base: &str, endpoint: &str, token: &str, id: &str, body: &Value) -> Valu
         fixture_http()
             .https_control_requests
             .fetch_add(1, Ordering::Relaxed);
+    }
+    if status != 200 {
+        // Preserve the closed startup record before panic unwinds OwnedRoot.
+        eprintln!(
+            "normal_server_request_failure {}",
+            request_stderr_diagnostic()
+        );
     }
     assert_eq!(
         status,
@@ -1470,6 +1519,7 @@ fn normal_server_private_http_hls_renew_replace_and_cleanup() {
 fn run_normal_production(mode: ProductionMode) {
     let started = Instant::now();
     let mut root = OwnedRoot::new();
+    let _failure_stderr = FailureStderrGuard::install(&root.0);
     let mut tls = production_tls::SyntheticTls::generate(&root.0);
     install_http_client(Some(tls.ca_pem()));
     let public = root.0.join("public");

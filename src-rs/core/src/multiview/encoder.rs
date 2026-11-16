@@ -844,6 +844,47 @@ pub enum EncoderError {
     InvalidManifest,
 }
 
+// Private constructor diagnostics: no caller-supplied text is accepted.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn startup_failure_record(
+    stage: &'static str,
+    error: EncoderError,
+    elapsed_ms: u64,
+    detail: Option<EncoderFailureDetail>,
+    snapshot: Option<EncoderSnapshot>,
+) -> String {
+    format!("multiview_startup stage={stage} error={error:?} elapsed_ms={elapsed_ms} detail={detail:?} snapshot={snapshot:?}")
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod startup_record_tests {
+    #[test]
+    fn constructor_failure_record_is_closed_and_preserves_site_lane() {
+        use super::*;
+        let detail = EncoderFailureDetail {
+            error: EncoderError::Stalled,
+            site: EncoderFailureSite::SelectionFuture,
+            lane: EncoderFailureLane::Video,
+            selection_age: None,
+        };
+        let record = startup_failure_record(
+            "startup_wait",
+            EncoderError::Stalled,
+            2010,
+            Some(detail),
+            None,
+        );
+        assert!(record.contains("stage=startup_wait") && record.contains("error=Stalled"));
+        assert!(record.contains("SelectionFuture") && record.contains("lane: Video"));
+        assert!(!record.contains("://") && !record.contains('\n') && record.len() < 8192);
+        let early =
+            startup_failure_record("fifo_maker", EncoderError::Unsupported, 2000, None, None);
+        assert!(early.contains("stage=fifo_maker") && early.contains("error=Unsupported"));
+        assert!(early.contains("elapsed_ms=2000"));
+        assert!(early.contains("detail=None") && early.contains("snapshot=None"));
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct EncoderSnapshot {
     pub pid: u32,
@@ -1421,6 +1462,11 @@ mod runtime {
                         })
                 })
         }
+    }
+    struct StartupDiagnostic {
+        stage: &'static str,
+        started: Instant,
+        terminal: Option<(Option<EncoderFailureDetail>, EncoderSnapshot)>,
     }
     struct Shared {
         stop: Arc<AtomicBool>,
@@ -2592,6 +2638,47 @@ mod runtime {
             granted_service: bool,
             returned_capacity: Option<&Arc<Mutex<Option<Permit>>>>,
         ) -> Result<Self, EncoderError> {
+            let mut diagnostic = StartupDiagnostic {
+                stage: "config_validation",
+                started: Instant::now(),
+                terminal: None,
+            };
+            let result = Self::start_audio_inner(
+                config,
+                video,
+                audio,
+                stop,
+                granted_service,
+                returned_capacity,
+                &mut diagnostic,
+            );
+            if let Err(error) = &result {
+                // All diagnostic inputs are closed enums/numeric state, never
+                // config, tool paths, source URLs or arbitrary process stderr.
+                let (detail, snapshot) = diagnostic
+                    .terminal
+                    .map_or((None, None), |(detail, snapshot)| (detail, Some(snapshot)));
+                let elapsed_ms = diagnostic
+                    .started
+                    .elapsed()
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64;
+                let record =
+                    startup_failure_record(diagnostic.stage, *error, elapsed_ms, detail, snapshot);
+                use std::io::Write as _;
+                let _ = writeln!(std::io::stderr().lock(), "{record}");
+            }
+            result
+        }
+        fn start_audio_inner(
+            config: EncoderConfig,
+            video: VideoInput,
+            audio: AudioInput,
+            stop: Arc<AtomicBool>,
+            granted_service: bool,
+            returned_capacity: Option<&Arc<Mutex<Option<Permit>>>>,
+            diagnostic: &mut StartupDiagnostic,
+        ) -> Result<Self, EncoderError> {
             if stop.load(Ordering::Acquire) {
                 return Err(EncoderError::Cancelled);
             }
@@ -2616,6 +2703,7 @@ mod runtime {
             {
                 return Err(EncoderError::InvalidConfig);
             }
+            diagnostic.stage = "root_validation";
             let root = config
                 .output_root
                 .canonicalize()
@@ -2623,6 +2711,7 @@ mod runtime {
             if !root.is_dir() || !config.ffmpeg.is_absolute() || !config.mkfifo.is_absolute() {
                 return Err(EncoderError::InvalidConfig);
             }
+            diagnostic.stage = "tool_validation";
             let ffmpeg = config
                 .ffmpeg
                 .canonicalize()
@@ -2643,6 +2732,7 @@ mod runtime {
                 VideoInput::Capture(video) if video.bytes == expected => {}
                 _ => return Err(EncoderError::InvalidConfig),
             }
+            diagnostic.stage = "capacity";
             let permit = match returned_capacity {
                 Some(slot) => PermitTicket::returning(slot)?,
                 None => PermitTicket::direct(Permit::acquire()?),
@@ -2661,6 +2751,7 @@ mod runtime {
                 .map_err(|_| EncoderError::Io)?
                 .as_nanos();
             let directory = root.join(format!("scene-{}-{generation}-{nonce}", std::process::id()));
+            diagnostic.stage = "output_directory";
             DirBuilder::new()
                 .mode(0o700)
                 .create(&directory)
@@ -2672,6 +2763,7 @@ mod runtime {
             };
             let fifo = directory.join("audio.pcm");
             let progress_fifo = directory.join("progress.pipe");
+            diagnostic.stage = "fifo_maker";
             let mut maker = ChildGuard(
                 Some(
                     Command::new(mkfifo)
@@ -2720,6 +2812,7 @@ mod runtime {
                 .custom_flags(NONBLOCK)
                 .open(&fifo)
                 .map_err(|_| EncoderError::Io)?;
+            diagnostic.stage = "audio_pipe";
             let audio_writer = OpenOptions::new()
                 .write(true)
                 .custom_flags(NONBLOCK)
@@ -2817,10 +2910,12 @@ mod runtime {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
+            diagnostic.stage = "encoder_spawn";
             let mut child = ChildGuard(
                 Some(command.spawn().map_err(|_| EncoderError::Unsupported)?),
                 permit.cleanup_uncertain.clone(),
             );
+            diagnostic.stage = "video_pipe";
             let video_writer = child
                 .0
                 .as_mut()
@@ -2861,6 +2956,7 @@ mod runtime {
                 audio_samples_written: AtomicU64::new(0),
                 video_frames_written: AtomicU64::new(0),
             });
+            diagnostic.stage = "feed_threads";
             let mut encoder = Self {
                 shared: shared.clone(),
                 directory: directory.clone(),
@@ -2908,6 +3004,7 @@ mod runtime {
                     return Err(EncoderError::Io);
                 }
             }
+            diagnostic.stage = "monitor_thread";
             let shared_monitor = shared.clone();
             match thread::Builder::new()
                 .name("multiview-encoder".into())
@@ -2927,6 +3024,7 @@ mod runtime {
                     return Err(EncoderError::Io);
                 }
             }
+            diagnostic.stage = "startup_wait";
             loop {
                 if shared.capture_startup.as_ref().is_some_and(|startup| {
                     !startup.constructor_complete.load(Ordering::Acquire)
@@ -2946,9 +3044,10 @@ mod runtime {
                         return Ok(encoder);
                     }
                     EncoderState::Failed => {
+                        diagnostic.terminal = Some((encoder.failure_detail(), encoder.snapshot()));
                         return Err(lock(&shared.error)
                             .map(|detail| detail.error)
-                            .unwrap_or(EncoderError::ProcessFailed))
+                            .unwrap_or(EncoderError::ProcessFailed));
                     }
                     _ if shared.stop.load(Ordering::Acquire) => {
                         return Err(EncoderError::Cancelled)

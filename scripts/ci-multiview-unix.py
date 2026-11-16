@@ -1175,10 +1175,14 @@ def production_tool_custody(driver, budget, command, tools, output):
                 source = Path(current['path'])
                 stream = stack.enter_context(os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb'))
                 info = os.fstat(stream.fileno())
-                require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid in (0, os.geteuid())
+                # OS package/multicall suppliers may have stable hardlinks.
+                # Only our private destination role requires a single link.
+                require(stat.S_ISREG(info.st_mode) and info.st_nlink >= 1 and info.st_uid in (0, os.geteuid())
                         and info.st_mode & 0o111 and not info.st_mode & 0o022
                         and 0 < info.st_size == current['bytes'] <= 64 * 1024**2
-                        and info.st_dev == current['device'] and info.st_ino == current['inode'], 'Selected source FD is not trusted')
+                        and (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_mtime_ns, info.st_ctime_ns) ==
+                            (current['device'], current['inode'], current['mode'], current['nlink'], current['mtime_ns'], current['ctime_ns']),
+                        'Selected source FD is not trusted')
                 opened[name] = (stream, info)
                 originals[name] = current
             total = sum(info.st_size for _, info in opened.values())
@@ -1222,6 +1226,8 @@ def production_tool_custody(driver, budget, command, tools, output):
                 require(info.st_uid == os.geteuid() and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o500
                         and current['sha256'] == originals[name]['sha256'] and current['bytes'] == before.st_size,
                         'Staged executable custody differs')
+                require(system_tool_identity(Path(tools[name]['requested_path']), budget, cap=64 * 1024**2) == originals[name],
+                        'Selected supplier path changed during copy')
                 staged[name] = current
                 receipt['tools'][name] = {'original': originals[name], 'staged': current}
             require(activation_home_preflight(driver, budget) == home_proof, 'Tool HOME ancestry changed')
