@@ -1881,6 +1881,7 @@ function saveBundleReport(root, optimizer, modules, measured, sets) {
         companionDiagnosticsAllowance: COMPANION_DIAGNOSTICS_ALLOWANCE,
         desktopFavoritesKeyAllowance: DESKTOP_FAVORITES_KEY_ALLOWANCE,
         desktopVideoQueueAllowance: DESKTOP_VIDEO_QUEUE_ALLOWANCE,
+        desktopPlaylistDropAllowance: DESKTOP_PLAYLIST_DROP_ALLOWANCE,
         epgPresentationEntryAllowance: EPG_PRESENTATION_ENTRY_ALLOWANCE,
         favoritesCategoryPersistenceAllowance:
             FAVORITES_CATEGORY_PERSISTENCE_ALLOWANCE,
@@ -2247,6 +2248,7 @@ function writeBuildBundleReport(
             complete: !inputErrors.length,
             desktopFavoritesKeyAllowance: DESKTOP_FAVORITES_KEY_ALLOWANCE,
             desktopVideoQueueAllowance: DESKTOP_VIDEO_QUEUE_ALLOWANCE,
+            desktopPlaylistDropAllowance: DESKTOP_PLAYLIST_DROP_ALLOWANCE,
             diagnostic: true,
             epgPresentationEntryAllowance: EPG_PRESENTATION_ENTRY_ALLOWANCE,
             favoritesCategoryPersistenceAllowance:
@@ -2392,6 +2394,7 @@ module.exports = {
     DESKTOP_DROP_ALLOWANCE,
     DESKTOP_FAVORITES_KEY_ALLOWANCE,
     DESKTOP_VIDEO_QUEUE_ALLOWANCE,
+    DESKTOP_PLAYLIST_DROP_ALLOWANCE,
     EPG_PRESENTATION_ENTRY_ALLOWANCE,
     FAVORITES_CATEGORY_PERSISTENCE_ALLOWANCE,
     FAVORITES_RECOVERY_ENTRY_ALLOWANCE,
