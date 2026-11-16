@@ -29,6 +29,12 @@ EXPECTED_TESTS = (
 EXPECTED_PRODUCTION_TEST = 'normal_server_private_http_mpegts_renew_replace_and_cleanup'
 EXPECTED_HLS_PRODUCTION_TEST = 'normal_server_private_http_hls_renew_replace_and_cleanup'
 
+EXPECTED_BROKER_CLOSE_DIAGNOSTIC_TESTS = frozenset({
+    'broker::live::close_diagnostic_tests::operation_receipts_and_sink_release_precede_a_blocked_diagnostic_writer',
+    'broker::live::close_diagnostic_tests::first_close_record_preserves_initiator_and_output_across_retirement',
+    'broker::live::close_diagnostic_tests::close_observation_distinguishes_live_authority_failure_and_preserves_closed_trace',
+})
+
 EXPECTED_BROKER_PLAY_DIAGNOSTIC_TESTS = frozenset({
     'broker::live::play_diagnostic_tests::play_failure_record_preserves_numeric_producer_evidence_without_identity',
     'broker::live::play_diagnostic_tests::play_closed_classes_distinguish_retirement_decode_and_commit_failures',
@@ -1081,6 +1087,37 @@ class BoundaryContracts(unittest.TestCase):
                         attempt.run()
                         self.assertTrue(any(row['name'] == 'broker-ordinary' for row in attempt.driver.commands))
 
+    def test_first_close_diagnostics_are_mandatory_and_nonignored(self):
+        required = EXPECTED_BROKER_CLOSE_DIAGNOSTIC_TESTS
+        frozen = ci.BROKER_TESTS
+        self.assertEqual(len(required), 3)
+        self.assertTrue(required <= frozen)
+        # Exercise the real exact-inventory equality, not a smaller synthetic set.
+        variants = [(frozenset(), frozenset())]
+        variants += [(frozenset({name}), frozenset()) for name in sorted(required)]
+        variants += [(required, frozenset())]
+        variants += [(frozenset(), frozenset({name})) for name in sorted(required)]
+        for missing, ignored in variants:
+            with self.subTest(missing=missing, ignored=ignored), Attempt() as attempt:
+                original = attempt.response
+                def response(name, args, original=original, missing=missing, ignored=ignored):
+                    if name == 'broker-inventory':
+                        return ''.join(value + ': test\n' for value in sorted(frozen - missing))
+                    if name == 'broker-ignored-inventory':
+                        return ''.join(value + ': test\n' for value in sorted(ignored))
+                    if name == 'broker-ordinary':
+                        return suite_passed(sorted(frozen))
+                    return original(name, args)
+                with mock.patch.object(ci, 'BROKER_TESTS', frozen), mock.patch.object(attempt, 'response', side_effect=response):
+                    if missing or ignored:
+                        with self.assertRaises(RuntimeError):
+                            attempt.run()
+                        self.assertIn('Exact ordinary broker inventory', attempt.terminal()['error'])
+                        self.assertFalse(any(row['name'] == 'broker-ordinary' for row in attempt.driver.commands))
+                    else:
+                        attempt.run()
+                        self.assertTrue(any(row['name'] == 'broker-ordinary' for row in attempt.driver.commands))
+
     def test_both_existing_shutdown_regressions_must_be_present_and_nonignored(self):
         expected = frozenset({
             'broker::live::tests::shutdown_does_not_claim_unconfirmed_create_custody_is_clean',
@@ -1764,12 +1801,12 @@ class ParsingTests(unittest.TestCase):
     def test_pinned_guard_and_exact_existing_fixture_inventory(self):
         self.assertEqual(hashlib.sha256(REFERENCE.read_bytes()).hexdigest(), ci.GUARD_SHA256)
         self.assertEqual(tuple(name for name, _ in ci.TESTS), EXPECTED_TESTS)
-        self.assertEqual(len(ci.BROKER_TESTS - ci.BROKER_PRODUCTION_TESTS - ci.BROKER_HLS_TESTS - ci.BROKER_SHUTDOWN_TESTS - EXPECTED_BROKER_PLAY_DIAGNOSTIC_TESTS), 55)
-        self.assertEqual(hashlib.sha256("\n".join(sorted(ci.BROKER_TESTS - ci.BROKER_PRODUCTION_TESTS - ci.BROKER_HLS_TESTS - ci.BROKER_SHUTDOWN_TESTS - EXPECTED_BROKER_PLAY_DIAGNOSTIC_TESTS)).encode("utf8")).hexdigest(),
+        self.assertEqual(len(ci.BROKER_TESTS - ci.BROKER_PRODUCTION_TESTS - ci.BROKER_HLS_TESTS - ci.BROKER_SHUTDOWN_TESTS - EXPECTED_BROKER_PLAY_DIAGNOSTIC_TESTS - EXPECTED_BROKER_CLOSE_DIAGNOSTIC_TESTS), 55)
+        self.assertEqual(hashlib.sha256("\n".join(sorted(ci.BROKER_TESTS - ci.BROKER_PRODUCTION_TESTS - ci.BROKER_HLS_TESTS - ci.BROKER_SHUTDOWN_TESTS - EXPECTED_BROKER_PLAY_DIAGNOSTIC_TESTS - EXPECTED_BROKER_CLOSE_DIAGNOSTIC_TESTS)).encode("utf8")).hexdigest(),
                          "6e92eb3d53b6de4ae38ec7bdfdef92883e87f4a2e887efe2c4539b20a1fc4f9f")
 
     def test_exact_mandatory_production_broker_inventory(self):
-        self.assertEqual(len(ci.BROKER_TESTS), 73)
+        self.assertEqual(len(ci.BROKER_TESTS), 76)
         self.assertEqual(len(ci.BROKER_PRODUCTION_TESTS), 13)
         self.assertEqual(ci.BROKER_HLS_TESTS, frozenset({'broker::live::tests::production_adapter_set_is_unique_explicit_and_keeps_other_guards'}))
         self.assertEqual(ci.BROKER_PRODUCTION_TESTS, frozenset({
@@ -1787,7 +1824,7 @@ class ParsingTests(unittest.TestCase):
             'broker::production_tests::revoked_output_and_credential_cannot_extend_lease',
             'broker::production_tests::stale_binding_or_credential_revision_cannot_renew',
         }))
-        self.assertEqual(hashlib.sha256("\n".join(sorted(ci.BROKER_TESTS - ci.BROKER_PRODUCTION_TESTS - ci.BROKER_HLS_TESTS - ci.BROKER_SHUTDOWN_TESTS - EXPECTED_BROKER_PLAY_DIAGNOSTIC_TESTS)).encode("utf8")).hexdigest(),
+        self.assertEqual(hashlib.sha256("\n".join(sorted(ci.BROKER_TESTS - ci.BROKER_PRODUCTION_TESTS - ci.BROKER_HLS_TESTS - ci.BROKER_SHUTDOWN_TESTS - EXPECTED_BROKER_PLAY_DIAGNOSTIC_TESTS - EXPECTED_BROKER_CLOSE_DIAGNOSTIC_TESTS)).encode("utf8")).hexdigest(),
                          "6e92eb3d53b6de4ae38ec7bdfdef92883e87f4a2e887efe2c4539b20a1fc4f9f")
 
     def test_fd_must_be_in_input_section(self):

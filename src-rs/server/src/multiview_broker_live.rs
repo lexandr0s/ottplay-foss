@@ -15,7 +15,7 @@ use ottplay_core::multiview::{
         },
     },
     decoder::{self, GrantedStream},
-    encoder::EncoderState,
+    encoder::{EncoderFailureDetail, EncoderState},
     geometry::{CanvasSpec, ImportedRect, OverlapPolicy, ValidatedGeometry},
     persistent::{self, Session},
 };
@@ -94,6 +94,7 @@ struct Control {
     closing: bool,
     closed: bool,
     cleanup_failed: bool,
+    first_close: Option<FirstCloseRecord>,
 }
 struct SourceOwner {
     factory: StreamFactory,
@@ -106,6 +107,186 @@ struct Retained {
 struct Pending {
     cancel: CancellationToken,
     done: watch::Receiver<bool>,
+}
+
+// Copy-only diagnostic custody: no source IDs, paths, strings or resource owners.
+// Recording does not authorize closure. Existing decisions and cleanup remain authoritative.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseReason {
+    HardDeadline,
+    SoftDeadline,
+    SoftDeadlineUnavailable,
+    CredentialUnavailable,
+    AlreadyClosed,
+    OutputLeaseExpired,
+    AlreadyClosing,
+    CleanupFailed,
+    SourceRevoked,
+    CoreOutput,
+    RegistryBinding,
+    Shutdown,
+    CloseRequested,
+}
+impl CloseReason {
+    fn code(self) -> &'static str {
+        match self {
+            Self::HardDeadline => "hard_deadline",
+            Self::SoftDeadline => "soft_deadline",
+            Self::SoftDeadlineUnavailable => "soft_deadline_unavailable",
+            Self::CredentialUnavailable => "credential_unavailable",
+            Self::AlreadyClosed => "already_closed",
+            Self::OutputLeaseExpired => "output_lease_expired",
+            Self::AlreadyClosing => "already_closing",
+            Self::CleanupFailed => "cleanup_failed",
+            Self::SourceRevoked => "source_revoked",
+            Self::CoreOutput => "core_output",
+            Self::RegistryBinding => "registry_binding",
+            Self::Shutdown => "shutdown",
+            Self::CloseRequested => "close_requested",
+        }
+    }
+}
+#[derive(Clone, Copy)]
+struct OutputObservation {
+    state: EncoderState,
+    frames: u64,
+    video_frames_written: u64,
+    audio_samples_written: u64,
+    monotonic_millis: u64,
+    hls_sequence: Option<u64>,
+    failure: Option<EncoderFailureDetail>,
+}
+impl OutputObservation {
+    fn capture(core: &Session) -> Self {
+        let snapshot = core.snapshot();
+        Self::from_snapshot(&snapshot, core.output_failure_detail())
+    }
+    fn from_snapshot(
+        snapshot: &persistent::Snapshot,
+        failure: Option<EncoderFailureDetail>,
+    ) -> Self {
+        Self {
+            state: snapshot.output_state,
+            frames: snapshot.output_frames,
+            video_frames_written: snapshot.video_frames_written,
+            audio_samples_written: snapshot.audio_samples_written,
+            monotonic_millis: snapshot.monotonic_millis,
+            hls_sequence: snapshot.hls_sequence,
+            failure,
+        }
+    }
+}
+#[derive(Clone, Copy)]
+struct FirstCloseRecord {
+    reason: CloseReason,
+    output: Option<OutputObservation>,
+}
+fn remember_first_close(
+    first: &mut Option<FirstCloseRecord>,
+    reason: CloseReason,
+    capture: impl FnOnce() -> Option<OutputObservation>,
+) {
+    if first.is_none() {
+        *first = Some(FirstCloseRecord {
+            reason,
+            output: capture(),
+        });
+    }
+}
+#[derive(Clone, Copy)]
+enum CloseObservationStage {
+    ProbeFailure,
+}
+impl CloseObservationStage {
+    fn code(self) -> &'static str {
+        match self {
+            Self::ProbeFailure => "probe_failure",
+        }
+    }
+}
+#[derive(Clone, Copy)]
+struct CloseObservation {
+    first: Option<FirstCloseRecord>,
+    output: Option<OutputObservation>,
+    session_cancelled: bool,
+    closing: bool,
+    closed: bool,
+    cleanup_failed: bool,
+}
+#[derive(Clone, Copy)]
+struct CloseDiagnostic {
+    stage: CloseObservationStage,
+    observation: Option<CloseObservation>,
+    cleanup_confirmed: bool,
+}
+impl std::fmt::Display for CloseDiagnostic {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let observed = self.observation;
+        let first = observed.and_then(|value| value.first);
+        let current = observed.and_then(|value| value.output);
+        let prior = first.and_then(|value| value.output);
+        write!(out, "multiview_close stage={} observation_present={} first_reason={} session_cancelled={} closing={} closed={} cleanup_failed={} cleanup_scope={} cleanup_confirmed={}",
+            self.stage.code(), observed.is_some(), first.map_or("none", |value| value.reason.code()),
+            observed.is_some_and(|value| value.session_cancelled), observed.is_some_and(|value| value.closing),
+            observed.is_some_and(|value| value.closed), observed.is_some_and(|value| value.cleanup_failed),
+            match self.stage { CloseObservationStage::ProbeFailure => "source",  }, self.cleanup_confirmed)?;
+        // These Debug values are exclusively closed enums and bounded numeric
+        // structs; never format Session, Snapshot, a request or an OS error.
+        for (prefix, output) in [("first", prior), ("observed", current)] {
+            write!(out, " {prefix}_core_present={} {prefix}_state={:?} {prefix}_frames={} {prefix}_video={} {prefix}_audio={} {prefix}_mono_ms={} {prefix}_hls={:?} {prefix}_detail={:?}",
+                output.is_some(), output.map(|value| value.state), output.map_or(0, |value| value.frames),
+                output.map_or(0, |value| value.video_frames_written), output.map_or(0, |value| value.audio_samples_written),
+                output.map_or(0, |value| value.monotonic_millis), output.and_then(|value| value.hls_sequence),
+                output.and_then(|value| value.failure))?;
+        }
+        Ok(())
+    }
+}
+type DeferredCloseDiagnostic = Arc<Mutex<Option<CloseDiagnostic>>>;
+
+// The caller's complete callback publishes the actual operation receipt and
+// drops its sender. Only then take the Copy record; drop all sink custody before
+// entering a potentially blocking stderr writer. No diagnostic worker is added.
+fn complete_then_emit_close(
+    complete: impl FnOnce(),
+    diagnostic: Option<DeferredCloseDiagnostic>,
+    emit: impl FnOnce(CloseDiagnostic),
+) {
+    complete();
+    let record = diagnostic.and_then(|sink| {
+        let record = {
+            let mut pending = sink.lock().ok()?;
+            pending.take()
+        };
+        drop(sink);
+        record
+    });
+    if let Some(record) = record {
+        emit(record);
+    }
+}
+
+fn write_close_diagnostic(record: CloseDiagnostic) {
+    #[cfg(panic = "unwind")]
+    {
+        let _ = std::panic::catch_unwind(|| eprintln!("{record}"));
+    }
+    #[cfg(panic = "abort")]
+    {
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr().lock(), "{record}");
+    }
+}
+fn observe_close(session: &LiveSession) -> Option<CloseObservation> {
+    let control = session.control.lock().ok()?;
+    Some(CloseObservation {
+        first: control.first_close,
+        output: control.core.as_ref().map(OutputObservation::capture),
+        session_cancelled: session.cancel.is_cancelled(),
+        closing: control.closing,
+        closed: control.closed,
+        cleanup_failed: control.cleanup_failed,
+    })
 }
 
 fn acknowledge_retired_outputs(
@@ -151,6 +332,13 @@ fn project_slot_source_refs(
 }
 
 impl Control {
+    fn remember_close(&mut self, reason: CloseReason) {
+        let core = &self.core;
+        remember_first_close(&mut self.first_close, reason, || {
+            core.as_ref().map(OutputObservation::capture)
+        });
+    }
+
     fn authority_invalid(&self) -> bool {
         self.sources.values().any(|source| {
             source
@@ -613,7 +801,8 @@ impl LiveBackend {
                 };
                 for session in &sessions {
                     session.cancel.cancel();
-                    if let Ok(state) = session.control.lock() {
+                    if let Ok(mut state) = session.control.lock() {
+                        state.remember_close(CloseReason::Shutdown);
                         for source in state.sources.values() {
                             source.factory.cancel();
                         }
@@ -739,6 +928,19 @@ impl LiveBackend {
     where
         F: Future<Output = Result<Reply, BoundaryError>> + Send + 'static,
     {
+        self.operation_with_diagnostic(key, digest, future, None)
+            .await
+    }
+    async fn operation_with_diagnostic<F>(
+        &self,
+        key: String,
+        digest: [u8; 32],
+        future: F,
+        diagnostic: Option<DeferredCloseDiagnostic>,
+    ) -> Result<Reply, BoundaryError>
+    where
+        F: Future<Output = Result<Reply, BoundaryError>> + Send + 'static,
+    {
         let mut receive = {
             let mut host = self.host.lock().map_err(|_| BoundaryError::Unavailable)?;
             if host.stopping {
@@ -770,7 +972,16 @@ impl LiveBackend {
                         .catch_unwind()
                         .await
                         .unwrap_or(Err(BoundaryError::Unavailable));
-                    completed.send_replace(Some(result));
+                    // The awaited future has returned and dropped its captures:
+                    // Play already removed Pending and published its done receipt.
+                    complete_then_emit_close(
+                        move || {
+                            completed.send_replace(Some(result));
+                            drop(completed);
+                        },
+                        diagnostic,
+                        write_close_diagnostic,
+                    );
                 });
                 receive
             }
@@ -1011,6 +1222,7 @@ impl LiveBackend {
                 closing: false,
                 closed: false,
                 cleanup_failed: false,
+                first_close: None,
             }),
             close_receipt: Mutex::new(None),
         });
@@ -1031,34 +1243,51 @@ impl LiveBackend {
             let mut retirement_attempts = 0u8;
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                let expired = Instant::now() >= watchdog_session.end
-                    || watchdog_session
+                // Keep the original left-to-right checks and short-circuiting.
+                // Only the first already-required close captures extra scalars.
+                let expired = if Instant::now() >= watchdog_session.end {
+                    Some(CloseReason::HardDeadline)
+                } else {
+                    let soft = watchdog_session
                         .soft_end
                         .lock()
-                        .map_or(true, |end| Instant::now() >= *end)
-                    || watchdog_broker
-                        .credential_remaining_ms(&watchdog_session.owner)
-                        .is_err();
-                let invalid = watchdog_session.control.lock().map_or(true, |c| {
-                    c.closed
-                        || c.output.as_ref().is_some_and(|output| {
+                        .map_or(Some(CloseReason::SoftDeadlineUnavailable), |end| {
+                            (Instant::now() >= *end).then_some(CloseReason::SoftDeadline)
+                        });
+                    soft.or_else(|| {
+                        watchdog_broker
+                            .credential_remaining_ms(&watchdog_session.owner)
+                            .is_err()
+                            .then_some(CloseReason::CredentialUnavailable)
+                    })
+                };
+                let invalid = watchdog_session.control.lock().map_or(true, |mut c| {
+                    let reason =
+                        if c.closed {
+                            Some(CloseReason::AlreadyClosed)
+                        } else if c.output.as_ref().is_some_and(|output| {
                             watchdog_broker.live_output_remaining(output) == 0
-                        })
-                        || c.closing
-                        || c.cleanup_failed
-                        || c.sources.values().any(|s| {
+                        }) {
+                            Some(CloseReason::OutputLeaseExpired)
+                        } else if c.closing {
+                            Some(CloseReason::AlreadyClosing)
+                        } else if c.cleanup_failed {
+                            Some(CloseReason::CleanupFailed)
+                        } else if c.sources.values().any(|s| {
                             s.factory
                                 .reservation()
                                 .revoked()
                                 .load(std::sync::atomic::Ordering::Acquire)
-                        })
-                        || c.core.as_ref().is_some_and(|core| {
+                        }) {
+                            Some(CloseReason::SourceRevoked)
+                        } else if c.core.as_ref().is_some_and(|core| {
                             matches!(
                                 core.snapshot().output_state,
                                 EncoderState::Failed | EncoderState::Stopped
                             )
-                        })
-                        || c.bindings.keys().next().is_none_or(|slot| {
+                        }) {
+                            Some(CloseReason::CoreOutput)
+                        } else if c.bindings.keys().next().is_none_or(|slot| {
                             task.registry
                                 .current_binding(
                                     &watchdog_session.owner.principal,
@@ -1066,14 +1295,19 @@ impl LiveBackend {
                                     *slot,
                                 )
                                 .is_err()
-                        })
+                        }) {
+                            Some(CloseReason::RegistryBinding)
+                        } else {
+                            None
+                        };
+                    if let Some(first_reason) = expired.or(reason) {
+                        c.remember_close(first_reason);
+                    }
+                    reason.is_some()
                 });
-                if expired || invalid {
-                    if task
-                        .close_owned(&watchdog_broker, &watchdog_session)
-                        .await
-                        .is_ok()
-                    {
+                if expired.is_some() || invalid {
+                    let closed = task.close_owned(&watchdog_broker, &watchdog_session).await;
+                    if closed.is_ok() {
                         break;
                     }
                     retirement_attempts += 1;
@@ -1338,12 +1572,25 @@ impl LiveBackend {
         let task = self.clone();
         let task_broker = broker.clone();
         let task_owner = owner.clone();
+        let diagnostic = Arc::new(Mutex::new(None));
+        let task_diagnostic = diagnostic.clone();
         let result = self
-            .operation(key, body_digest, async move {
-                task.control_owned(task_broker, task_owner, request, request_id)
+            .operation_with_diagnostic(
+                key,
+                body_digest,
+                async move {
+                    task.control_owned(
+                        task_broker,
+                        task_owner,
+                        request,
+                        request_id,
+                        task_diagnostic,
+                    )
                     .await
                     .map(Reply::Controlled)
-            })
+                },
+                Some(diagnostic),
+            )
             .await?;
         broker.credential_remaining_ms(&owner)?;
         match result {
@@ -1357,6 +1604,7 @@ impl LiveBackend {
         owner: Authenticated,
         request: ControlRequest,
         operation_id: String,
+        diagnostic: DeferredCloseDiagnostic,
     ) -> Result<ControlResponse, BoundaryError> {
         if request.version != wire::VERSION {
             return Err(BoundaryError::Invalid);
@@ -1414,8 +1662,14 @@ impl LiveBackend {
         self.ensure_context(&owner, &request.context)?;
         match request.op {
             ControlOp::Play { input_grant } => {
-                self.play(&broker, &session, &request.context, &input_grant)
-                    .await?
+                self.play(
+                    &broker,
+                    &session,
+                    &request.context,
+                    &input_grant,
+                    &diagnostic,
+                )
+                .await?
             }
             ControlOp::Stop {} => {
                 self.stop(&broker, &session, &request.context, &next_native)
@@ -1528,6 +1782,7 @@ impl LiveBackend {
         session: &Arc<LiveSession>,
         context: &Binding,
         grant: &str,
+        diagnostic: &DeferredCloseDiagnostic,
     ) -> Result<(), BoundaryError> {
         let started = Instant::now();
         let slot = context.native_expected.slot_id;
@@ -1586,6 +1841,7 @@ impl LiveBackend {
             preparation,
             cancel,
             started,
+            diagnostic,
         ))
         .catch_unwind()
         .await;
@@ -1617,6 +1873,7 @@ impl LiveBackend {
         preparation: persistent::StreamPreparation,
         cancel: CancellationToken,
         started: Instant,
+        diagnostic: &DeferredCloseDiagnostic,
     ) -> Result<(), BoundaryError> {
         let source = match self
             .sources
@@ -1748,8 +2005,20 @@ impl LiveBackend {
         let (preparation, granted, info) = match probed {
             Ok((p, g, Ok(info))) if joined => (p, g, info),
             _ => {
+                // Copy before factory cleanup can obscure the initiating state.
+                // The retained first-close record survives Core removal.
+                let observation = observe_close(session);
                 let cleaned = factory.finish().await.is_ok();
                 self.finish_reservation(session, &reservation, cleaned, true);
+                // Store scalars only. Emission must wait for Pending/done and
+                // operation completion, which the outer owned task publishes.
+                if let Ok(mut record) = diagnostic.lock() {
+                    record.get_or_insert(CloseDiagnostic {
+                        stage: CloseObservationStage::ProbeFailure,
+                        observation,
+                        cleanup_confirmed: cleaned,
+                    });
+                }
                 return Err(BoundaryError::Unavailable);
             }
         };
@@ -2194,6 +2463,7 @@ impl LiveBackend {
             if state.closing {
                 return Err(BoundaryError::Conflict);
             }
+            state.remember_close(CloseReason::CloseRequested);
             state.closing = true;
             session.cancel.cancel();
             broker.revoke_output(&session.id)?;
@@ -3251,5 +3521,221 @@ mod play_diagnostic_tests {
             assert!(text.contains("producer_present=false producer_bytes=0"));
             assert!(text.len() < 320 && text.is_ascii() && !text.contains('\n'));
         }
+    }
+}
+
+#[cfg(test)]
+mod close_diagnostic_tests {
+    use super::*;
+    use ottplay_core::multiview::encoder::{
+        EncoderError, EncoderFailureLane, EncoderFailureSite, EncoderWriteFailure,
+        EncoderWritePhase, EncoderWriteScope,
+    };
+
+    fn snapshot(state: EncoderState) -> persistent::Snapshot {
+        persistent::Snapshot {
+            runtime: 101,
+            geometry_revision: 2,
+            focus_revision: 3,
+            audio_revision: 4,
+            focus_slot: 0,
+            audio_policy: persistent::AudioPolicy::FollowsFocus,
+            audio_slot: Some(0),
+            encoder_pid: 54321,
+            output_generation: 67890,
+            output_frames: 12,
+            output_state: state,
+            hls_sequence: Some(7),
+            hls_last_update_millis: 1300,
+            audio_samples_written: 249600,
+            video_frames_written: 13,
+            slots: Vec::new(),
+            monotonic_millis: 1340,
+            audio_callback_misses: 0,
+        }
+    }
+    fn write_failure() -> EncoderFailureDetail {
+        EncoderFailureDetail {
+            error: EncoderError::Stalled,
+            site: EncoderFailureSite::WriteAbsolute,
+            lane: EncoderFailureLane::Video,
+            selection_age: None,
+            write_failure: Some(EncoderWriteFailure {
+                phase: EncoderWritePhase::Partial,
+                scope: EncoderWriteScope::BlackChunk,
+                media_index: Some(17),
+                offset: 100,
+                total: 4096,
+                write_calls: 51,
+                would_block: 50,
+                interrupted: 0,
+                entry_remaining_ns: 200_000_000,
+                remaining_ns: -1,
+                elapsed_ns: 200_000_001,
+                last_progress_ago_ns: 150_000_000,
+            }),
+        }
+    }
+
+    #[test]
+    fn first_close_record_preserves_initiator_and_output_across_retirement() {
+        let mut first = None;
+        let mut live = Some(snapshot(EncoderState::Failed));
+        remember_first_close(&mut first, CloseReason::CoreOutput, || {
+            live.as_ref()
+                .map(|s| OutputObservation::from_snapshot(s, Some(write_failure())))
+        });
+        assert!(live.take().is_some()); // Shutdown may remove Core before the failure reply.
+        remember_first_close(&mut first, CloseReason::CloseRequested, || {
+            panic!("an existing first cause must not recapture post-cleanup output")
+        });
+        let retained = first.unwrap();
+        assert_eq!(retained.reason, CloseReason::CoreOutput);
+        let output = retained.output.unwrap();
+        assert_eq!(output.state, EncoderState::Failed);
+        assert_eq!(output.failure, Some(write_failure()));
+        assert_eq!((output.frames, output.video_frames_written), (12, 13));
+        let text = CloseDiagnostic {
+            stage: CloseObservationStage::ProbeFailure,
+            observation: Some(CloseObservation {
+                first,
+                output: None,
+                session_cancelled: true,
+                closing: false,
+                closed: true,
+                cleanup_failed: false,
+            }),
+            cleanup_confirmed: true,
+        }
+        .to_string();
+        assert!(text.contains("first_reason=core_output"));
+        assert!(text.contains("first_core_present=true first_state=Some(Failed)"));
+        assert!(text.contains("observed_core_present=false observed_state=None"));
+        assert!(text.contains("scope: BlackChunk") && text.contains("offset: 100, total: 4096"));
+        assert!(text.contains("cleanup_scope=source cleanup_confirmed=true"));
+        assert!(!text.contains("54321") && !text.contains("67890"));
+    }
+
+    #[test]
+    fn close_observation_distinguishes_live_authority_failure_and_preserves_closed_trace() {
+        let observed = CloseObservation {
+            first: None,
+            output: Some(OutputObservation::from_snapshot(
+                &snapshot(EncoderState::Playing),
+                None,
+            )),
+            session_cancelled: false,
+            closing: false,
+            closed: false,
+            cleanup_failed: false,
+        };
+        let text = CloseDiagnostic {
+            stage: CloseObservationStage::ProbeFailure,
+            observation: Some(observed),
+            cleanup_confirmed: false,
+        }
+        .to_string();
+        assert!(text.contains("observation_present=true first_reason=none session_cancelled=false"));
+        assert!(text.contains("observed_core_present=true observed_state=Some(Playing)"));
+        assert!(text.contains("cleanup_scope=source cleanup_confirmed=false"));
+        let absent = CloseDiagnostic {
+            stage: CloseObservationStage::ProbeFailure,
+            observation: None,
+            cleanup_confirmed: false,
+        }
+        .to_string();
+        assert!(absent.contains("observation_present=false"));
+        assert!(absent.contains("observed_core_present=false observed_state=None"));
+        let reasons = [
+            CloseReason::HardDeadline,
+            CloseReason::SoftDeadline,
+            CloseReason::SoftDeadlineUnavailable,
+            CloseReason::CredentialUnavailable,
+            CloseReason::AlreadyClosed,
+            CloseReason::OutputLeaseExpired,
+            CloseReason::AlreadyClosing,
+            CloseReason::CleanupFailed,
+            CloseReason::SourceRevoked,
+            CloseReason::CoreOutput,
+            CloseReason::RegistryBinding,
+            CloseReason::Shutdown,
+            CloseReason::CloseRequested,
+        ];
+        let mut codes = std::collections::BTreeSet::new();
+        for reason in reasons {
+            assert!(codes.insert(reason.code()));
+            assert!(reason
+                .code()
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c == b'_'));
+            let full = CloseDiagnostic {
+                stage: CloseObservationStage::ProbeFailure,
+                observation: Some(CloseObservation {
+                    first: Some(FirstCloseRecord {
+                        reason,
+                        output: Some(OutputObservation::from_snapshot(
+                            &snapshot(EncoderState::Failed),
+                            Some(write_failure()),
+                        )),
+                    }),
+                    ..observed
+                }),
+                cleanup_confirmed: false,
+            }
+            .to_string();
+            assert!(full.len() < 4096 && full.is_ascii());
+            assert!(!full.contains('\n') && !full.contains('\r') && !full.contains("://"));
+            assert!(full.contains("remaining_ns: -1") && full.contains("would_block: 50"));
+        }
+    }
+
+    #[test]
+    fn operation_receipts_and_sink_release_precede_a_blocked_diagnostic_writer() {
+        use std::sync::mpsc;
+        let diagnostic = Arc::new(Mutex::new(Some(CloseDiagnostic {
+            stage: CloseObservationStage::ProbeFailure,
+            observation: None,
+            cleanup_confirmed: false,
+        })));
+        let observer = diagnostic.clone();
+        let (done, observe_done) = mpsc::channel();
+        let (completed, observe_completed) = mpsc::channel();
+        let (entered, observe_entered) = mpsc::channel();
+        let (release, wait_release) = mpsc::channel();
+        let pending = Arc::new(Mutex::new(Some(())));
+        let observe_pending = pending.clone();
+        let worker = std::thread::spawn(move || {
+            // Model the awaited Play future's existing pending/done sequence.
+            assert!(pending.lock().unwrap().take().is_some());
+            done.send(()).unwrap();
+            drop(done);
+            drop(pending);
+            complete_then_emit_close(
+                move || {
+                    completed.send(()).unwrap();
+                    drop(completed);
+                },
+                Some(diagnostic),
+                move |_| {
+                    entered.send(()).unwrap();
+                    wait_release.recv_timeout(Duration::from_secs(2)).unwrap();
+                },
+            );
+        });
+        observe_entered
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        // The writer remains held: cleanup observations must not depend on it.
+        assert!(observe_pending.try_lock().unwrap().is_none());
+        assert!(observe_done.try_recv().is_ok());
+        assert!(observe_completed.try_recv().is_ok());
+        assert!(matches!(
+            observe_completed.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+        assert!(observer.try_lock().unwrap().is_none());
+        assert_eq!(Arc::strong_count(&observer), 1);
+        release.send(()).unwrap();
+        worker.join().unwrap();
     }
 }

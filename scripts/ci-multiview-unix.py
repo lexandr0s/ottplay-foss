@@ -55,6 +55,9 @@ ACTIVATION_TESTS = frozenset({
 })
 # Source-derived Unix inventory from the reviewed broker/connection freeze.
 BROKER_TESTS = frozenset({
+    'broker::live::close_diagnostic_tests::operation_receipts_and_sink_release_precede_a_blocked_diagnostic_writer',
+    'broker::live::close_diagnostic_tests::first_close_record_preserves_initiator_and_output_across_retirement',
+    'broker::live::close_diagnostic_tests::close_observation_distinguishes_live_authority_failure_and_preserves_closed_trace',
     'broker::live::play_diagnostic_tests::play_failure_record_preserves_numeric_producer_evidence_without_identity',
     'broker::live::play_diagnostic_tests::play_closed_classes_distinguish_retirement_decode_and_commit_failures',
 

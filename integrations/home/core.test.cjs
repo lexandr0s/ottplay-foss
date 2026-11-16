@@ -183,6 +183,66 @@ test("unavailable gateway snapshot never authorizes actions and HA JWT cannot be
     assert.equal(client.action("light"), false);
     assert.equal(client.action("hdmi1"), false);
 });
+test("nonboolean availability invalidates an earlier ready snapshot and never authorizes POST", () => {
+    for (const available of ["false", "true", null, 0, 1, [], {}]) {
+        const f = fixture(),
+            client = api.createClient(f.options);
+        client.visible(true);
+        client.configure(
+            "https://home.local",
+            "client-key-0000000000000000000000000000"
+        );
+        answer(f.requests[0]);
+        assert.equal(f.states.at(-1).status, "ready");
+        const before = f.states.length,
+            invalid = { ...snapshot(), available };
+        client.refresh();
+        answer(f.requests[1], invalid);
+        assert.equal(f.states.at(-1).status, "unavailable");
+        assert.equal(f.states.at(-1).code, "INVALID_RESPONSE");
+        assert.equal(f.states.at(-1).model, undefined);
+        assert.ok(
+            f.states.slice(before).every((state) => state.status !== "ready")
+        );
+        assert.equal(api.validSnapshot(invalid), false);
+        assert.equal(client.action("light"), false);
+        assert.equal(client.action("hdmi1"), false);
+        assert.equal(f.requests.length, 2);
+        assert.ok(f.requests.every((item) => item.request.method !== "POST"));
+        client.visible(false);
+    }
+    assert.equal(
+        api.validSnapshot({ ...snapshot(), available: undefined }),
+        false
+    );
+});
+test("boolean availability preserves unavailable gating and absent legacy snapshots stay actionable", () => {
+    for (const available of [false, true, undefined]) {
+        const f = fixture(),
+            client = api.createClient(f.options),
+            model = snapshot();
+        if (available !== undefined) model.available = available;
+        assert.equal(api.validSnapshot(model), true);
+        client.visible(true);
+        client.configure(
+            "https://home.local",
+            "client-key-0000000000000000000000000000"
+        );
+        answer(f.requests[0], model);
+        if (available === false) {
+            assert.equal(f.states.at(-1).status, "unavailable");
+            assert.equal(f.states.at(-1).code, "HOME_UNAVAILABLE");
+            assert.equal(client.action("light"), false);
+            assert.equal(client.action("hdmi1"), false);
+            assert.equal(f.requests.length, 1);
+        } else {
+            assert.equal(f.states.at(-1).status, "ready");
+            assert.equal(client.action("light"), true);
+            assert.equal(f.requests[1].request.method, "POST");
+        }
+        client.visible(false);
+    }
+});
 test("manual network plan stays fixed, bounded and separate from gateway authorization", () => {
     const f = fixture(),
         network = api.networkTest(f.options);
