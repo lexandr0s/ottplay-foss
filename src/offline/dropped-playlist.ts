@@ -511,7 +511,7 @@ export function createDroppedPlaylists(
                     if (!referencedFiles.includes(resolved))
                         referencedFiles.push(resolved);
                 }
-                resolvedRecords.push({ record: record, file: resolved });
+                resolvedRecords.push({ file: resolved, record: record });
             }
             resolvedDocuments.push({
                 file: parsed.file,

@@ -53,13 +53,13 @@ export function installLocalDrop(w: any): any {
         // Never surface native paths, signed URLs, or arbitrary IPC errors.
         var text = typeof error === "string" ? error : error?.message;
         var codes: any = {
-            playlist_limit: "Playlist is too large",
-            playlist_invalid: "Playlist is empty or invalid",
-            playlist_unsupported: "Playlist contains unsupported sources",
-            playlist_local_unavailable:
-                "Playlist local files must be dropped together with the playlist",
             playlist_hls_local_unsupported:
                 "Local HLS manifests are not supported; use an HTTP(S) manifest URL",
+            playlist_invalid: "Playlist is empty or invalid",
+            playlist_limit: "Playlist is too large",
+            playlist_local_unavailable:
+                "Playlist local files must be dropped together with the playlist",
+            playlist_unsupported: "Playlist contains unsupported sources",
         };
         if (
             error &&
