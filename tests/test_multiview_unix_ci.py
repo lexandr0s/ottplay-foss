@@ -2287,6 +2287,7 @@ class MockMainTests(unittest.TestCase):
         required={'unwind_stderr_capture_preserves_original_panic_and_clears_registration',
                   'owned_stderr_drops_incomplete_secret_line_before_bounded_redaction',
                   'playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts',
+                  'request_transport_diagnostics_classify_actual_error_without_authority',
                   'segment_video_proof_checks_count_timing_and_sampling_domain',
                   'two_slot_fixture_geometry_passes_actual_core_validation',
                   'nine_slot_fixture_geometry_passes_actual_core_and_old_odd_grid_is_rejected',
