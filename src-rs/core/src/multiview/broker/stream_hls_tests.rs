@@ -236,16 +236,18 @@ pub(in crate::multiview::broker) struct Fixture {
 }
 impl Fixture {
     pub(in crate::multiview::broker) async fn start(replies: Vec<Reply>) -> Self {
+        Self::start_with_accept_timeout(replies, Duration::from_secs(3)).await
+    }
+    async fn start_with_accept_timeout(replies: Vec<Reply>, accept_timeout: Duration) -> Self {
         let (listener, base) = listener().await;
         let requests = Arc::new(AtomicUsize::new(0));
         let seen = requests.clone();
         let task = tokio::spawn(async move {
             for reply in replies {
-                let (mut socket, _) =
-                    tokio::time::timeout(Duration::from_secs(3), listener.accept())
-                        .await
-                        .unwrap()
-                        .unwrap();
+                let (mut socket, _) = tokio::time::timeout(accept_timeout, listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap();
                 let req = request(&mut socket).await;
                 assert_eq!(
                     req.lines().next().unwrap(),
@@ -715,12 +717,17 @@ fn consumer_hold_excludes_only_owned_time_and_never_revives_expired_progress() {
 
 #[tokio::test]
 async fn final_retained_hls_slice_can_outlive_progress_wait_without_timing_out_reload() {
-    let fixture = Fixture::start(vec![
-        Reply::ok("/root", playlist(1, 1, false)),
-        Reply::ok("/s1.ts", packets(7, 0x51)),
-        Reply::ok("/root", playlist(1, 2, true)),
-        Reply::ok("/s2.ts", packets(7, 0x52)),
-    ])
+    // This test deliberately holds the final slice for 3.1 seconds. Give only
+    // its fixture accept loop a bounded budget covering that consumer pause.
+    let fixture = Fixture::start_with_accept_timeout(
+        vec![
+            Reply::ok("/root", playlist(1, 1, false)),
+            Reply::ok("/s1.ts", packets(7, 0x51)),
+            Reply::ok("/root", playlist(1, 2, true)),
+            Reply::ok("/s2.ts", packets(7, 0x52)),
+        ],
+        Duration::from_secs(6),
+    )
     .await;
     let (source, _) = source(&fixture).await;
     let mut configured = limits();

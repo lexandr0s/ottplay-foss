@@ -1779,7 +1779,7 @@ mod runtime {
     }
     // Advisory readiness only: all stop, authority, and time checks remain in
     // the write loop. The File stays owned by this thread throughout poll.
-    fn wait_capture_writable(writer: &mut File) {
+    fn wait_capture_writable(writer: &mut impl AsFd) {
         let borrowed = writer.as_fd();
         let mut descriptor = libc::pollfd {
             fd: borrowed.as_raw_fd(),

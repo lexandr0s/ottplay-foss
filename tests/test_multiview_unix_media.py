@@ -74,5 +74,14 @@ class SelectedPhaseContracts(unittest.TestCase):
         self.assertTrue(MEDIA.self_test()['pass'])
 
 
+class VideoWindowCoverageContracts(unittest.TestCase):
+    def test_all_planned_pts_must_have_decoded_rgb_frames(self):
+        pts = [index / MEDIA.FPS for index in range(72)]
+        stamps = MEDIA._validate_video_window_timestamps(pts, 0.0, 8.0, 72)
+        self.assertEqual(len(stamps), 72)
+        with self.assertRaisesRegex(ValueError, 'does not cover all planned PTS'):
+            MEDIA._validate_video_window_timestamps(pts, 0.0, 8.0, 65)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -381,6 +381,15 @@ def _video(raw, rows, size, duration):
             'pass': all(t['identity_pass'] and t['motion_pass'] for t in tests)}
 
 
+def _validate_video_window_timestamps(times, start, end, decoded_count):
+    """Require RGB output to cover every archive timestamp in its planned window."""
+    stamps = [t for t in times if start <= t < end]
+    require(len(stamps) == decoded_count, 'Decoded RGB window does not cover all planned PTS')
+    require(all(0 < b - a <= .201 for a, b in zip(stamps, stamps[1:])),
+            'Decoded RGB window PTS differs')
+    return stamps
+
+
 def _playlist(text):
     headers, blocks, tags, ended = {}, [], [], False
     for line in text.splitlines():
@@ -752,10 +761,9 @@ def _finish(case, work):
         try:
             measured = _video(raw, ROWS, (384, 288), row['duration'])
             count = measured['decoded_frames']
-            stamps = [t for t in times if times[0] + row['start'] - .001 <= t
-                      < times[0] + row['start'] + row['duration'] - .001][:count]
-            require(len(stamps) == count and all(0 < b - a <= .201 for a, b in zip(stamps, stamps[1:])),
-                    'Decoded RGB window PTS differs')
+            _validate_video_window_timestamps(
+                times, times[0] + row['start'] - .001,
+                times[0] + row['start'] + row['duration'] - .001, count)
             measured['timestamps_monotonic_bounded_201ms'] = True
         finally:
             # The parent owns scratch custody. Only this exact owned RGB output
