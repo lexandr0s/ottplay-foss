@@ -426,6 +426,7 @@ test("receiver with reordered profiles plays imported mixed Favorites through th
             const state = await second.evaluate(
                 (observationStart) => ({
                     observed: window.__mixedObserved.slice(observationStart),
+                    diagnostics: window.__mixedObservedDiagnostics.slice(-64),
                     provider: window.__ottActiveProviderDriver.id,
                     src: window.video.currentSrc,
                 }),
@@ -440,6 +441,31 @@ test("receiver with reordered profiles plays imported mixed Favorites through th
                     (row) =>
                         row.provider === state.provider &&
                         row.url.includes(suffix)
+                ),
+                JSON.stringify(
+                    {
+                        expected: { provider: state.provider, suffix },
+                        observed: state.observed.slice(-64).map((row) => {
+                            try {
+                                const url = new URL(row.url, baseURL);
+                                return {
+                                    provider: row.provider,
+                                    source:
+                                        url.origin === new URL(baseURL).origin
+                                            ? url.pathname
+                                            : `[non-fixture:${url.protocol}]`,
+                                };
+                            } catch {
+                                return {
+                                    provider: row.provider,
+                                    source: "[non-url]",
+                                };
+                            }
+                        }),
+                        diagnostics: state.diagnostics,
+                    },
+                    null,
+                    2
                 )
             ).toBe(true);
             const current = await second.evaluate(
