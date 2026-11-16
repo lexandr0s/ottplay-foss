@@ -5,14 +5,22 @@ const os = require("node:os");
 const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const {
+    FILES: HOME_FILES,
+    stageHomeIntegration,
+} = require("../scripts/home-integration-assets.cjs");
+const ts = require("typescript");
+const {
     configureNativeDev,
     createRebuildQueue,
     isNativeDevInput,
     nativeAssetPath,
     viteEnvironmentRoutes,
 } = require("../scripts/native-dev.cjs");
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "ottplay-native-dev-"));
+const root = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), "ottplay-native-dev-"))
+);
 const assets = path.join(root, "src-tauri/frontend");
+const homeInputs = HOME_FILES.map((file) => "integrations/home/" + file);
 const pinInputs = [
     "js/vendor/sjcl-pin.js",
     "js/vendor/sjcl-pin-source.json",
@@ -40,6 +48,19 @@ async function main() {
         write("src-tauri/frontend/native-runtime.json", '{"fonts":"system"}');
         write("src-tauri/frontend/js/jquery.min.js", "native-jquery");
         write("index.html", "legacy-index-must-not-leak");
+        const repositorySource = path.resolve(__dirname, "..");
+        for (const file of homeInputs)
+            write(file, fs.readFileSync(path.join(repositorySource, file)));
+        write(
+            "src/plugins/home-integration-runtime.ts",
+            fs.readFileSync(
+                path.join(
+                    repositorySource,
+                    "src/plugins/home-integration-runtime.ts"
+                )
+            )
+        );
+        stageHomeIntegration(root, assets, ts);
         write(".env", "private-must-not-leak");
         write("src-tauri/frontend/secret.key", "private-must-not-leak");
         fs.symlinkSync(path.join(root, ".env"), path.join(assets, "leak.txt"));
@@ -78,6 +99,7 @@ async function main() {
             "vendor/ottplay-core.manifest.json",
             "licenses/native/rquickjs-LICENSE.txt",
             ...pinInputs,
+            ...homeInputs,
         ])
             assert.equal(
                 isNativeDevInput(root, path.join(root, file)),
@@ -101,6 +123,14 @@ async function main() {
             "js/runtime-polyfills.js",
             "js/vendor/sjcl-pin.generated.js",
             "vendor/glib-0.18.5/test.js",
+            "integrations/home/private.json",
+            "integrations/home/unlisted.js",
+            "integrations/home/app.test.cjs",
+            "integrations/home/credentials.json",
+            "integrations/home/.env",
+            "integrations/home/logs/private.js",
+            "integrations/home/nested/app.js",
+            "integrations/other/app.js",
         ])
             assert.equal(
                 isNativeDevInput(root, path.join(root, file)),
@@ -211,13 +241,18 @@ async function main() {
             build() {
                 builds++;
                 return new Promise((resolve) => {
-                    resolveBuild = resolve;
+                    resolveBuild = () => {
+                        stageHomeIntegration(root, assets, ts);
+                        resolve();
+                    };
                 });
             },
             debounceMs: 5,
         });
-        for (const file of pinInputs)
+        for (const file of [...pinInputs, ...homeInputs])
             assert(watched.has(path.join(root, file)), file);
+        assert(!watched.has(path.join(root, "integrations")));
+        assert(!watched.has(path.join(root, "integrations/home")));
         assert(!watched.has(path.join(root, "js")));
         function request(url, method = "GET") {
             const res = {
@@ -324,6 +359,56 @@ async function main() {
             assert.equal(request("/").statusCode, 200, file);
             assert.equal(messages.length, builds, file);
         }
+        for (const [index, file] of homeInputs.entries()) {
+            const original = fs.readFileSync(path.join(root, file), "utf8");
+            const updated =
+                original + "\n/* native-dev Home refresh " + index + " */\n";
+            write(file, updated);
+            const before = builds;
+            watcher.emit("all", "change", path.join(root, file));
+            assert.equal(request("/").statusCode, 503, file);
+            await delay(20);
+            assert.equal(builds, before + 1, file);
+            resolveBuild();
+            await delay(1);
+            const staged = request("/dist/home/" + path.basename(file));
+            assert.equal(staged.statusCode, 200, file);
+            assert.equal(
+                fs.readFileSync(
+                    path.join(assets, "dist/home", path.basename(file)),
+                    "utf8"
+                ),
+                updated
+            );
+            // Native HTML receives only the existing HMR bootstrap on serving.
+            const served =
+                path.basename(file) === "index.html"
+                    ? staged.body.replace(
+                          '<script type="module" src="/@vite/client"></script>\n',
+                          ""
+                      )
+                    : staged.body;
+            assert.equal(
+                served,
+                updated,
+                "served Home bytes must be newly staged: " + file
+            );
+            assert.equal(messages.length, builds, file);
+        }
+        pass(
+            "each fixed Home input rebuilds, stages and serves refreshed dashboard bytes"
+        );
+        const beforePrivate = builds;
+        for (const file of [
+            "integrations/home/unlisted.js",
+            "integrations/home/credentials.json",
+            "integrations/home/.env",
+            "integrations/home/logs/private.js",
+            "integrations/home/app.test.cjs",
+        ])
+            watcher.emit("all", "change", path.join(root, file));
+        await delay(20);
+        assert.equal(builds, beforePrivate);
         const beforeGenerated = builds;
         for (const file of [
             "js/ottplay-core.js",

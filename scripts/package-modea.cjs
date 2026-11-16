@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const { copyBuiltHomeIntegration } = require("./home-integration-assets.cjs");
 // Package the current classic web build for deployment on non-development PCs/STBs.
 const { execFileSync } = require("node:child_process");
 const { createHash } = require("node:crypto");
@@ -108,7 +109,9 @@ try {
     const pkg = JSON.parse(
         fs.readFileSync(path.join(root, "package.json"), "utf8")
     );
-    staging = fs.mkdtempSync(path.join(os.tmpdir(), "ottplay-modea-"));
+    staging = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), "ottplay-modea-"))
+    );
     const webRoot = path.join(staging, "web");
     fs.mkdirSync(path.join(webRoot, "dist"), { recursive: true });
     fs.copyFileSync(index, path.join(webRoot, "index.html"));
@@ -141,6 +144,10 @@ try {
             recursive: true,
         });
     });
+    copyBuiltHomeIntegration(
+        path.join(root, "dist/home"),
+        path.join(webRoot, "dist/home")
+    );
     stageOfflineShell(webRoot);
     const metadata = {
         bundleSha256: sha256(path.join(webRoot, "dist", "player.js")),

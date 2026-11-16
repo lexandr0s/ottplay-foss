@@ -42,6 +42,7 @@ const code = ts.transpileModule(
 ).outputText;
 // This suite isolates copying/privacy filters; actual native modernization and
 // byte/typography gates are exercised in test_native_runtime.cjs.
+const homeStageCalls = [];
 const context = vm.createContext({
     ...fs,
     ...path,
@@ -50,6 +51,9 @@ const context = vm.createContext({
     console: { log() {} },
     isRetiredRuntimeScript: require("../scripts/runtime-assets.cjs")
         .isRetiredRuntimeScript,
+    stageHomeIntegration(srcRoot, stageDir) {
+        homeStageCalls.push([srcRoot, stageDir]);
+    },
     stageNativeRuntime() {},
 });
 vm.runInContext(code, context);
@@ -145,6 +149,9 @@ try {
         path.join(fixture, "dist"),
         path.join(fixture, "stage")
     );
+    assert.deepEqual(homeStageCalls, [
+        [path.join(fixture, "src"), path.join(fixture, "stage")],
+    ]);
     for (const name of [
         "devices/lg/webos/device.js",
         "devices/tizen/config.json",

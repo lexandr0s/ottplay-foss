@@ -53,6 +53,7 @@ try {
     fs.mkdirSync(path.join(fixture, "scripts"));
     for (const name of [
         "package-tizen.cjs",
+        "home-integration-assets.cjs",
         "package-webos.cjs",
         "tizen-install.py",
         "classic-bundle.cjs",
@@ -118,7 +119,15 @@ try {
     fs.mkdirSync(directory, { recursive: true });
     const wgt = path.join(directory, packager.NAMES.wgt);
     const metadata = path.join(directory, packager.NAMES.metadata);
-    function makeModeA(version = "1.2.3", revision = source) {
+    const homeNames = [
+        "index.html",
+        "style.css",
+        "core.js",
+        "webos-host.js",
+        "app.js",
+        "host.js",
+    ];
+    function makeModeA(version = "1.2.3", revision = source, homeFault = null) {
         const files = {
             "dist/player.js": "/* classic player */",
             "index.html":
@@ -127,6 +136,19 @@ try {
             "js/runtime-polyfills.js": "/* runtime */",
             "providers/d/maxtv/about.html": "",
         };
+        const homeManifest = {
+            version: 1,
+            files: homeNames.map((name) => {
+                const value = "public:" + name;
+                files["dist/home/" + name] = value;
+                return {
+                    name,
+                    bytes: Buffer.byteLength(value),
+                    sha256: sha(value),
+                };
+            }),
+        };
+        files["dist/home/assets.json"] = JSON.stringify(homeManifest);
         const info = {
             bundleSha256: sha(files["dist/player.js"]),
             optionalBundles: {},
@@ -148,6 +170,8 @@ try {
                 };
             }
         }
+        if (homeFault === "missing") delete files["dist/home/host.js"];
+        if (homeFault === "stale") files["dist/home/host.js"] += "stale";
         files["build-info.json"] = JSON.stringify(info) + "\n";
         python(
             `
@@ -171,6 +195,12 @@ with tarfile.open(archive,'w:gz') as out:
     cli(["--local", "--unknown"], false);
     cli(["--local"]);
     cli(["--local", "--verify"]);
+    for (const fault of ["missing", "stale"]) {
+        makeModeA("1.2.3", source, fault);
+        cli(["--local"], false);
+    }
+    makeModeA();
+    cli(["--local"]);
     const first = fs.readFileSync(wgt);
     cli(["--local"]);
     assert(
@@ -192,6 +222,25 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
             wgt
         )
     );
+    for (const name of homeNames)
+        assert.equal(
+            inspected.hashes["dist/home/" + name],
+            sha("public:" + name)
+        );
+    assert.equal(
+        inspected.hashes["dist/home/assets.json"],
+        sha(
+            JSON.stringify({
+                version: 1,
+                files: homeNames.map((name) => ({
+                    name,
+                    bytes: Buffer.byteLength("public:" + name),
+                    sha256: sha("public:" + name),
+                })),
+            })
+        )
+    );
+
     assert(inspected.index.startsWith("<!doctype html>" + packager.MARKER));
     assert(inspected.index.includes('src="js/runtime-polyfills.js?v=1"'));
     assert(!inspected.index.includes('src="/js/'));

@@ -86,6 +86,9 @@ const { stageNativeRuntime } = classicRequire(
 const { stage: stageHostedEpg } = classicRequire(
     resolve(__dirname, "scripts/hosted-epg.cjs")
 );
+const { stageHomeIntegration } = classicRequire(
+    resolve(__dirname, "scripts/home-integration-assets.cjs")
+);
 const { stageOfflineShell } = classicRequire(
     resolve(__dirname, "scripts/offline-shell.cjs")
 );
@@ -287,6 +290,7 @@ function stageTauriFrontend(
     }
 
     stagePlayerAssets(srcRoot, stageDir);
+    stageHomeIntegration(srcRoot, stageDir);
     for (const directory of ["hosted", "swop-input"]) {
         copyRuntimeAssets(join(distDir, directory), join(stageDir, directory));
     }
@@ -664,6 +668,7 @@ export default defineConfig(({ mode }) => ({
 
                 // All targets receive the same styles, logo and language packs.
                 stagePlayerAssets(__dirname, outDir, androidFlavor || "full");
+                stageHomeIntegration(__dirname, outDir);
                 stageHostedEpg(outDir);
                 await stageHostedSwop(
                     outDir,

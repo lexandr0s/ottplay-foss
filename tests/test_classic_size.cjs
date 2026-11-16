@@ -7208,6 +7208,7 @@ try {
         )
         .map((node) => node.getText(config))
         .join("\n");
+    const homeStageCalls = [];
     const packaging = {
         ...fs,
         autoPlaybackScript: () => "fixture",
@@ -7216,6 +7217,9 @@ try {
         console: { log() {} },
         copyRuntimeAssets() {},
         join: path.join,
+        stageHomeIntegration(srcRoot, stageDir) {
+            homeStageCalls.push([srcRoot, stageDir]);
+        },
         stageNativeRuntime() {},
         stagePlayerAssets() {},
     };
@@ -7231,6 +7235,7 @@ try {
     );
     const nativeStage = path.join(root, "native-stage");
     packaging.stageTauriFrontend(root, path.join(root, "dist"), nativeStage);
+    assert.deepEqual(homeStageCalls, [[root, nativeStage]]);
     assert.equal(
         fs.readFileSync(
             path.join(nativeStage, "dist/subtitle-appearance.js"),

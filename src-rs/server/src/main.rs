@@ -569,6 +569,77 @@ fn device_entry_routes(directory: &std::path::Path) -> Router {
         .route("/f/*device", get(entry))
 }
 
+// Home is a same-origin owned panel, not a public embeddable player. A meta
+// CSP cannot enforce frame-ancestors: emit it on the actual HTTP responses.
+async fn home_frame_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let uri = request
+        .extensions()
+        .get::<axum::extract::OriginalUri>()
+        .map(|original| &original.0)
+        .unwrap_or_else(|| request.uri());
+    let protect = urlencoding::decode(uri.path()).is_ok_and(|decoded| {
+        // Match the static service's decoded directory/index aliases. Backslash
+        // separators matter on Windows. ASCII case aliases may resolve on any
+        // case-insensitive filesystem (including macOS), so fold on every host.
+        // ServeDir rejects '..' instead of serving a Home document through it.
+        let mut parts = decoded
+            .split(['/', '\\'])
+            .filter(|part| !part.is_empty() && *part != ".");
+        let same = |actual: Option<&str>, expected: &str| {
+            actual.is_some_and(|part| part.eq_ignore_ascii_case(expected))
+        };
+        same(parts.next(), "dist") && same(parts.next(), "home")
+    });
+    let mut response = next.run(request).await;
+    if protect {
+        // frame-ancestors overrides XFO in modern browsers: carry a prior DENY
+        // into CSP rather than relaxing it to self. Preserve every original
+        // CSP/XFO field; multiple CSP policies are enforced as an intersection.
+        let deny = response
+            .headers()
+            .get_all(axum::http::header::X_FRAME_OPTIONS)
+            .iter()
+            .any(|value| {
+                // HeaderValue permits obs-text, so Unicode conversion cannot
+                // be a prerequisite for recognizing an ASCII DENY token.
+                value
+                    .as_bytes()
+                    .split(|byte| *byte == b',')
+                    .any(|mut token| {
+                        while token
+                            .first()
+                            .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
+                        {
+                            token = &token[1..];
+                        }
+                        while token
+                            .last()
+                            .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
+                        {
+                            token = &token[..token.len() - 1];
+                        }
+                        token.eq_ignore_ascii_case(b"DENY")
+                    })
+            });
+        response.headers_mut().append(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(if deny {
+                "frame-ancestors 'none'"
+            } else {
+                "frame-ancestors 'self'"
+            }),
+        );
+        response
+            .headers_mut()
+            .entry(axum::http::header::X_FRAME_OPTIONS)
+            .or_insert(HeaderValue::from_static("SAMEORIGIN"));
+    }
+    response
+}
+
 fn player_asset_routes(directory: &std::path::Path) -> Router {
     // These generated files live at the web root; expose only the explicit
     // public files rather than mounting the source/configuration directory.
@@ -595,7 +666,7 @@ fn player_asset_routes(directory: &std::path::Path) -> Router {
     ] {
         routes = routes.nest_service(&format!("/{name}"), ServeDir::new(directory.join(name)));
     }
-    routes
+    routes.layer(axum::middleware::from_fn(home_frame_headers))
 }
 
 #[cfg(test)]
@@ -1798,6 +1869,309 @@ mod device_entry_tests {
                 "{path}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn home_http_responses_enforce_same_origin_framing_without_changing_player_embeds() {
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("ottplay-home-frame-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(directory.join("dist/home")).unwrap();
+        std::fs::create_dir_all(directory.join("devices/lg/webos")).unwrap();
+        let _fixture = WebRootFixture {
+            directory: directory.clone(),
+        };
+        let home = "<!doctype html><title>Home</title>";
+        std::fs::write(directory.join("dist/home/index.html"), home).unwrap();
+        std::fs::write(directory.join("dist/home/app.js"), "/* public Home */").unwrap();
+        std::fs::write(
+            directory.join("dist/index.html"),
+            "<!doctype html><title>Player</title>",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("devices/lg/webos/device.js"),
+            "/* adapter */",
+        )
+        .unwrap();
+        let mut app = player_asset_routes(&directory).merge(device_entry_routes(&directory));
+        for method in ["GET", "HEAD"] {
+            for path in [
+                "/dist/home/index.html",
+                "/dist/home/",
+                "/dist/%68ome/index.html",
+                "/dist/home/%69ndex.html",
+                "/dist/home%2Findex.html",
+                "/dist/home/./index.html?cache=1",
+            ] {
+                let response = app
+                    .call(
+                        Request::builder()
+                            .method(method)
+                            .uri(path)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
+                assert_eq!(
+                    response.headers()["content-security-policy"],
+                    "frame-ancestors 'self'",
+                    "{path}"
+                );
+                assert_eq!(
+                    response.headers()["x-frame-options"],
+                    "SAMEORIGIN",
+                    "{path}"
+                );
+                let bytes = to_bytes(response.into_body(), 1024).await.unwrap();
+                assert_eq!(
+                    bytes.as_ref(),
+                    if method == "GET" {
+                        home.as_bytes()
+                    } else {
+                        b""
+                    },
+                    "{path}"
+                );
+            }
+        }
+        // Probe the fixture filesystem, not the host OS name: macOS volumes
+        // may be either case-sensitive or case-insensitive. Every alias response
+        // must carry the policy, including harmless 404s on sensitive volumes.
+        for (path, relative) in [
+            ("/dist/HOME/index.html", "dist/HOME/index.html"),
+            ("/dist/HOME/INDEX.HTML", "dist/HOME/INDEX.HTML"),
+            ("/dist/%48OME/index.html", "dist/HOME/index.html"),
+        ] {
+            let expected = if directory.join(relative).is_file() {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            let response = app
+                .call(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{path}");
+            assert_eq!(
+                response.headers()["content-security-policy"],
+                "frame-ancestors 'self'",
+                "{path}"
+            );
+            assert_eq!(
+                response.headers()["x-frame-options"],
+                "SAMEORIGIN",
+                "{path}"
+            );
+            if expected == StatusCode::OK {
+                assert_eq!(
+                    to_bytes(response.into_body(), 1024).await.unwrap().as_ref(),
+                    home.as_bytes(),
+                    "{path}"
+                );
+            }
+        }
+        #[cfg(windows)]
+        {
+            let path = "/dist/home%5Cindex.html";
+            let response = app
+                .call(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response.headers()["content-security-policy"],
+                "frame-ancestors 'self'"
+            );
+            assert_eq!(response.headers()["x-frame-options"], "SAMEORIGIN");
+        }
+        let redirect = app
+            .call(
+                Request::builder()
+                    .uri("/dist/home")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(redirect.status().is_redirection());
+        assert_eq!(
+            redirect.headers()["content-security-policy"],
+            "frame-ancestors 'self'"
+        );
+        assert_eq!(redirect.headers()["x-frame-options"], "SAMEORIGIN");
+        for path in [
+            "/dist/index.html",
+            "/f/lg/webos/",
+            "/devices/lg/webos/device.js",
+        ] {
+            let response = app
+                .call(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert!(
+                !response.headers().contains_key("content-security-policy"),
+                "{path}"
+            );
+            assert!(
+                !response.headers().contains_key("x-frame-options"),
+                "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn home_framing_case_aliases_do_not_depend_on_platform_or_match_other_segments() {
+        let mut app = Router::new()
+            .route("/dist/HOME/index.html", get(|| async { "Home" }))
+            .route("/dist/home-other/index.html", get(|| async { "Other" }))
+            .route("/dist/home2/index.html", get(|| async { "Other" }))
+            .layer(axum::middleware::from_fn(home_frame_headers));
+        let response = app
+            .call(
+                Request::builder()
+                    .uri("/dist/HOME/index.html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            "frame-ancestors 'self'"
+        );
+        assert_eq!(response.headers()["x-frame-options"], "SAMEORIGIN");
+        for path in ["/dist/home-other/index.html", "/dist/home2/index.html"] {
+            let response = app
+                .call(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(
+                !response.headers().contains_key("content-security-policy"),
+                "{path}"
+            );
+            assert!(
+                !response.headers().contains_key("x-frame-options"),
+                "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn home_framing_intersects_existing_csp_and_carries_all_xfo_deny_values_into_csp() {
+        for deny in [
+            b"DENY".as_slice(),
+            b"dEnY".as_slice(),
+            b"SAMEORIGIN, dEnY".as_slice(),
+            b"DENY, \x80".as_slice(),
+            b" \tDeNy\t , \x80".as_slice(),
+            b"\x80,\t dEnY \t".as_slice(),
+        ] {
+            let mut app = Router::new()
+                .route(
+                    "/dist/home/index.html",
+                    get(move || async move {
+                        let mut headers = HeaderMap::new();
+                        headers.append(
+                            axum::http::header::CONTENT_SECURITY_POLICY,
+                            HeaderValue::from_static("default-src 'none'"),
+                        );
+                        headers.append(
+                            axum::http::header::CONTENT_SECURITY_POLICY,
+                            HeaderValue::from_static("script-src 'self'"),
+                        );
+                        headers.append(
+                            axum::http::header::X_FRAME_OPTIONS,
+                            HeaderValue::from_static("SAMEORIGIN"),
+                        );
+                        headers.append(
+                            axum::http::header::X_FRAME_OPTIONS,
+                            HeaderValue::from_bytes(deny).unwrap(),
+                        );
+                        (headers, "Home")
+                    }),
+                )
+                .layer(axum::middleware::from_fn(home_frame_headers));
+            let response = app
+                .call(
+                    Request::builder()
+                        .uri("/dist/home/index.html")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let policies: Vec<_> = response
+                .headers()
+                .get_all("content-security-policy")
+                .iter()
+                .map(|value| value.to_str().unwrap())
+                .collect();
+            assert_eq!(
+                policies,
+                [
+                    "default-src 'none'",
+                    "script-src 'self'",
+                    "frame-ancestors 'none'"
+                ],
+                "{deny:?}"
+            );
+            let xfo: Vec<_> = response
+                .headers()
+                .get_all("x-frame-options")
+                .iter()
+                .map(|value| value.as_bytes())
+                .collect();
+            assert_eq!(
+                xfo,
+                [b"SAMEORIGIN".as_slice(), deny],
+                "original XFO values must survive"
+            );
+        }
+        // Independent existing CSP is never replaced, including an existing
+        // ancestors-none policy. The additional self policy cannot relax it.
+        let mut app = Router::new()
+            .route(
+                "/dist/home/index.html",
+                get(|| async {
+                    (
+                        [(
+                            axum::http::header::CONTENT_SECURITY_POLICY,
+                            "frame-ancestors 'none'",
+                        )],
+                        "Home",
+                    )
+                }),
+            )
+            .layer(axum::middleware::from_fn(home_frame_headers));
+        let response = app
+            .call(
+                Request::builder()
+                    .uri("/dist/home/index.html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let policies: Vec<_> = response
+            .headers()
+            .get_all("content-security-policy")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            policies,
+            ["frame-ancestors 'none'", "frame-ancestors 'self'"]
+        );
+        assert_eq!(response.headers()["x-frame-options"], "SAMEORIGIN");
     }
 
     #[tokio::test]
