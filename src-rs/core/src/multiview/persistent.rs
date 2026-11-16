@@ -796,11 +796,10 @@ impl Session {
         if let Err(error) = session.start_output() {
             // Preserve the closed Session stage before its local owner retires.
             // No source/config/tool text or raw process stderr enters this record.
-            use std::io::Write as _;
-            let _ =
-                writeln!(std::io::stderr().lock(),
+            super::encoder::emit_startup_record(&format!(
                 "multiview_startup stage=session_output error={error:?} detail={:?} snapshot={:?}",
-                session.retired_failure, session.retired_snapshot);
+                session.retired_failure, session.retired_snapshot
+            ));
             return Err(error);
         }
         session.runtime_id = session

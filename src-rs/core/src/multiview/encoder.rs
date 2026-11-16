@@ -844,6 +844,19 @@ pub enum EncoderError {
     InvalidManifest,
 }
 
+// Use libtest's standard capture in unit builds. Production retains a
+// best-effort writer: diagnostic IO failure must never replace the real error.
+#[cfg(any(not(test), target_os = "linux", target_os = "macos"))]
+fn write_startup_record(writer: &mut impl std::io::Write, record: &str) {
+    let _ = writeln!(writer, "{record}");
+}
+pub(super) fn emit_startup_record(record: &str) {
+    #[cfg(test)]
+    eprintln!("{record}");
+    #[cfg(not(test))]
+    write_startup_record(&mut std::io::stderr().lock(), record);
+}
+
 // Private constructor diagnostics: no caller-supplied text is accepted.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn startup_failure_record(
@@ -882,6 +895,19 @@ mod startup_record_tests {
         assert!(early.contains("stage=fifo_maker") && early.contains("error=Unsupported"));
         assert!(early.contains("elapsed_ms=2000"));
         assert!(early.contains("detail=None") && early.contains("snapshot=None"));
+        let mut captured = Vec::new();
+        write_startup_record(&mut captured, &early);
+        assert_eq!(captured, format!("{early}\n").as_bytes());
+        struct Refused;
+        impl std::io::Write for Refused {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("injected diagnostic sink refusal"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        write_startup_record(&mut Refused, &early); // must not panic/replace the cause
     }
 }
 
@@ -2665,8 +2691,7 @@ mod runtime {
                     .min(u64::MAX as u128) as u64;
                 let record =
                     startup_failure_record(diagnostic.stage, *error, elapsed_ms, detail, snapshot);
-                use std::io::Write as _;
-                let _ = writeln!(std::io::stderr().lock(), "{record}");
+                emit_startup_record(&record);
             }
             result
         }
