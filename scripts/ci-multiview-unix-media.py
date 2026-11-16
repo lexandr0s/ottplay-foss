@@ -12,6 +12,7 @@ import re
 import stat
 import struct
 from contextlib import contextmanager
+from fractions import Fraction
 
 RATE = 16000
 FPS = 10
@@ -314,13 +315,15 @@ def _frame(index, number):
     return bytes(pixels)
 
 
-def _video(raw, rows, size, duration):
+def _video(raw, rows, size, duration, expected_count=None):
     """Original per-visible-tile color identity and moving-marker oracle."""
     width, height = size
     stride = width * height * 3
     require(len(raw) % stride == 0, 'RGB frame is incomplete')
     count = len(raw) // stride
     require(count >= max(10, math.ceil(round(FPS * duration) * .9)), 'Too few RGB frames')
+    if expected_count is not None:
+        _validate_decoded_frame_count(count, expected_count)
     tests = []
     for row_index, row in enumerate(rows):
         x, y, w, h = row['rect']
@@ -381,13 +384,67 @@ def _video(raw, rows, size, duration):
             'pass': all(t['identity_pass'] and t['motion_pass'] for t in tests)}
 
 
-def _validate_video_window_timestamps(times, start, end, decoded_count):
-    """Require RGB output to cover every archive timestamp in its planned window."""
-    stamps = [t for t in times if start <= t < end]
-    require(len(stamps) == decoded_count, 'Decoded RGB window does not cover all planned PTS')
-    require(all(0 < b - a <= .201 for a, b in zip(stamps, stamps[1:])),
+def _validate_decoded_frame_count(decoded_count, expected_count):
+    require(type(expected_count) is int and expected_count > 0
+            and type(decoded_count) is int and decoded_count == expected_count,
+            'Decoded RGB count differs from exact planned selection')
+
+
+def _validate_video_window_timestamps(times, row, decoded_count):
+    """Validate exact probe ordinals and their half-open planned PTS interval."""
+    first, last = row.get('first_frame_index'), row.get('last_frame_index')
+    expected = row.get('expected_frames')
+    require(type(first) is int and type(last) is int and type(expected) is int
+            and 0 <= first <= last < len(times) and expected == last - first + 1,
+            'Invalid planned RGB frame ordinals')
+    lower, upper = _fraction(row['start_pts']), _fraction(row['end_pts'])
+    stamps = times[first:last + 1]
+    require(len(stamps) == expected == decoded_count,
+            'Decoded RGB window does not cover all planned PTS')
+    require(stamps[0] == _fraction(row['first_pts']) and stamps[-1] == _fraction(row['last_pts'])
+            and all(lower <= stamp < upper for stamp in stamps),
+            'Ordinal selection differs from planned PTS bounds')
+    require(all(0 < b - a <= Fraction(201, 1000) for a, b in zip(stamps, stamps[1:])),
             'Decoded RGB window PTS differs')
     return stamps
+
+
+def _fraction(value):
+    """Convert a finite JSON decimal or rational to exact arithmetic."""
+    if isinstance(value, Fraction):
+        return value
+    if type(value) is int:
+        return Fraction(value)
+    if type(value) is float:
+        require(math.isfinite(value), 'Non-finite video time')
+        return Fraction(str(value))
+    require(type(value) is str, 'Invalid exact video time')
+    try:
+        result = Fraction(value)
+    except (ValueError, ZeroDivisionError) as error:
+        raise ValueError('Invalid exact video time') from error
+    return result
+
+
+def _fraction_text(value):
+    value = _fraction(value)
+    return f'{value.numerator}/{value.denominator}'
+
+
+def _window_frame_range(times, start, end):
+    """Return the exact contiguous frame ordinals in an absolute half-open PTS window."""
+    lower, upper = _fraction(start), _fraction(end)
+    require(lower < upper, 'Empty planned RGB time window')
+    require(times and all(a < b for a, b in zip(times, times[1:])),
+            'Probe PTS must be strictly increasing before ordinal selection')
+    first = next((index for index, stamp in enumerate(times) if stamp >= lower), len(times))
+    stop = next((index for index, stamp in enumerate(times) if stamp >= upper), len(times))
+    require(first < stop, 'Planned RGB window contains no archive frames')
+    selected = times[first:stop]
+    require(selected[0] >= lower and selected[-1] < upper
+            and all(lower <= stamp < upper for stamp in selected),
+            'Ordinal selection does not match half-open PTS window')
+    return first, stop - 1, selected
 
 
 def _playlist(text):
@@ -636,7 +693,7 @@ def _audio_commands(case, work, tools):
     ffmpeg, ffprobe = _tool(tools, 'ffmpeg'), _tool(tools, 'ffprobe')
     commands = [_command('stream-video-probe', [ffprobe, '-v', 'error', '-protocol_whitelist',
                  'file,pipe', '-select_streams', 'v:0', '-show_entries',
-                 'frame=best_effort_timestamp_time:stream=width,height,avg_frame_rate', '-of', 'json',
+                 'frame=best_effort_timestamp:stream=width,height,avg_frame_rate,time_base', '-of', 'json',
                  str(case / 'archive/index.m3u8')], 20, work / 'video-probe.json')]
     for label in ('B', 'A'):
         prefix = _prefix(case, label, control, text, headers, blocks)
@@ -654,12 +711,33 @@ def _probe(work):
     require((stream['width'], stream['height']) == (384, 288), 'Output geometry differs')
     numerator, denominator = (int(v) for v in stream['avg_frame_rate'].split('/'))
     require(denominator > 0 and numerator == FPS * denominator, 'Output FPS differs')
-    times = [float(v['best_effort_timestamp_time']) for v in probe['frames']]
-    require(600 <= len(times) <= 1100 and all(math.isfinite(t) for t in times), 'Invalid finite video PTS')
-    require(all(0 < b - a <= .201 for a, b in zip(times, times[1:])), 'Video PTS gap or regression')
-    span = times[-1] - times[0] + 1 / FPS
-    require(60 <= span <= 110, 'Video archive duration differs')
+    pts = _probe_frames(probe)
+    require(600 <= len(pts) <= 1100, 'Invalid video frame count')
+    require(all(0 < b - a <= Fraction(201, 1000) for a, b in zip(pts, pts[1:])),
+            'Video PTS gap or regression')
+    span = pts[-1] - pts[0] + Fraction(1, FPS)
+    require(Fraction(60) <= span <= Fraction(110), 'Video archive duration differs')
+    times = pts
     return times, span
+
+
+def _probe_frames(payload):
+    """Parse decoded-frame ordinals from exact integer PTS and stream time base."""
+    stream = payload['streams'][0]
+    tick_text = stream.get('time_base')
+    require(type(tick_text) is str and re.fullmatch(r'[1-9][0-9]*/[1-9][0-9]*', tick_text),
+            'Invalid video stream time base')
+    tick = Fraction(tick_text)
+    frames = payload['frames']
+    require(type(frames) is list and frames, 'Invalid video frame list')
+    times = []
+    for frame in frames:
+        pts = frame.get('best_effort_timestamp')
+        require(type(pts) is int, 'Video frame has no exact best-effort PTS')
+        times.append(pts * tick)
+    require(all(first < second for first, second in zip(times, times[1:])),
+            'Video PTS are not strictly increasing')
+    return times
 
 
 def _audio_reports(work):
@@ -668,48 +746,133 @@ def _audio_reports(work):
             _audio(_read(work / 'A-prefix.s16', AUDIO_CAP - 1), 1, .5))
 
 
+def _rgb_file_count(path, stride):
+    """Observe a failed RGB output size without reading or following foreign files."""
+    path = _parts(path)
+    parent = _dir_fd(path.parent)
+    descriptor = None
+    try:
+        before = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                and 0 <= before.st_size <= 384 * 1024 * 1024,
+                'Failed RGB output is not a bounded owned regular file')
+        descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        opened = os.fstat(descriptor)
+        require(_identity(opened) == _identity(before), 'Failed RGB output changed before observation')
+        after = os.fstat(descriptor)
+        require(_identity(after) == _identity(before)
+                and _identity(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) == _identity(before),
+                'Failed RGB output changed during observation')
+        return {'decoded_frames': before.st_size // stride,
+                'raw_bytes': before.st_size, 'partial_frame_bytes': before.st_size % stride}
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent)
+
+
+def _rgb_failure_code(error):
+    if isinstance(error, FileNotFoundError):
+        return 'MISSING_RGB_OUTPUT'
+    if isinstance(error, OSError):
+        return 'RGB_OUTPUT_IO_FAILED'
+    if isinstance(error, ValueError) and error.args == (
+            'Decoded RGB count differs from exact planned selection',):
+        return 'RGB_FRAME_COUNT_MISMATCH'
+    if isinstance(error, ValueError) and error.args == ('RGB frame is incomplete',):
+        return 'RGB_PARTIAL_FRAME'
+    return 'RGB_VALIDATION_FAILED'
+
+
+def _valid_rgb_failure(value):
+    stride = 384 * 288 * 3
+    return (isinstance(value, dict)
+            and set(value) == {'window_index', 'planned_frames', 'decoded_frames',
+                               'raw_bytes', 'partial_frame_bytes', 'reason', 'qualification'}
+            and type(value['window_index']) is int and 0 <= value['window_index'] < 14
+            and type(value['planned_frames']) is int and 1 <= value['planned_frames'] <= 1100
+            and (value['decoded_frames'] is None or
+                 (type(value['decoded_frames']) is int and 0 <= value['decoded_frames'] <= 384 * 1024 * 1024 // stride))
+            and (value['raw_bytes'] is None or
+                 (type(value['raw_bytes']) is int and 0 <= value['raw_bytes'] <= 384 * 1024 * 1024))
+            and (value['partial_frame_bytes'] is None or
+                 (type(value['partial_frame_bytes']) is int and 0 <= value['partial_frame_bytes'] < stride))
+            and (value['raw_bytes'] is None or
+                 (value['decoded_frames'] is not None and value['partial_frame_bytes'] is not None
+                  and value['raw_bytes'] == value['decoded_frames'] * stride + value['partial_frame_bytes']))
+            and value['reason'] in {'MISSING_RGB_OUTPUT', 'RGB_OUTPUT_IO_FAILED',
+                                    'RGB_FRAME_COUNT_MISMATCH', 'RGB_PARTIAL_FRAME',
+                                    'RGB_VALIDATION_FAILED'}
+            and value['qualification'] is False)
+
+
+def _select_filter_expression(first, last):
+    require(type(first) is int and type(last) is int and 0 <= first <= last < 1100,
+            'Invalid selected frame ordinals')
+    return f"select=between(n\\,{first}\\,{last})"
+
+
 def _video_commands(case, work, tools):
     case = _parts(case)
     os.close(_dir_fd(case))
     work = _work(work)
-    _, span = _probe(work)
+    times, span = _probe(work)
     audio, _ = _audio_reports(work)
     start = audio.get('first_pure_bin', 0.)
     require(0 <= start < span, 'Selected onset exceeds archive')
-    plan = _video_plan(start, span)
+    plan = _video_plan(start, span, times)
     _write_json(work / 'video-plan.json', plan)
     ffmpeg = _tool(tools, 'ffmpeg')
     commands = []
     for number, row in enumerate(plan):
+        selection = _select_filter_expression(row['first_frame_index'], row['last_frame_index'])
         commands.append(_command(f'stream-video-window-{number:02d}', [
             ffmpeg, '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
             '-protocol_whitelist', 'file,pipe', '-i', str(case / 'archive/index.m3u8'),
-            '-ss', str(row['start']), '-map', '0:v:0', '-an', '-t', str(row['duration']),
-            '-frames:v', str(round(FPS * row['duration'])), '-fps_mode', 'passthrough',
+            '-map', '0:v:0', '-an', '-vf', selection,
+            '-frames:v', str(row['expected_frames']), '-fps_mode', 'passthrough',
             '-f', 'rawvideo', '-pix_fmt', 'rgb24', str(work / f'video-{number:02d}.rgb')]))
     commands.append(_command('stream-a-return-audio', [
         ffmpeg, '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
         '-protocol_whitelist', 'file,pipe', '-i', str(case / 'archive/index.m3u8'),
-        '-ss', str(span - 2), '-vn', '-t', '2', '-ac', '1', '-ar', str(RATE),
+        '-ss', str(float(span - 2)), '-vn', '-t', '2', '-ac', '1', '-ar', str(RATE),
         '-f', 's16le', '-fs', str(128000 + 65536), str(work / 'A-return.s16')]))
     return commands
 
 
-def _video_plan(start, span):
-    require(0 <= start < span and span - start >= 60, 'Selected video shorter than60seconds')
+def _video_plan(start, span, times):
+    start, span = _fraction(start), _fraction(span)
+    require(Fraction(0) <= start < span and span - start >= 60,
+            'Selected video shorter than60seconds')
+    require(times and all(a < b for a, b in zip(times, times[1:])),
+            'Probe PTS must be strictly increasing before ordinal planning')
     windows, at = [], start
-    while at < span - .11:
-        duration = min(8., span - at)
+    while at < span - Fraction(11, 100):
+        duration = min(Fraction(8), span - at)
         if duration < 8:
             at = max(start, span - 8)
             duration = span - at
         windows.append({'start': at, 'duration': duration})
-        if at + duration >= span - .11:
+        if at + duration >= span - Fraction(11, 100):
             break
         at += duration
     require(len(windows) + 1 <= 14, 'Too many bounded RGB windows')
-    plan = windows + [{'start': span - 2, 'duration': 2, 'a_return': True}]
-    require(sum(round(FPS * row['duration']) * 384 * 288 * 3 for row in plan) <= 384 * 1024 * 1024,
+    plan = windows + [{'start': span - 2, 'duration': Fraction(2), 'a_return': True}]
+    origin = times[0]
+    for row in plan:
+        relative_start = row['start']
+        relative_end = relative_start + row['duration']
+        first, last, selected = _window_frame_range(times, origin + relative_start, origin + relative_end)
+        row.update(first_frame_index=first, last_frame_index=last,
+                   expected_frames=len(selected),
+                   start_pts=_fraction_text(origin + relative_start),
+                   end_pts=_fraction_text(origin + relative_end),
+                   first_pts=_fraction_text(selected[0]), last_pts=_fraction_text(selected[-1]))
+        # Keep legacy human-readable values as finite decimals; acceptance and
+        # replay rely on the exact rational fields and integer ordinals above.
+        row['start'] = float(relative_start)
+        row['duration'] = float(row['duration'])
+    require(sum(row['expected_frames'] * 384 * 288 * 3 for row in plan) <= 384 * 1024 * 1024,
             'RGB work budget exceeded')
     return plan
 
@@ -751,24 +914,46 @@ def _finish(case, work):
     agreement = _agreement(audio_b, original_b)
     require(agreement, 'Ported original/adapter onset, every bin, phase or tail differs')
     plan = _json(work / 'video-plan.json')
-    require(plan == _video_plan(audio_b.get('first_pure_bin', 0.), span), 'Video coverage plan changed')
+    require(plan == _video_plan(audio_b.get('first_pure_bin', 0.), span, times),
+            'Video coverage plan changed')
+    require(_absent(work / 'video-window-failure.json'), 'Stale RGB window failure observation')
     measurements = []
+    frame_stride = 384 * 288 * 3
     for number, row in enumerate(plan):
         path = work / f'video-{number:02d}.rgb'
-        maximum = round(FPS * row['duration']) * 384 * 288 * 3
-        raw = _read(path, maximum)
-        identity = hashlib.sha256(raw).hexdigest()
+        expected_count = row['expected_frames']
+        maximum = expected_count * frame_stride
+        decoded_count = None
         try:
-            measured = _video(raw, ROWS, (384, 288), row['duration'])
-            count = measured['decoded_frames']
-            _validate_video_window_timestamps(
-                times, times[0] + row['start'] - .001,
-                times[0] + row['start'] + row['duration'] - .001, count)
+            raw = _read(path, maximum)
+            decoded_count = len(raw) // frame_stride
+            require(len(raw) % frame_stride == 0, 'RGB frame is incomplete')
+            _validate_decoded_frame_count(decoded_count, expected_count)
+            identity = hashlib.sha256(raw).hexdigest()
+            measured = _video(raw, ROWS, (384, 288), row['duration'], expected_count)
+            _validate_video_window_timestamps(times, row, decoded_count)
             measured['timestamps_monotonic_bounded_201ms'] = True
+        except BaseException as error:
+            try:
+                observation = _rgb_file_count(path, frame_stride)
+                decoded_count = observation['decoded_frames']
+            except (FileNotFoundError, OSError, ValueError):
+                observation = {'decoded_frames': decoded_count, 'raw_bytes': None,
+                               'partial_frame_bytes': None}
+            failure = {'window_index': number, 'planned_frames': expected_count,
+                       **observation, 'reason': _rgb_failure_code(error), 'qualification': False}
+            try:
+                _write_json(work / 'video-window-failure.json', failure)
+            except BaseException:
+                # Keep the original validation failure; the enclosing worker
+                # still performs its unconditional process cleanup.
+                pass
+            raise
         finally:
             # The parent owns scratch custody. Only this exact owned RGB output
             # is removed, immediately after its bounded analysis, never adopted.
-            _unlink_owned(path)
+            if not _absent(path):
+                _unlink_owned(path)
         measurements.append(dict(row, raw_sha256=identity, measurement=measured))
     returned_pcm = _read(work / 'A-return.s16', 128000)
     # Verify the requested clip duration before applying the original fixed
@@ -787,7 +972,7 @@ def _finish(case, work):
               'timing_domains': _timing_report(control['selected_intervals'], audio_b),
               'decoded_B_selected_seconds': audio_b.get('selected_seconds', 0.),
               'archive_segments': proof['segment_count'], 'archive_video_frames': len(times),
-              'archive_span_seconds': span, 'selected_video_start': audio_b.get('first_pure_bin'),
+              'archive_span_seconds': float(span), 'selected_video_start': audio_b.get('first_pure_bin'),
               'all_archive_pts_monotonic_bounded_201ms': True, 'case_sha256': bindings,
               'ported_original_rule_equivalence': agreement,
               'helper_sha256': _sha(Path(__file__)),
@@ -1001,9 +1186,47 @@ def finish(case, work):
 
 def _forensic_structure(name, raw):
     if name.endswith('.json'):
-        value = json.loads(raw)
+        if name == 'video-window-failure.json':
+            def unique_object(pairs):
+                value = {}
+                for key, item in pairs:
+                    require(key not in value, 'Duplicate forensic RGB failure key')
+                    value[key] = item
+                return value
+            value = json.loads(raw, object_pairs_hook=unique_object)
+        else:
+            value = json.loads(raw)
         if name == 'video-plan.json':
-            require(isinstance(value, list) and len(value) <= 14, 'Invalid forensic video plan')
+            require(isinstance(value, list) and 1 <= len(value) <= 14, 'Invalid forensic video plan')
+            for row in value:
+                require(isinstance(row, dict)
+                        and set(row) in ({'start', 'duration', 'first_frame_index',
+                                          'last_frame_index', 'expected_frames', 'start_pts',
+                                          'end_pts', 'first_pts', 'last_pts'},
+                                         {'start', 'duration', 'a_return', 'first_frame_index',
+                                          'last_frame_index', 'expected_frames', 'start_pts',
+                                          'end_pts', 'first_pts', 'last_pts'}),
+                        'Invalid forensic RGB plan row')
+                require(type(row['start']) in (int, float) and math.isfinite(row['start'])
+                        and type(row['duration']) in (int, float) and math.isfinite(row['duration'])
+                        and type(row['first_frame_index']) is int
+                        and type(row['last_frame_index']) is int
+                        and type(row['expected_frames']) is int
+                        and 0 <= row['first_frame_index'] <= row['last_frame_index'] < 1100
+                        and row['expected_frames'] == row['last_frame_index'] - row['first_frame_index'] + 1
+                        and all(type(row[key]) is str for key in
+                                ('start_pts', 'end_pts', 'first_pts', 'last_pts')),
+                        'Invalid forensic RGB plan ordinals or PTS')
+                for key in ('start_pts', 'end_pts', 'first_pts', 'last_pts'):
+                    require(_fraction_text(_fraction(row[key])) == row[key],
+                            'Noncanonical forensic RGB rational')
+                require(_fraction(row['start_pts']) < _fraction(row['end_pts'])
+                        and _fraction(row['start_pts']) <= _fraction(row['first_pts'])
+                        and _fraction(row['first_pts']) <= _fraction(row['last_pts'])
+                        and _fraction(row['last_pts']) < _fraction(row['end_pts']),
+                        'Forensic RGB PTS outside window')
+        elif name == 'video-window-failure.json':
+            require(_valid_rgb_failure(value), 'Invalid forensic RGB failure observation')
         else:
             require(isinstance(value, dict), 'Expected forensic JSON object')
             if name == 'video-probe.json':
@@ -1059,6 +1282,7 @@ def failure_evidence(case_root, work_root):
     fixed_work += [('video-probe.json', 2 * 1024 * 1024, False),
                    ('video-plan.json', 65536, False), ('B-prefix.s16', AUDIO_CAP - 1, False),
                    ('A-prefix.s16', AUDIO_CAP - 1, False), ('A-return.s16', 128000, False)]
+    fixed_work += [('video-window-failure.json', 16 * 1024, False)]
     candidates = [('case', *row) for row in fixed_case] + [('analysis', *row) for row in fixed_work]
     candidates += [('case', f'archive/segment-{number:06d}.ts', 2 * 1024 * 1024, False)
                    for number in range(256)]
@@ -1083,6 +1307,9 @@ def failure_evidence(case_root, work_root):
             _forensic_structure(name, raw)
         except (ValueError, KeyError, TypeError, UnicodeError, RecursionError, OverflowError):
             errors.add('MALFORMED_STRUCTURE')
+            if label == 'analysis' and name == 'video-window-failure.json':
+                omitted += 1
+                continue
         if total + len(raw) > 32 * 1024 * 1024:
             errors.add('EVIDENCE_BUDGET')
             omitted += 1

@@ -18,7 +18,7 @@ import uuid
 
 sys.dont_write_bytecode = True
 GUARD_SHA256 = '6f623bb7234b3619ff859dec0afe9c1ad938f29d606f0836b69434312867e020'
-STREAM_MEDIA_SHA256 = 'ce116a89e01577d4ea692891b05159ac5e4a163f576d43d97a9974f695383c50'
+STREAM_MEDIA_SHA256 = 'dd9238119c10150d549501b086c59598ae8c991e282885ce2d5717367e1c863c'
 STREAM_TEST = 'streamed_session_two_owner_continuity'
 HLS_BATCH_SHA256 = '967ceaa7e7478c2488c3a984d4a4a15f968226ef82a7cd065b4a93b84aa161e7'
 PRODUCTION_TEST = 'normal_server_private_http_mpegts_renew_replace_and_cleanup'
@@ -202,7 +202,7 @@ LISTENER_REQUIRED_TESTS = frozenset({
     'listener_tests::media_transport_failure_response_is_fixed_and_private',
 })
 FILTERS = {'testsrc2', 'drawbox', 'sine', 'scale', 'format', 'crop', 'pad',
-           'setsar', 'setpts', 'fps', 'xstack', 'overlay'}
+           'setsar', 'setpts', 'fps', 'xstack', 'overlay', 'select'}
 
 
 def require(value, message):
@@ -588,6 +588,8 @@ def adopt_stream_evidence(driver, budget, specs, roots, *, forensic=False):
                        'audio-A-initial.json', 'video.json', 'qualification.json')}
     analysis_files.update({'B-prefix.s16': 4 * 1024**2, 'A-prefix.s16': 4 * 1024**2,
                           'A-return.s16': 128000, 'video-probe.json': 2 * 1024**2, 'video-plan.json': 65536})
+    if forensic:
+        analysis_files['video-window-failure.json'] = 16 * 1024
     require(type(specs) is list and len(specs) <= 600, 'Invalid stream evidence inventory')
     seen, adopted = set(), []
     prefix = 'stream-media-forensic' if forensic else 'stream-media'
@@ -618,12 +620,50 @@ def adopt_stream_evidence(driver, budget, specs, roots, *, forensic=False):
         require(parent is not None and allowed and maximum <= allowed
                 and spec['path'] == str(parent / leaf), 'Stream evidence is not in the reviewed allowlist')
         raw = stream_read(Path(spec['path']), parent, maximum, budget, cleanup=forensic)
+        if forensic and label == 'analysis' and leaf == 'video-window-failure.json':
+            _validate_stream_rgb_failure(raw)
         destination = driver.evidence / name
         require(not destination.exists() and not destination.is_symlink(), 'Stream evidence output already exists')
         destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         budget.atomic(destination, raw, evidence=True, cleanup=forensic)
         adopted.append({'relative_name': name, 'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()})
     return adopted
+
+
+def _validate_stream_rgb_failure(raw):
+    stride = 384 * 288 * 3
+
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            require(key not in value, 'Duplicate RGB failure JSON key')
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(raw, object_pairs_hook=unique_object)
+    except (ValueError, UnicodeError, TypeError) as error:
+        raise RuntimeError('Malformed RGB failure evidence') from error
+    require(type(value) is dict
+            and set(value) == {'window_index', 'planned_frames', 'decoded_frames',
+                               'raw_bytes', 'partial_frame_bytes', 'reason', 'qualification'}
+            and type(value['window_index']) is int and 0 <= value['window_index'] < 14
+            and type(value['planned_frames']) is int and 1 <= value['planned_frames'] <= 1100
+            and (value['decoded_frames'] is None or
+                 (type(value['decoded_frames']) is int
+                  and 0 <= value['decoded_frames'] <= 384 * 1024 * 1024 // stride))
+            and (value['raw_bytes'] is None or
+                 (type(value['raw_bytes']) is int and 0 <= value['raw_bytes'] <= 384 * 1024 * 1024))
+            and (value['partial_frame_bytes'] is None or
+                 (type(value['partial_frame_bytes']) is int and 0 <= value['partial_frame_bytes'] < stride))
+            and (value['raw_bytes'] is None or
+                 (value['decoded_frames'] is not None and value['partial_frame_bytes'] is not None
+                  and value['raw_bytes'] == value['decoded_frames'] * stride + value['partial_frame_bytes']))
+            and value['reason'] in {'MISSING_RGB_OUTPUT', 'RGB_OUTPUT_IO_FAILED',
+                                    'RGB_FRAME_COUNT_MISMATCH', 'RGB_PARTIAL_FRAME',
+                                    'RGB_VALIDATION_FAILED'}
+            and value['qualification'] is False,
+            'Invalid RGB failure evidence schema')
 
 
 def require_complete_stream_evidence(packet, roots, budget):

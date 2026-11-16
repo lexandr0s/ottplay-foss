@@ -2347,8 +2347,10 @@ fn run_normal_production(mode: ProductionMode) {
     let playlist = grid_status["output"]["playlist_path"]
         .as_str()
         .expect("private grid HLS playlist");
-    let mut grid_seen = playlist_snapshot(&api_origin, playlist)
-        .expect("grid HLS playlist before freshness barrier")
+    let mut grid_seen = playlist_snapshot_checked(&api_origin, playlist)
+        .unwrap_or_else(|failure| {
+            panic!("grid HLS playlist before freshness barrier: {failure}")
+        })
         .1
         .into_iter()
         .collect::<HashSet<_>>();
@@ -2534,8 +2536,10 @@ fn run_normal_production(mode: ProductionMode) {
             let before_playlist = current["output"]["playlist_path"]
                 .as_str()
                 .expect("pre-replacement HLS playlist");
-            replacement_seen = playlist_snapshot(&api_origin, before_playlist)
-                .expect("pre-replacement HLS playlist snapshot")
+            replacement_seen = playlist_snapshot_checked(&api_origin, before_playlist)
+                .unwrap_or_else(|failure| {
+                    panic!("pre-replacement HLS playlist snapshot: {failure}")
+                })
                 .1
                 .into_iter()
                 .collect();

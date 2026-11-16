@@ -54,6 +54,7 @@ def load(name, path):
 ci = load('multiview_ci_offline_under_test', HELPER)
 batch = load('multiview_hls_batch_under_test', ROOT / 'scripts/ci-multiview-hls-probe-batch.py')
 guard = load('multiview_ci_reviewed_guard', REFERENCE)
+media = load('multiview_unix_media_forensic_under_test', ROOT / 'scripts/ci-multiview-unix-media.py')
 
 
 def setUpModule():
@@ -137,6 +138,7 @@ CAPTURED_FILTER_ROWS = ''' .. sine              |->A       Generate sine wave au
  TS overlay           VV->V      Overlay a video source on top of the input.
  .. pad               V->V       Pad the input video.
  .. scale             V->V       Scale the input video size and/or convert the image format.
+ .. select            V->N       Select video frames to pass in output.
  .. setpts            V->V       Set PTS for the output video frame.
  .. setsar            V->V       Set the pixel sample aspect ratio.
  .S xstack            N->V       Stack video inputs into custom layout.
@@ -1785,6 +1787,63 @@ class StreamedContracts(unittest.TestCase):
                 with self.assertRaises((RuntimeError, FileNotFoundError)):
                     ci.adopt_stream_evidence(types.SimpleNamespace(evidence=evidence), guard.Budget(), specs, roots)
 
+    def test_bounded_rgb_failure_observation_is_forensic_only_and_exactly_named(self):
+        with tempfile.TemporaryDirectory(prefix="stream-rgb-forensic-") as raw:
+            root = Path(raw).resolve()
+            roots = tuple(root / name for name in ("inputs", "case", "analysis"))
+            for path in roots:
+                path.mkdir()
+            evidence = root / "evidence"
+            evidence.mkdir()
+            failure = {"window_index": 2, "planned_frames": 80, "decoded_frames": 65,
+                       "raw_bytes": 65 * 384 * 288 * 3, "partial_frame_bytes": 0,
+                       "reason": "RGB_FRAME_COUNT_MISMATCH", "qualification": False}
+            source = roots[2] / "video-window-failure.json"
+            payload = json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()
+            source.write_bytes(payload)
+            report = media.failure_evidence(roots[1], roots[2])
+            self.assertFalse(report["qualified"])
+            self.assertTrue(report["forensic_only"])
+            selected = [row for row in report["evidence"]
+                        if row["relative_name"].endswith("video-window-failure.json")]
+            self.assertEqual(len(selected), 1)
+            self.assertEqual(selected[0]["max_bytes"], 16 * 1024)
+            self.assertEqual(selected[0]["relative_name"],
+                             "stream-media-forensic/analysis/video-window-failure.json")
+            driver = types.SimpleNamespace(evidence=evidence)
+            adopted = ci.adopt_stream_evidence(driver, guard.Budget(), selected, roots, forensic=True)
+            destination = evidence / selected[0]["relative_name"]
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(adopted[0]["bytes"], len(payload))
+            for spec in (
+                    {**selected[0], "relative_name": "stream-media-forensic/analysis/unexpected.json"},
+                    {**selected[0], "max_bytes": 16 * 1024 + 1},
+                    {**selected[0], "relative_name": "stream-media/analysis/video-window-failure.json"}):
+                with self.subTest(spec=spec), self.assertRaises(RuntimeError):
+                    ci.adopt_stream_evidence(driver, guard.Budget(), [spec], roots, forensic=True)
+            malformed_payloads = (
+                json.dumps({**failure, "reason": "raw exception text"}).encode(),
+                json.dumps({**failure, "unexpected_url": "https://fixture.invalid/private"}).encode(),
+                b'{"window_index":2,"window_index":3}',
+            )
+            for malformed in malformed_payloads:
+                with self.subTest(malformed=malformed[:80]):
+                    source.write_bytes(malformed)
+                    malformed_report = media.failure_evidence(roots[1], roots[2])
+                    self.assertIn("MALFORMED_STRUCTURE", malformed_report["errors"])
+                    self.assertFalse(any(row["relative_name"].endswith("video-window-failure.json")
+                                         for row in malformed_report["evidence"]))
+                    with self.assertRaisesRegex(RuntimeError, "RGB failure"):
+                        ci.adopt_stream_evidence(
+                            types.SimpleNamespace(evidence=root / "reject-evidence"),
+                            guard.Budget(), selected, roots, forensic=True)
+            source.write_bytes(payload)
+            source.write_bytes(b" " * (16 * 1024 + 1))
+            oversized = media.failure_evidence(roots[1], roots[2])
+            self.assertIn("CUSTODY_OR_BOUND", oversized["errors"])
+            self.assertFalse(any(row["relative_name"].endswith("video-window-failure.json")
+                                 for row in oversized["evidence"]))
+
     def test_terminal_cap_preserves_primary_error_and_restores_previous_env(self):
         primary = "Synthetic original failure with exhausted remaining evidence budget"
         with Attempt() as attempt:
@@ -1810,6 +1869,7 @@ class StreamedContracts(unittest.TestCase):
 class ParsingTests(unittest.TestCase):
     def test_captured_filter_rows_and_legacy_three_flags_are_supported(self):
         self.assertEqual(ci.filter_names(CAPTURED_FILTER_ROWS), ci.FILTERS)
+        self.assertIn('select', ci.filter_names(' .. select            V->N       Select video frames to pass in output.'))
         legacy = '\n'.join(line.replace(line.split()[0], line.split()[0] + '.', 1)
                            for line in CAPTURED_FILTER_ROWS.splitlines())
         self.assertEqual(ci.filter_names(legacy), ci.FILTERS)

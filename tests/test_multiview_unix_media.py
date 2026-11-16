@@ -2,6 +2,7 @@
 from array import array
 import importlib.util
 import math
+from fractions import Fraction
 from pathlib import Path
 import sys
 import unittest
@@ -75,12 +76,69 @@ class SelectedPhaseContracts(unittest.TestCase):
 
 
 class VideoWindowCoverageContracts(unittest.TestCase):
+    def test_filter_expression_escapes_only_the_two_filter_argument_commas(self):
+        self.assertEqual(MEDIA._select_filter_expression(59, 138),
+                         r'select=between(n\,59\,138)')
+        for first, last in ((-1, 2), (3, 2), (0, 1100)):
+            with self.subTest(first=first, last=last), self.assertRaises(ValueError):
+                MEDIA._select_filter_expression(first, last)
+
     def test_all_planned_pts_must_have_decoded_rgb_frames(self):
-        pts = [index / MEDIA.FPS for index in range(72)]
-        stamps = MEDIA._validate_video_window_timestamps(pts, 0.0, 8.0, 72)
+        pts = [Fraction(index, MEDIA.FPS) for index in range(72)]
+        row = {'first_frame_index': 0, 'last_frame_index': 71, 'expected_frames': 72,
+               'start_pts': '0/1', 'end_pts': '8/1', 'first_pts': '0/1', 'last_pts': '71/10'}
+        stamps = MEDIA._validate_video_window_timestamps(pts, row, 72)
         self.assertEqual(len(stamps), 72)
         with self.assertRaisesRegex(ValueError, 'does not cover all planned PTS'):
-            MEDIA._validate_video_window_timestamps(pts, 0.0, 8.0, 65)
+            MEDIA._validate_video_window_timestamps(pts, row, 65)
+        with self.assertRaisesRegex(ValueError, 'does not cover all planned PTS'):
+            MEDIA._validate_video_window_timestamps(pts, row, 73)
+
+    def test_half_open_window_boundaries_on_vfr_pts_select_contiguous_ordinals(self):
+        pts = [Fraction(value, 100) for value in (0, 10, 20, 35, 50, 90)]
+        first, last, selected = MEDIA._window_frame_range(pts, Fraction(0), Fraction(1, 2))
+        self.assertEqual((first, last, selected), (0, 3, pts[:4]))
+        second, end, selected = MEDIA._window_frame_range(pts, Fraction(1, 2), Fraction(1))
+        self.assertEqual((second, end, selected), (4, 5, pts[4:]))
+        self.assertEqual(last + 1, second, 'Adjacent half-open windows must partition at the boundary')
+
+    def test_full_plan_rederives_vfr_indices_and_exact_byte_budget(self):
+        origin = Fraction(1421333, 1000000)
+        pts = [origin + Fraction(index, 10) for index in range(850)]
+        span = pts[-1] - pts[0] + Fraction(1, MEDIA.FPS)
+        plan = MEDIA._video_plan(Fraction(117, 20), span, pts)
+        self.assertEqual(plan, MEDIA._video_plan(Fraction(117, 20), span, pts))
+        self.assertEqual(len(plan), 11)
+        self.assertEqual([row['expected_frames'] for row in plan], [80] * 10 + [20])
+        self.assertEqual((plan[-1]['first_frame_index'], plan[-1]['last_frame_index']), (830, 849))
+        total = sum(row['expected_frames'] * 384 * 288 * 3 for row in plan)
+        self.assertEqual(total, 272056320)
+        self.assertLessEqual(total, 384 * 1024 * 1024)
+        for row in plan:
+            first, last, selected = MEDIA._window_frame_range(
+                pts, Fraction(row['start_pts']), Fraction(row['end_pts']))
+            self.assertEqual((first, last, len(selected)),
+                             (row['first_frame_index'], row['last_frame_index'], row['expected_frames']))
+
+    def test_nonmonotonic_duplicate_and_missing_pts_rejected(self):
+        base = {'streams': [{'time_base': '1/10'}]}
+        parsed = MEDIA._probe_frames({**base, 'frames': [
+            {'best_effort_timestamp': 142}, {'best_effort_timestamp': 143},
+            {'best_effort_timestamp': 145}]})
+        self.assertEqual(parsed, [Fraction(71, 5), Fraction(143, 10), Fraction(29, 2)])
+        for frame_rows in (
+                [{'best_effort_timestamp': n} for n in (0, 1, 1)],
+                [{'best_effort_timestamp': n} for n in (0, 2, 1)],
+                [{'best_effort_timestamp': 0}, {}]):
+            with self.subTest(frame_rows=frame_rows), self.assertRaises(ValueError):
+                MEDIA._probe_frames({**base, 'frames': frame_rows})
+
+    def test_exact_rgb_frame_count_rejects_truncation_and_extra_frames(self):
+        MEDIA._validate_decoded_frame_count(72, 72)
+        for observed in (65, 73):
+            with self.subTest(observed=observed), self.assertRaisesRegex(
+                    ValueError, 'exact planned selection'):
+                MEDIA._validate_decoded_frame_count(observed, 72)
 
 
 if __name__ == '__main__':
