@@ -18,7 +18,7 @@ import uuid
 
 sys.dont_write_bytecode = True
 GUARD_SHA256 = '6f623bb7234b3619ff859dec0afe9c1ad938f29d606f0836b69434312867e020'
-STREAM_MEDIA_SHA256 = '97703a705a2c33a1536893eeca2d11e65022d44fa1189ff59f300e2040cdf4e9'
+STREAM_MEDIA_SHA256 = 'ce116a89e01577d4ea692891b05159ac5e4a163f576d43d97a9974f695383c50'
 STREAM_TEST = 'streamed_session_two_owner_continuity'
 HLS_BATCH_SHA256 = '967ceaa7e7478c2488c3a984d4a4a15f968226ef82a7cd065b4a93b84aa161e7'
 PRODUCTION_TEST = 'normal_server_private_http_mpegts_renew_replace_and_cleanup'

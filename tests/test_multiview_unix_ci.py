@@ -147,7 +147,7 @@ CAPTURED_FILTER_ROWS = ''' .. sine              |->A       Generate sine wave au
 class FakeMedia:
     """Seven-function frozen analyzer API; commands remain synthetic Driver data."""
 
-    helper_sha256 = "97703a705a2c33a1536893eeca2d11e65022d44fa1189ff59f300e2040cdf4e9"
+    helper_sha256 = ci.STREAM_MEDIA_SHA256
 
     def __init__(self, attempt):
         self.attempt = attempt
@@ -1435,6 +1435,13 @@ class StreamedContracts(unittest.TestCase):
                     self.assertEqual(attempt.driver.budget.deadline, started + 1800)
                     self.assertEqual(attempt.driver.budget.work_deadline, started + 1680)
                     self.assertEqual(attempt.terminal()["status"], "pass")
+
+    def test_reviewed_analyzer_pin_matches_source_and_loader_accepts_it(self):
+        media_path = ROOT / 'scripts/ci-multiview-unix-media.py'
+        actual = hashlib.sha256(media_path.read_bytes()).hexdigest()
+        self.assertEqual(ci.STREAM_MEDIA_SHA256, actual)
+        loaded = ci.load_stream_media(ROOT, guard.Budget())
+        self.assertTrue(callable(loaded.finish))
 
     def test_changed_or_oversized_media_source_is_refused_before_import(self):
         with tempfile.TemporaryDirectory(prefix="stream-source-guard-offline-") as raw:
