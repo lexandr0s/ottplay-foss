@@ -136,7 +136,13 @@
             j,
             row,
             seen;
-        if (!value || value.version !== 1) return false;
+        if (
+            !value ||
+            value.version !== 1 ||
+            (Object.prototype.hasOwnProperty.call(value, "available") &&
+                typeof value.available !== "boolean")
+        )
+            return false;
         for (i = 0; i < lists.length; i++) {
             if (
                 Object.prototype.toString.call(value[lists[i]]) !==
