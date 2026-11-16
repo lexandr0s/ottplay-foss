@@ -885,6 +885,7 @@ mod startup_record_tests {
             site: EncoderFailureSite::SelectionFuture,
             lane: EncoderFailureLane::Video,
             selection_age: None,
+            write_failure: None,
         };
         let record = startup_failure_record(
             "startup_wait",
@@ -987,11 +988,43 @@ pub struct EncoderSelectionAge {
     pub last_publication: Option<EncoderPublicationAttempt>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncoderWritePhase {
+    /// No bytes accepted; counters distinguish zero calls from WouldBlock.
+    BeforeWrite,
+    Partial,
+    Complete,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncoderWriteScope {
+    RgbFrame,
+    BlackChunk,
+    AudioUnit,
+    InputSlice,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EncoderWriteFailure {
+    pub phase: EncoderWritePhase,
+    /// Offsets describe this write slice; BlackChunk is at most 4096 bytes.
+    pub scope: EncoderWriteScope,
+    pub media_index: Option<u64>,
+    pub offset: u64,
+    pub total: u64,
+    pub write_calls: u64,
+    pub would_block: u64,
+    pub interrupted: u64,
+    /// Deadline minus observed time, clamped to signed nanoseconds.
+    pub entry_remaining_ns: i64,
+    pub remaining_ns: i64,
+    pub elapsed_ns: u64,
+    pub last_progress_ago_ns: u64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EncoderFailureDetail {
     pub error: EncoderError,
     pub site: EncoderFailureSite,
     pub lane: EncoderFailureLane,
     pub selection_age: Option<EncoderSelectionAge>,
+    pub write_failure: Option<EncoderWriteFailure>,
 }
 impl From<EncoderError> for EncoderFailureDetail {
     fn from(error: EncoderError) -> Self {
@@ -1000,6 +1033,7 @@ impl From<EncoderError> for EncoderFailureDetail {
             site: EncoderFailureSite::Other,
             lane: EncoderFailureLane::Other,
             selection_age: None,
+            write_failure: None,
         }
     }
 }
@@ -1011,9 +1045,11 @@ impl EncoderFailureDetail {
             site,
             lane,
             selection_age: None,
+            write_failure: None,
         }
     }
 }
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod runtime {
     use super::*;
@@ -1274,6 +1310,7 @@ mod runtime {
                     error: EncoderError::Cancelled,
                     site: EncoderFailureSite::Other,
                     selection_age: None,
+                    write_failure: None,
                     lane: if self.lane == 0 {
                         EncoderFailureLane::Video
                     } else {
@@ -1746,22 +1783,102 @@ mod runtime {
         shared: &Shared,
         stall: Duration,
         absolute: Instant,
-        mut authorized: impl FnMut() -> Result<bool, EncoderError>,
+        authorized: impl FnMut() -> Result<bool, EncoderError>,
         lane: EncoderFailureLane,
     ) -> Result<(), EncoderFailureDetail> {
+        write_capture_complete_detail_clocked(
+            writer,
+            bytes,
+            shared,
+            stall,
+            absolute,
+            authorized,
+            lane,
+            Instant::now,
+            || thread::sleep(Duration::from_millis(2)),
+        )
+    }
+    // Clock/pause injection is private and only makes the real write loop's
+    // deadline branches deterministic in ordinary in-memory tests.
+    fn write_capture_complete_detail_clocked(
+        writer: &mut impl Write,
+        bytes: &[u8],
+        shared: &Shared,
+        stall: Duration,
+        absolute: Instant,
+        mut authorized: impl FnMut() -> Result<bool, EncoderError>,
+        lane: EncoderFailureLane,
+        mut now: impl FnMut() -> Instant,
+        mut pause: impl FnMut(),
+    ) -> Result<(), EncoderFailureDetail> {
         let mut offset = 0;
-        let mut advanced = Instant::now();
+        let entered = now();
+        let mut advanced = entered;
+        let (mut calls, mut blocked, mut interrupted) = (0u64, 0u64, 0u64);
+        let remaining = |time: Instant| -> i64 {
+            if absolute >= time {
+                absolute
+                    .duration_since(time)
+                    .as_nanos()
+                    .min(i64::MAX as u128) as i64
+            } else {
+                -(time
+                    .duration_since(absolute)
+                    .as_nanos()
+                    .min(i64::MAX as u128) as i64)
+            }
+        };
+        let failure =
+            |offset: usize, calls, blocked, interrupted, advanced: Instant, observed: Instant| {
+                let mut detail = EncoderFailureDetail::stalled(EncoderFailureSite::WriteAbsolute, lane);
+                detail.write_failure = Some(EncoderWriteFailure {
+                    scope: match lane {
+                        EncoderFailureLane::Video => EncoderWriteScope::RgbFrame,
+                        EncoderFailureLane::Audio => EncoderWriteScope::AudioUnit,
+                        _ => EncoderWriteScope::InputSlice,
+                    },
+                    media_index: None,
+                    phase: if offset == bytes.len() {
+                        EncoderWritePhase::Complete
+                    } else if offset == 0 {
+                        EncoderWritePhase::BeforeWrite
+                    } else {
+                        EncoderWritePhase::Partial
+                    },
+                    offset: offset as u64,
+                    total: bytes.len() as u64,
+                    write_calls: calls,
+                    would_block: blocked,
+                    interrupted,
+                    entry_remaining_ns: remaining(entered),
+                    remaining_ns: remaining(observed),
+                    elapsed_ns: observed
+                        .saturating_duration_since(entered)
+                        .as_nanos()
+                        .min(u64::MAX as u128) as u64,
+                    last_progress_ago_ns: observed
+                        .saturating_duration_since(advanced)
+                        .as_nanos()
+                        .min(u64::MAX as u128) as u64,
+                });
+                detail
+            };
         while offset < bytes.len() {
             if shared.stop.load(Ordering::Acquire) {
                 return Err(EncoderError::Cancelled.into());
             }
-            if Instant::now() > absolute {
-                return Err(EncoderFailureDetail::stalled(
-                    EncoderFailureSite::WriteAbsolute,
-                    lane,
+            let observed = now();
+            if observed > absolute {
+                return Err(failure(
+                    offset,
+                    calls,
+                    blocked,
+                    interrupted,
+                    advanced,
+                    observed,
                 ));
             }
-            if advanced.elapsed() >= stall {
+            if now().duration_since(advanced) >= stall {
                 return Err(EncoderFailureDetail::stalled(
                     EncoderFailureSite::WriteNoProgress,
                     lane,
@@ -1770,25 +1887,34 @@ mod runtime {
             if !authorized()? {
                 return Err(EncoderError::Cancelled.into());
             }
+            calls = calls.saturating_add(1);
             match writer.write(&bytes[offset..]) {
                 Ok(0) => return Err(EncoderError::ProcessFailed.into()),
                 Ok(count) if count <= bytes.len() - offset => {
                     offset += count;
-                    advanced = Instant::now();
+                    advanced = now();
                 }
                 Ok(_) => return Err(EncoderError::Io.into()),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(2))
+                    blocked = blocked.saturating_add(1);
+                    pause();
                 }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                    interrupted = interrupted.saturating_add(1);
+                }
                 Err(_) => return Err(EncoderError::Io.into()),
             }
         }
         // Completion cannot acknowledge an expired/revoked partial frame.
-        if Instant::now() > absolute {
-            return Err(EncoderFailureDetail::stalled(
-                EncoderFailureSite::WriteAbsolute,
-                lane,
+        let observed = now();
+        if observed > absolute {
+            return Err(failure(
+                offset,
+                calls,
+                blocked,
+                interrupted,
+                advanced,
+                observed,
             ));
         }
         if !authorized()? {
@@ -1817,11 +1943,18 @@ mod runtime {
                 absolute,
                 &mut authorized,
                 lane,
-            )?;
+            )
+            .map_err(|mut detail| {
+                if let Some(write) = &mut detail.write_failure {
+                    write.scope = EncoderWriteScope::BlackChunk;
+                }
+                detail
+            })?;
             remaining -= count;
         }
         Ok(())
     }
+
     #[cfg(test)]
     fn write_capture_complete(
         writer: &mut impl Write,
@@ -1964,7 +2097,10 @@ mod runtime {
                     ),
                     _ => Err(EncoderError::InvalidConfig.into()),
                 };
-                if let Err(error) = written {
+                if let Err(mut error) = written {
+                    if let Some(write) = &mut error.write_failure {
+                        write.media_index = Some(index);
+                    }
                     reservation.fail(error);
                     return Err(error);
                 }
@@ -2066,7 +2202,10 @@ mod runtime {
                     },
                     EncoderFailureLane::Audio,
                 );
-                if let Err(error) = written {
+                if let Err(mut error) = written {
+                    if let Some(write) = &mut error.write_failure {
+                        write.media_index = Some(index);
+                    }
                     reservation.fail(error);
                     return Err(error);
                 }
@@ -3826,6 +3965,244 @@ mod runtime {
         }
 
         #[test]
+        fn capture_write_absolute_trace_distinguishes_zero_partial_and_complete_without_sleep() {
+            use std::cell::Cell;
+            enum Step {
+                Bytes(usize, u64),
+                Block(u64),
+                Interrupt(u64),
+            }
+            struct Script<'a> {
+                clock: &'a Cell<Instant>,
+                steps: std::vec::IntoIter<Step>,
+                calls: usize,
+            }
+            impl Write for Script<'_> {
+                fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                    self.calls += 1;
+                    let (advance, result) = match self.steps.next().expect("unexpected write") {
+                        Step::Bytes(count, ns) => {
+                            assert!(count <= bytes.len());
+                            (ns, Ok(count))
+                        }
+                        Step::Block(ns) => (ns, Err(io::ErrorKind::WouldBlock.into())),
+                        Step::Interrupt(ns) => (ns, Err(io::ErrorKind::Interrupted.into())),
+                    };
+                    self.clock
+                        .set(self.clock.get() + Duration::from_nanos(advance));
+                    result
+                }
+                fn flush(&mut self) -> io::Result<()> {
+                    panic!("no extra flush")
+                }
+            }
+            let epoch = Instant::now();
+            for (entry_ns, deadline_ns, steps, phase, offset, calls, blocked, elapsed, progress_age) in [
+                (
+                    11,
+                    10,
+                    vec![],
+                    EncoderWritePhase::BeforeWrite,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ),
+                (
+                    0,
+                    10,
+                    vec![Step::Block(11)],
+                    EncoderWritePhase::BeforeWrite,
+                    0,
+                    1,
+                    1,
+                    11,
+                    11,
+                ),
+                (
+                    0,
+                    10,
+                    vec![Step::Bytes(2, 1), Step::Block(10)],
+                    EncoderWritePhase::Partial,
+                    2,
+                    2,
+                    1,
+                    11,
+                    10,
+                ),
+                (
+                    0,
+                    10,
+                    vec![Step::Bytes(4, 11)],
+                    EncoderWritePhase::Complete,
+                    4,
+                    1,
+                    0,
+                    11,
+                    0,
+                ),
+            ] {
+                let clock = Cell::new(epoch + Duration::from_nanos(entry_ns));
+                let shared = shared_at(epoch);
+                let mut writer = Script {
+                    clock: &clock,
+                    steps: steps.into_iter(),
+                    calls: 0,
+                };
+                let pauses = Cell::new(0);
+                let detail = write_capture_complete_detail_clocked(
+                    &mut writer,
+                    &[1, 2, 3, 4],
+                    &shared,
+                    Duration::from_secs(1),
+                    epoch + Duration::from_nanos(deadline_ns),
+                    || Ok(true),
+                    EncoderFailureLane::Video,
+                    || clock.get(),
+                    || pauses.set(pauses.get() + 1),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    (detail.error, detail.site, detail.lane),
+                    (
+                        EncoderError::Stalled,
+                        EncoderFailureSite::WriteAbsolute,
+                        EncoderFailureLane::Video
+                    )
+                );
+                assert!(detail.selection_age.is_none());
+                assert_eq!(
+                    detail.write_failure,
+                    Some(EncoderWriteFailure {
+                        phase,
+                        scope: EncoderWriteScope::RgbFrame,
+                        media_index: None,
+                        offset,
+                        total: 4,
+                        write_calls: calls,
+                        would_block: blocked,
+                        interrupted: 0,
+                        entry_remaining_ns: deadline_ns as i64 - entry_ns as i64,
+                        remaining_ns: -1,
+                        elapsed_ns: elapsed,
+                        last_progress_ago_ns: progress_age,
+                    })
+                );
+                assert_eq!(writer.calls as u64, calls);
+                assert_eq!(pauses.get(), blocked);
+                assert!(writer.steps.next().is_none());
+                fail(&shared, detail);
+                fail(&shared, EncoderError::Io);
+                assert_eq!(*lock(&shared.error), Some(detail));
+            }
+            // Interrupted calls still retry, exact-deadline completion still succeeds.
+            let clock = Cell::new(epoch);
+            let shared = shared_at(epoch);
+            let mut writer = Script {
+                clock: &clock,
+                steps: vec![Step::Interrupt(3), Step::Bytes(4, 7)].into_iter(),
+                calls: 0,
+            };
+            assert!(write_capture_complete_detail_clocked(
+                &mut writer,
+                &[1, 2, 3, 4],
+                &shared,
+                Duration::from_secs(1),
+                epoch + Duration::from_nanos(10),
+                || Ok(true),
+                EncoderFailureLane::Audio,
+                || clock.get(),
+                || panic!("Interrupted must not sleep"),
+            )
+            .is_ok());
+            assert_eq!(writer.calls, 2);
+            // A late audio completion records the interrupted call without changing retry.
+            let clock = Cell::new(epoch);
+            let mut writer = Script {
+                clock: &clock,
+                steps: vec![Step::Interrupt(3), Step::Bytes(4, 8)].into_iter(),
+                calls: 0,
+            };
+            let detail = write_capture_complete_detail_clocked(
+                &mut writer,
+                &[1, 2, 3, 4],
+                &shared,
+                Duration::from_secs(1),
+                epoch + Duration::from_nanos(10),
+                || Ok(true),
+                EncoderFailureLane::Audio,
+                || clock.get(),
+                || panic!("Interrupted must not sleep"),
+            )
+            .unwrap_err();
+            let trace = detail.write_failure.unwrap();
+            assert_eq!(trace.scope, EncoderWriteScope::AudioUnit);
+            assert_eq!(trace.phase, EncoderWritePhase::Complete);
+            assert_eq!((trace.write_calls, trace.interrupted, trace.would_block), (2, 1, 0));
+            assert_eq!((trace.offset, trace.total, trace.elapsed_ns, trace.remaining_ns), (4, 4, 11, -1));
+            // Black bootstrap is chunked; never report these offsets as a full frame.
+            let mut black_sink = Vec::new();
+            let detail = write_black_complete_detail(
+                &mut black_sink,
+                8192,
+                &shared,
+                Duration::from_secs(1),
+                epoch - Duration::from_nanos(1),
+                || panic!("expired black chunk must not authorize"),
+                EncoderFailureLane::Video,
+            )
+            .unwrap_err();
+            let trace = detail.write_failure.unwrap();
+            assert_eq!(trace.scope, EncoderWriteScope::BlackChunk);
+            assert_eq!(trace.phase, EncoderWritePhase::BeforeWrite);
+            assert_eq!((trace.offset, trace.total, trace.write_calls), (0, 4096, 0));
+            assert_eq!(trace.media_index, None);
+            assert!(black_sink.is_empty());
+            // The independent no-progress guard and original error precedence remain.
+            let clock = Cell::new(epoch);
+            let mut writer = Script {
+                clock: &clock,
+                steps: vec![Step::Block(5)].into_iter(),
+                calls: 0,
+            };
+            let detail = write_capture_complete_detail_clocked(
+                &mut writer,
+                &[1, 2, 3, 4],
+                &shared,
+                Duration::from_nanos(5),
+                epoch + Duration::from_nanos(100),
+                || Ok(true),
+                EncoderFailureLane::Audio,
+                || clock.get(),
+                || {},
+            )
+            .unwrap_err();
+            assert_eq!(
+                detail,
+                EncoderFailureDetail::stalled(
+                    EncoderFailureSite::WriteNoProgress,
+                    EncoderFailureLane::Audio
+                )
+            );
+            shared.stop.store(true, Ordering::Release);
+            let detail = write_capture_complete_detail_clocked(
+                &mut writer,
+                &[1],
+                &shared,
+                Duration::ZERO,
+                epoch,
+                || panic!("stop precedes authorization"),
+                EncoderFailureLane::Video,
+                || clock.get(),
+                || panic!("stop precedes pause"),
+            )
+            .unwrap_err();
+            assert_eq!(detail, EncoderError::Cancelled.into());
+            assert_eq!(writer.calls, 1);
+        }
+
+        #[test]
         fn actual_capture_write_and_pacer_report_origin_without_changing_priority() {
             let now = Instant::now();
             let shared = shared_at(now);
@@ -3840,13 +4217,14 @@ mod runtime {
                 EncoderFailureLane::Video,
             )
             .unwrap_err();
-            assert_eq!(
-                absolute,
-                EncoderFailureDetail::stalled(
-                    EncoderFailureSite::WriteAbsolute,
-                    EncoderFailureLane::Video
-                )
-            );
+            assert_eq!(absolute.error, EncoderError::Stalled);
+            assert_eq!(absolute.site, EncoderFailureSite::WriteAbsolute);
+            assert_eq!(absolute.lane, EncoderFailureLane::Video);
+            assert!(absolute.selection_age.is_none());
+            let observed = absolute.write_failure.unwrap();
+            assert_eq!(observed.phase, EncoderWritePhase::BeforeWrite);
+            assert_eq!((observed.offset, observed.total, observed.write_calls), (0, 1, 0));
+            assert!(observed.entry_remaining_ns < 0 && observed.remaining_ns < 0);
             let no_progress = write_capture_complete_detail(
                 &mut sink,
                 &[1],

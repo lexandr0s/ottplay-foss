@@ -13,7 +13,8 @@ use ottplay_core::multiview::{
     decoder::{self, BoundContext, DecoderError, GrantedStream, PublicationAuthority},
     encoder::{
         EncoderError, EncoderFailureDetail, EncoderFailureLane, EncoderFailureSite,
-        EncoderPublicationOutcome, EncoderSelectionAge, EncoderState,
+        EncoderPublicationOutcome, EncoderSelectionAge, EncoderState, EncoderWriteFailure,
+        EncoderWritePhase, EncoderWriteScope,
     },
     frames::FrameSpec,
     geometry::{CanvasSpec, ImportedRect, OverlapPolicy, ValidatedGeometry},
@@ -326,6 +327,25 @@ fn selection_age_json(selection: EncoderSelectionAge) -> Value {
         "last_capture_to_target_ns":selection.last_capture_to_target_ns,
         "last_publication":last_publication})
 }
+fn write_failure_json(write: EncoderWriteFailure) -> Value {
+    let phase = match write.phase {
+        EncoderWritePhase::BeforeWrite => "BeforeWrite",
+        EncoderWritePhase::Partial => "Partial",
+        EncoderWritePhase::Complete => "Complete",
+    };
+    let scope = match write.scope {
+        EncoderWriteScope::RgbFrame => "RgbFrame",
+        EncoderWriteScope::BlackChunk => "BlackChunk",
+        EncoderWriteScope::AudioUnit => "AudioUnit",
+        EncoderWriteScope::InputSlice => "InputSlice",
+    };
+    json!({"phase":phase,"scope":scope,"media_index":write.media_index,"offset":write.offset,"total":write.total,
+        "write_calls":write.write_calls,"would_block":write.would_block,
+        "interrupted":write.interrupted,"entry_remaining_ns":write.entry_remaining_ns,
+        "remaining_ns":write.remaining_ns,"elapsed_ns":write.elapsed_ns,
+        "last_progress_ago_ns":write.last_progress_ago_ns})
+}
+
 fn failure_detail_json(detail: Option<EncoderFailureDetail>) -> Value {
     let (site, lane) = match detail {
         Some(detail) => (
@@ -354,6 +374,9 @@ fn failure_detail_json(detail: Option<EncoderFailureDetail>) -> Value {
     let mut value = json!({"error":encoder_error_label(detail.map(|value| value.error)),"site":site,"lane":lane});
     if let Some(selection) = detail.and_then(|value| value.selection_age) {
         value["selection_age"] = selection_age_json(selection);
+    }
+    if let Some(write) = detail.and_then(|value| value.write_failure) {
+        value["write_failure"] = write_failure_json(write);
     }
     value
 }
@@ -1015,6 +1038,7 @@ mod output_failure_tests {
             site: EncoderFailureSite::Other,
             lane: EncoderFailureLane::Other,
             selection_age: None,
+            write_failure: None,
         }
     }
 
@@ -1189,6 +1213,7 @@ mod output_failure_tests {
                     site,
                     lane,
                     selection_age: None,
+                    write_failure: None,
                 }));
                 assert_eq!(
                     value,
@@ -1209,12 +1234,64 @@ mod output_failure_tests {
     }
 
     #[test]
+    fn write_failure_numbers_preserve_phase_scope_and_signed_deadline_offsets() {
+        for (phase, phase_label) in [
+            (EncoderWritePhase::BeforeWrite, "BeforeWrite"),
+            (EncoderWritePhase::Partial, "Partial"),
+            (EncoderWritePhase::Complete, "Complete"),
+        ] {
+            for (scope, scope_label) in [
+                (EncoderWriteScope::RgbFrame, "RgbFrame"),
+                (EncoderWriteScope::BlackChunk, "BlackChunk"),
+                (EncoderWriteScope::AudioUnit, "AudioUnit"),
+                (EncoderWriteScope::InputSlice, "InputSlice"),
+            ] {
+                let mut original = detail(EncoderError::Stalled);
+                original.site = EncoderFailureSite::WriteAbsolute;
+                original.lane = EncoderFailureLane::Video;
+                original.write_failure = Some(EncoderWriteFailure {
+                    phase,
+                    scope,
+                    media_index: Some(752),
+                    offset: 4096,
+                    total: 8192,
+                    write_calls: 3,
+                    would_block: 1,
+                    interrupted: 1,
+                    entry_remaining_ns: 100,
+                    remaining_ns: -1,
+                    elapsed_ns: 101,
+                    last_progress_ago_ns: 20,
+                });
+                let value = failure_detail_json(Some(original));
+                assert_eq!(value.as_object().unwrap().len(), 4);
+                assert_eq!(
+                    value["write_failure"],
+                    json!({"phase":phase_label,"scope":scope_label,
+                    "media_index":752,"offset":4096,"total":8192,"write_calls":3,"would_block":1,
+                    "interrupted":1,"entry_remaining_ns":100,"remaining_ns":-1,"elapsed_ns":101,
+                    "last_progress_ago_ns":20})
+                );
+                let message =
+                    output_failure_message(&snapshot(EncoderState::Failed), || Some(original)).unwrap();
+                let (_, rest) = message.split_once("; detail=").unwrap();
+                let (encoded, _) = rest.split_once("; snapshot=").unwrap();
+                assert_eq!(serde_json::from_str::<Value>(encoded).unwrap(), value);
+            }
+        }
+        assert!(failure_detail_json(Some(detail(EncoderError::Stalled)))
+            .get("write_failure")
+            .is_none());
+    }
+
+    #[test]
     fn early_output_failure_keeps_origin_detail_and_parseable_snapshot() {
         let original = EncoderFailureDetail {
             error: EncoderError::Stalled,
             site: EncoderFailureSite::SelectionAge,
             lane: EncoderFailureLane::Video,
             selection_age: None,
+            write_failure: None,
         };
         let calls = std::cell::Cell::new(0);
         let message = output_failure_message(&snapshot(EncoderState::Failed), || {
@@ -1252,6 +1329,7 @@ mod output_failure_tests {
             site: EncoderFailureSite::SelectionAge,
             lane: EncoderFailureLane::Video,
             selection_age: Some(selection_age()),
+            write_failure: None,
         };
         let value = failure_detail_json(Some(original));
         assert_eq!(value.as_object().unwrap().len(), 4);
@@ -1325,6 +1403,7 @@ mod output_failure_tests {
                     site: EncoderFailureSite::SelectionAge,
                     lane: EncoderFailureLane::Video,
                     selection_age: Some(selection),
+                    write_failure: None,
                 })
             })
             .unwrap();
