@@ -10,6 +10,9 @@ mod production_config;
 #[path = "support/multiview_production_tls.rs"]
 mod production_tls;
 
+#[path = "../src/private_media_attempt.rs"]
+mod media_attempt;
+
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -22,7 +25,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::OnceLock,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -700,6 +703,7 @@ struct FixtureReadFailure {
     temporary_busy: bool,
     transport_error: Option<TransportErrorFlags>,
     elapsed_ms: Option<u64>,
+    preheader_refusal: Option<PreheaderRefusal>,
 }
 impl FixtureReadFailure {
     fn without_body(
@@ -715,6 +719,7 @@ impl FixtureReadFailure {
             temporary_busy: false,
             transport_error: None,
             elapsed_ms: None,
+            preheader_refusal: None,
         }
     }
     fn transport(
@@ -732,6 +737,7 @@ impl FixtureReadFailure {
             temporary_busy: false,
             transport_error: Some(TransportErrorFlags::capture(error)),
             elapsed_ms: Some(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)),
+            preheader_refusal: None,
         }
     }
     fn response(stage: FixtureReadStage, status: u16, bytes: &[u8]) -> Self {
@@ -747,6 +753,7 @@ impl FixtureReadFailure {
                 && bytes == br#"{"error":"temporary_busy","version":1}"#,
             transport_error: None,
             elapsed_ms: None,
+            preheader_refusal: None,
         }
     }
 }
@@ -769,6 +776,17 @@ impl std::fmt::Display for FixtureReadFailure {
         if let (Some(flags), Some(elapsed_ms)) = (self.transport_error, self.elapsed_ms) {
             write!(out, " elapsed_ms={elapsed_ms} transport_timeout={} transport_connect={} transport_request={} transport_body={} transport_decode={} transport_builder={}",
                 flags.timeout, flags.connect, flags.request, flags.body, flags.decode, flags.builder)?;
+        }
+        if let Some(proof) = self.preheader_refusal {
+            write!(
+                out,
+                " preheader_busy_marker={} stderr_bytes={} stderr_sha256=",
+                proof.marker.get(),
+                proof.stderr_bytes
+            )?;
+            for byte in proof.stderr_sha256 {
+                write!(out, "{byte:02x}")?;
+            }
         }
         Ok(())
     }
@@ -811,6 +829,23 @@ fn http_checked_with_timeout(
     limit: usize,
     timeout: Duration,
 ) -> Result<(u16, Vec<u8>), FixtureReadFailure> {
+    http_checked_with_attempt(method, url, token, request_id, body, limit, timeout, None)
+}
+
+fn http_checked_with_attempt(
+    method: &str,
+    url: &str,
+    token: Option<&str>,
+    request_id: Option<&str>,
+    body: Option<&Value>,
+    limit: usize,
+    timeout: Duration,
+    attempt: Option<media_attempt::Marker>,
+) -> Result<(u16, Vec<u8>), FixtureReadFailure> {
+    assert!(
+        attempt.is_none() || method == "GET",
+        "attempt marker is GET-only"
+    );
     let fixture = fixture_http();
     fixture.runtime.block_on(async {
         let operation = async {
@@ -829,6 +864,9 @@ fn http_checked_with_timeout(
             }
             if let Some(value) = body {
                 request = request.json(value);
+            }
+            if let Some(marker) = attempt {
+                request = request.header(media_attempt::HEADER, marker.get().to_string());
             }
             let request_started = Instant::now();
             let mut response = request.send().await.map_err(|error| {
@@ -972,7 +1010,17 @@ fn get_url_checked_with_timeout(
     limit: usize,
     timeout: Duration,
 ) -> Result<(u16, Vec<u8>), FixtureReadFailure> {
-    let response = http_checked_with_timeout("GET", url, token, None, None, limit, timeout);
+    get_url_checked_with_attempt(url, token, limit, timeout, None)
+}
+fn get_url_checked_with_attempt(
+    url: &str,
+    token: Option<&str>,
+    limit: usize,
+    timeout: Duration,
+    attempt: Option<media_attempt::Marker>,
+) -> Result<(u16, Vec<u8>), FixtureReadFailure> {
+    let response =
+        http_checked_with_attempt("GET", url, token, None, None, limit, timeout, attempt);
     if response.as_ref().is_ok_and(|(status, _)| *status == 200)
         && reqwest::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == "https")
     {
@@ -1402,6 +1450,15 @@ fn playlist_snapshot_checked_with_timeout(
     playlist_path: &str,
     timeout: Duration,
 ) -> Result<(u64, Vec<String>), FixtureReadFailure> {
+    playlist_snapshot_attempt_with_timeout(base, playlist_path, timeout, None)
+}
+
+fn playlist_snapshot_attempt_with_timeout(
+    base: &str,
+    playlist_path: &str,
+    timeout: Duration,
+    attempt: Option<media_attempt::Marker>,
+) -> Result<(u64, Vec<String>), FixtureReadFailure> {
     let playlist_url =
         if playlist_path.starts_with("http://") || playlist_path.starts_with("https://") {
             reqwest::Url::parse(playlist_path).map_err(|_| {
@@ -1432,9 +1489,213 @@ fn playlist_snapshot_checked_with_timeout(
         "https",
         "HLS media must use the selected HTTPS listener"
     );
+    // Only the existing private playlist seed path carries a diagnostic marker.
+    // The exact origin/HTTPS checks above remain fatal and precede the request.
+    let attempt = attempt.filter(|_| {
+        playlist_url.path().starts_with("/multiview/v1/media/")
+            && playlist_url.path().ends_with("/index.m3u8")
+            && playlist_url.query().is_none()
+    });
     let (code, playlist) =
-        get_url_checked_with_timeout(playlist_url.as_str(), None, 1024 * 1024, timeout)?;
+        get_url_checked_with_attempt(playlist_url.as_str(), None, 1024 * 1024, timeout, attempt)?;
     parse_playlist_snapshot_response(&playlist_url, &expected, code, &playlist)
+}
+
+// The counter is never reset between owned fixtures; exhaustion fails before a
+// request, rather than wrapping to a marker whose terminal event could be old.
+static NEXT_SEED_ATTEMPT: AtomicU64 = AtomicU64::new(1);
+fn next_seed_attempt(counter: &AtomicU64) -> Option<media_attempt::Marker> {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .ok()
+        .and_then(media_attempt::Marker::new)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PreheaderRefusal {
+    marker: media_attempt::Marker,
+    stderr_bytes: usize,
+    stderr_sha256: [u8; 32],
+}
+#[derive(Clone, Copy)]
+struct StderrStart {
+    dev: u64,
+    ino: u64,
+    length: usize,
+    prefix_sha256: [u8; 32],
+}
+// Read exactly the registered owned file, with the same 64KiB, owner, regular,
+// single-link, mode, no-follow and stable-identity checks as failure capture.
+// Unlike the display redactor, classification consumes only exact closed lines.
+fn owned_stderr_snapshot() -> Option<(u64, u64, Vec<u8>)> {
+    let root = FAILURE_STDERR_ROOT
+        .try_with(|slot| slot.try_borrow().ok()?.clone())
+        .ok()??;
+    let path = root.join("server.stderr");
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+        .ok()?;
+    let before = file.metadata().ok()?;
+    if !before.is_file()
+        || before.nlink() != 1
+        || before.uid() != unsafe { libc::geteuid() }
+        || before.mode() & 0o077 != 0
+        || before.len() > 65536
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    (&file).take(65537).read_to_end(&mut bytes).ok()?;
+    let after = file.metadata().ok()?;
+    let identity = |m: &fs::Metadata| {
+        (
+            m.dev(),
+            m.ino(),
+            m.len(),
+            m.mode(),
+            m.nlink(),
+            m.uid(),
+            m.mtime(),
+            m.mtime_nsec(),
+            m.ctime(),
+            m.ctime_nsec(),
+        )
+    };
+    if bytes.len() > 65536
+        || bytes.len() as u64 != after.len()
+        || identity(&before) != identity(&after)
+        || identity(&after) != identity(&fs::symlink_metadata(&path).ok()?)
+    {
+        return None;
+    }
+    Some((after.dev(), after.ino(), bytes))
+}
+impl StderrStart {
+    fn capture() -> Option<Self> {
+        let (dev, ino, bytes) = owned_stderr_snapshot()?;
+        Self::from_snapshot(dev, ino, &bytes)
+    }
+    fn from_snapshot(dev: u64, ino: u64, bytes: &[u8]) -> Option<Self> {
+        if bytes.len() > 65536 || (!bytes.is_empty() && bytes.last() != Some(&b'\n')) {
+            return None;
+        }
+        Some(Self {
+            dev,
+            ino,
+            length: bytes.len(),
+            prefix_sha256: Sha256::digest(bytes).into(),
+        })
+    }
+    fn appended<'a>(&self, dev: u64, ino: u64, bytes: &'a [u8]) -> Option<&'a [u8]> {
+        if (dev, ino) != (self.dev, self.ino) || bytes.len() > 65536 {
+            return None;
+        }
+        let prefix = bytes.get(..self.length)?;
+        let digest: [u8; 32] = Sha256::digest(prefix).into();
+        if digest != self.prefix_sha256 {
+            return None;
+        }
+        Some(&bytes[self.length..])
+    }
+}
+fn matching_preheader_refusal(bytes: &[u8], marker: media_attempt::Marker) -> bool {
+    // Incomplete tails cannot qualify. Malformed event-schema lines are fatal,
+    // including a damaged/extra field that could hide a duplicate marker.
+    if bytes.is_empty() || bytes.last() != Some(&b'\n') {
+        return false;
+    }
+    let mut matching = None;
+    for line in bytes[..bytes.len() - 1].split(|byte| *byte == b'\n') {
+        if !line
+            .windows(b"private_media_attempt".len())
+            .any(|window| window == b"private_media_attempt")
+        {
+            continue;
+        }
+        let Some(event) = std::str::from_utf8(line)
+            .ok()
+            .and_then(media_attempt::Terminal::parse)
+        else {
+            return false;
+        };
+        if event.marker == marker {
+            if matching.is_some() {
+                return false;
+            }
+            matching = Some(event);
+        }
+    }
+    matching.is_some_and(|event| {
+        event.site == media_attempt::Site::BodyFirst
+            && event.kind == media_attempt::Kind::TemporaryBusy
+            && event.transport == media_attempt::Transport::Tls
+    })
+}
+fn is_seed_send_failure(failure: &FixtureReadFailure) -> bool {
+    failure.stage == FixtureReadStage::HttpSend
+        && failure.status.is_none()
+        && failure.response_bytes.is_none()
+        && failure.response_sha256.is_none()
+        && failure.transport_error.is_some_and(|flags| {
+            flags.request
+                && !flags.timeout
+                && !flags.connect
+                && !flags.builder
+                && !flags.body
+                && !flags.decode
+        })
+}
+fn classify_seed_refusal_evidence(
+    mut failure: FixtureReadFailure,
+    marker: media_attempt::Marker,
+    start: StderrStart,
+    snapshot: (u64, u64, &[u8]),
+    now: Instant,
+    deadline: Instant,
+) -> FixtureReadFailure {
+    let (dev, ino, bytes) = snapshot;
+    if is_seed_send_failure(&failure)
+        && now < deadline
+        && start
+            .appended(dev, ino, bytes)
+            .is_some_and(|tail| matching_preheader_refusal(tail, marker))
+    {
+        failure.temporary_busy = true;
+        failure.preheader_refusal = Some(PreheaderRefusal {
+            marker,
+            stderr_bytes: bytes.len(),
+            stderr_sha256: Sha256::digest(bytes).into(),
+        });
+    }
+    failure
+}
+fn classify_seed_refusal(
+    failure: FixtureReadFailure,
+    marker: media_attempt::Marker,
+    start: Option<StderrStart>,
+    deadline: Instant,
+) -> FixtureReadFailure {
+    if !is_seed_send_failure(&failure) || Instant::now() >= deadline {
+        return failure;
+    }
+    if let Some(start) = start {
+        // One immediate bounded snapshot, never waiting for a delayed logger.
+        if let Some((dev, ino, bytes)) = owned_stderr_snapshot() {
+            return classify_seed_refusal_evidence(
+                failure,
+                marker,
+                start,
+                (dev, ino, &bytes),
+                Instant::now(),
+                deadline,
+            );
+        }
+    }
+    failure
 }
 
 fn seed_busy_retry_delay(
@@ -1466,12 +1727,20 @@ fn playlist_snapshot_seed_until(
     let mut last_busy = None;
     loop {
         let now = Instant::now();
-        let Some(timeout) = seed_request_timeout(now, deadline) else {
+        let Some(_) = seed_request_timeout(now, deadline) else {
             return Err(seed_deadline_failure(last_busy));
         };
-        match playlist_snapshot_checked_with_timeout(base, playlist_path, timeout) {
+        let marker =
+            next_seed_attempt(&NEXT_SEED_ATTEMPT).expect("private media attempt counter exhausted");
+        let stderr_start = StderrStart::capture();
+        // Snapshot work consumes this SAME deadline; do not restore its time.
+        let Some(timeout) = seed_request_timeout(Instant::now(), deadline) else {
+            return Err(seed_deadline_failure(last_busy));
+        };
+        match playlist_snapshot_attempt_with_timeout(base, playlist_path, timeout, Some(marker)) {
             Ok(snapshot) => return Ok(snapshot),
             Err(failure) => {
+                let failure = classify_seed_refusal(failure, marker, stderr_start, deadline);
                 let Some(delay) = seed_busy_retry_delay(&failure, Instant::now(), deadline) else {
                     return Err(failure);
                 };
@@ -1529,6 +1798,162 @@ fn parse_playlist_snapshot_response(
 
 #[test]
 fn playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts() {
+    let marker = media_attempt::Marker::new(41).unwrap();
+    let event = media_attempt::Terminal {
+        marker,
+        site: media_attempt::Site::BodyFirst,
+        kind: media_attempt::Kind::TemporaryBusy,
+        transport: media_attempt::Transport::Tls,
+    };
+    let line = format!("{event}\n");
+    assert!(matching_preheader_refusal(line.as_bytes(), marker));
+    for bytes in [
+        Vec::new(),
+        line.trim_end().as_bytes().to_vec(),
+        format!("{line}{line}").into_bytes(),
+        line.replace("marker=41", "marker=42").into_bytes(),
+        line.replace("marker=41", "marker=041").into_bytes(),
+        line.replace("reason=temporary_busy", "reason=secret-canary")
+            .into_bytes(),
+        line.replace(" terminal=closed", " extra=true terminal=closed")
+            .into_bytes(),
+        line.replace(" terminal=closed", " terminal=open")
+            .into_bytes(),
+        line.replace("site=body_first", "site=body_later")
+            .into_bytes(),
+        line.replace("site=body_first", "site=supervisor")
+            .into_bytes(),
+        line.replace("reason=temporary_busy", "reason=unavailable")
+            .into_bytes(),
+        line.replace("reason=temporary_busy", "reason=denied")
+            .into_bytes(),
+        line.replace("transport=tls", "transport=http").into_bytes(),
+    ] {
+        assert!(!matching_preheader_refusal(&bytes, marker));
+    }
+    let old = b"previous complete event\n";
+    let start = StderrStart::from_snapshot(7, 8, old).unwrap();
+    assert!(StderrStart::from_snapshot(7, 8, b"incomplete old tail").is_none());
+    assert!(StderrStart::from_snapshot(7, 8, &vec![0; 65537]).is_none());
+    let stale = StderrStart::from_snapshot(7, 8, line.as_bytes()).unwrap();
+    assert!(!matching_preheader_refusal(
+        stale.appended(7, 8, line.as_bytes()).unwrap(),
+        marker
+    ));
+    assert!(!matching_preheader_refusal(
+        format!("{line}private_media_attempt broken\n").as_bytes(),
+        marker
+    ));
+    assert!(!matching_preheader_refusal(
+        format!("{line} {line}").as_bytes(),
+        marker
+    ));
+    let unrelated = media_attempt::Terminal {
+        marker: media_attempt::Marker::new(42).unwrap(),
+        ..event
+    };
+    assert!(matching_preheader_refusal(
+        format!("{unrelated}\n{line}").as_bytes(),
+        marker
+    ));
+    let bytes = [old.as_slice(), line.as_bytes()].concat();
+    let now = Instant::now();
+    let deadline = now + Duration::from_millis(100);
+    let send = FixtureReadFailure {
+        stage: FixtureReadStage::HttpSend,
+        status: None,
+        response_bytes: None,
+        response_sha256: None,
+        temporary_busy: false,
+        transport_error: Some(TransportErrorFlags {
+            request: true,
+            timeout: false,
+            connect: false,
+            builder: false,
+            body: false,
+            decode: false,
+        }),
+        elapsed_ms: Some(2),
+        preheader_refusal: None,
+    };
+    let recognized =
+        classify_seed_refusal_evidence(send, marker, start, (7, 8, &bytes), now, deadline);
+    assert!(recognized.temporary_busy && recognized.preheader_refusal.is_some());
+    assert_eq!(recognized.status, None);
+    assert_eq!(recognized.response_bytes, None);
+    assert_eq!(recognized.response_sha256, None);
+    assert_eq!(recognized.elapsed_ms, Some(2));
+    assert!(recognized.transport_error.unwrap().request);
+    assert_eq!(
+        seed_busy_retry_delay(&recognized, now, deadline),
+        Some(Duration::from_millis(100))
+    );
+    let retained = seed_deadline_failure(Some(recognized));
+    assert!(retained.preheader_refusal.is_some() && retained.status.is_none());
+    for (dev, ino, snapshot, at) in [
+        (7, 9, bytes.as_slice(), now),
+        (9, 8, bytes.as_slice(), now),
+        (7, 8, old.as_slice(), now),
+        (7, 8, bytes.as_slice(), deadline),
+    ] {
+        assert!(
+            !classify_seed_refusal_evidence(
+                send,
+                marker,
+                start,
+                (dev, ino, snapshot),
+                at,
+                deadline
+            )
+            .temporary_busy
+        );
+    }
+    let mut rewritten = bytes.clone();
+    rewritten[0] = b'X';
+    assert!(start.appended(7, 8, &rewritten).is_none());
+    assert!(start.appended(7, 8, &vec![0; 65537]).is_none());
+    for stage in [
+        FixtureReadStage::HttpBody,
+        FixtureReadStage::HttpStatus,
+        FixtureReadStage::HttpDeadline,
+    ] {
+        let mut failure = send;
+        failure.stage = stage;
+        assert!(
+            !classify_seed_refusal_evidence(failure, marker, start, (7, 8, &bytes), now, deadline)
+                .temporary_busy
+        );
+    }
+    for field in 0..6 {
+        let mut failure = send;
+        let flags = failure.transport_error.as_mut().unwrap();
+        match field {
+            0 => flags.timeout = true,
+            1 => flags.connect = true,
+            2 => flags.builder = true,
+            3 => flags.body = true,
+            4 => flags.decode = true,
+            _ => flags.request = false,
+        }
+        assert!(
+            !classify_seed_refusal_evidence(failure, marker, start, (7, 8, &bytes), now, deadline)
+                .temporary_busy
+        );
+    }
+    let mut got_headers = send;
+    got_headers.status = Some(200);
+    assert!(!is_seed_send_failure(&got_headers));
+    let mut got_bytes = send;
+    got_bytes.response_bytes = Some(0);
+    assert!(!is_seed_send_failure(&got_bytes));
+    let counter = AtomicU64::new(1);
+    assert_eq!(next_seed_attempt(&counter).unwrap().get(), 1);
+    assert_eq!(next_seed_attempt(&counter).unwrap().get(), 2);
+    counter.store(u64::MAX - 1, Ordering::Relaxed);
+    assert_eq!(next_seed_attempt(&counter).unwrap().get(), u64::MAX - 1);
+    assert!(next_seed_attempt(&counter).is_none());
+    assert!(next_seed_attempt(&counter).is_none());
+
     let base = reqwest::Url::parse("https://fixture.invalid").unwrap();
     let path = base.join("/owned/index.m3u8").unwrap();
     let now = Instant::now();

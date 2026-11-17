@@ -1102,11 +1102,11 @@ impl PreHeaderTestConnection {
         }
     }
 
-    async fn admit(&mut self, path: &str) {
+    async fn admit(&mut self, path: &str, marker: u64) {
         self.client
             .as_mut()
             .unwrap()
-            .write_all(format!("GET {path} HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n").as_bytes())
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: fixture.invalid\r\nx-private-media-attempt: {marker}\r\n\r\n").as_bytes())
             .await
             .unwrap();
         assert!(
@@ -1684,6 +1684,56 @@ impl Drop for HeldMediaMutex {
 
 async fn media_mutex_contention_fails_closed_then_recovers(registry_lock: bool) {
     preheader_media_mutex_contention_fails_closed_then_recovers(registry_lock).await;
+    {
+        let fixture = Fixture::new();
+        let output = fixture.output(131_072, 10_000);
+        let segment = output
+            .playlist_path
+            .replace("index.m3u8", "segment-000000.ts");
+        for (marker, consume_first) in [(51u64, false), (52, true)] {
+            let control = media_connection::ConnectionControl::new();
+            let mut request = Request::get(&segment)
+                .header(media_connection::attempt::HEADER, marker.to_string())
+                .body(Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(control.clone());
+            let response = fixture.broker.router().call(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut body = response.into_body().into_data_stream();
+            if consume_first {
+                assert!(!body.next().await.unwrap().unwrap().is_empty());
+            }
+            let held = HeldMediaMutex::new(&fixture, registry_lock);
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(2), body.next())
+                    .await
+                    .unwrap(),
+                Some(Err(_))
+            ));
+            let failure = control.failure_recorder().first().unwrap();
+            assert_eq!(failure.marker.unwrap().get(), marker);
+            assert_eq!(
+                failure.kind,
+                media_connection::MediaFailureKind::TemporaryBusy
+            );
+            assert_eq!(
+                failure.site,
+                if consume_first {
+                    media_connection::MediaFailureSite::BodyLater
+                } else {
+                    media_connection::MediaFailureSite::BodyFirst
+                }
+            );
+            assert!(held.is_held());
+            held.release();
+            drop(body);
+        }
+        fixture.broker.revoke_output(&output.session_id).unwrap();
+        fixture
+            .broker
+            .acknowledge_reaped(&output.session_id, &output.output_generation)
+            .unwrap();
+    }
     // Fixture and router retain their broker while the worker holds its mutex;
     // this test never asks a last-owner shutdown to run under that lock.
     let fixture = Fixture::new();
@@ -1798,7 +1848,7 @@ async fn preheader_media_mutex_contention_fails_closed_then_recovers(registry_lo
         .playlist_path
         .replace("index.m3u8", "segment-000000.ts");
     let mut connection = PreHeaderTestConnection::new(fixture.broker.router());
-    connection.admit(&segment).await;
+    connection.admit(&segment, 41).await;
     let held = HeldMediaMutex::new(&fixture, registry_lock);
     connection.release_response();
 
@@ -1817,9 +1867,26 @@ async fn preheader_media_mutex_contention_fails_closed_then_recovers(registry_lo
         failure.kind,
         media_connection::MediaFailureKind::TemporaryBusy
     );
-    recorder.record(
+    assert_eq!(failure.marker.unwrap().get(), 41);
+    // The test barrier admits before holding the mutex; real Hyper/body polling
+    // then fails before ANY response bytes. The marker is from that custody.
+    let terminal = recorder
+        .terminal(media_connection::attempt::Transport::Http)
+        .unwrap();
+    assert_eq!(
+        media_connection::attempt::Terminal::parse(&terminal.to_string()),
+        Some(terminal)
+    );
+    recorder.record_attempt(
         media_connection::MediaFailureSite::Supervisor,
         media_connection::MediaFailureKind::Unavailable,
+        None,
+    );
+    assert_eq!(recorder.first(), Some(failure));
+    recorder.record_attempt(
+        media_connection::MediaFailureSite::BodyFirst,
+        media_connection::MediaFailureKind::TemporaryBusy,
+        media_connection::attempt::Marker::new(42),
     );
     assert_eq!(recorder.first(), Some(failure));
     held.release();

@@ -21,34 +21,28 @@ use tokio::{
     time::Instant,
 };
 
+#[path = "private_media_attempt.rs"]
+pub(crate) mod attempt;
+pub(crate) use attempt::{Kind as MediaFailureKind, Site as MediaFailureSite};
+
 const WRITE_IDLE: Duration = Duration::from_secs(30);
 const AUTHORITY_CHECK: Duration = Duration::from_millis(100);
 static NEXT_DIAGNOSTIC_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MediaFailureSite {
-    Body,
-    Supervisor,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MediaFailureKind {
-    TemporaryBusy,
-    Unavailable,
-    Denied,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct MediaFailure {
     pub(crate) site: MediaFailureSite,
     pub(crate) kind: MediaFailureKind,
+    pub(crate) marker: Option<attempt::Marker>,
 }
 
-/// First closed authority failure for one accepted connection. This contains no
-/// request, credential, URL, or source identifiers and performs no I/O.
+/// First closed authority failure for one accepted connection. The optional
+/// per-attempt numeric marker is diagnostic only; no credentials, URLs, source
+/// identifiers or resource owners are retained, and capture performs no I/O.
 pub(crate) struct FailureRecorder {
     id: u64,
     first: AtomicU8,
+    marker: AtomicU64,
 }
 
 impl FailureRecorder {
@@ -56,21 +50,50 @@ impl FailureRecorder {
         Self {
             id: NEXT_DIAGNOSTIC_ID.fetch_add(1, Ordering::Relaxed),
             first: AtomicU8::new(0),
+            marker: AtomicU64::new(0),
         }
     }
 
-    pub(crate) fn record(&self, site: MediaFailureSite, kind: MediaFailureKind) {
+    pub(crate) fn record_attempt(
+        &self,
+        site: MediaFailureSite,
+        kind: MediaFailureKind,
+        marker: Option<attempt::Marker>,
+    ) {
         let code = match (site, kind) {
-            (MediaFailureSite::Body, MediaFailureKind::TemporaryBusy) => 1,
-            (MediaFailureSite::Body, MediaFailureKind::Unavailable) => 2,
-            (MediaFailureSite::Body, MediaFailureKind::Denied) => 3,
+            (MediaFailureSite::BodyFirst, MediaFailureKind::TemporaryBusy) => 1,
+            (MediaFailureSite::BodyFirst, MediaFailureKind::Unavailable) => 2,
+            (MediaFailureSite::BodyFirst, MediaFailureKind::Denied) => 3,
             (MediaFailureSite::Supervisor, MediaFailureKind::TemporaryBusy) => 4,
             (MediaFailureSite::Supervisor, MediaFailureKind::Unavailable) => 5,
             (MediaFailureSite::Supervisor, MediaFailureKind::Denied) => 6,
+            (MediaFailureSite::BodyLater, MediaFailureKind::TemporaryBusy) => 7,
+            (MediaFailureSite::BodyLater, MediaFailureKind::Unavailable) => 8,
+            (MediaFailureSite::BodyLater, MediaFailureKind::Denied) => 9,
         };
-        let _ = self
+        // A winner owns these two scalar stores. Readers see either no record
+        // (including WRITING), or the complete immutable tuple. No lock/spin/I/O.
+        if self
             .first
-            .compare_exchange(0, code, Ordering::Relaxed, Ordering::Relaxed);
+            .compare_exchange(0, u8::MAX, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.marker
+                .store(marker.map_or(0, attempt::Marker::get), Ordering::Relaxed);
+            self.first.store(code, Ordering::Release);
+        }
+    }
+
+    /// The caller may emit this only after supervise has dropped connection,
+    /// body, transport and its custody guard. This method performs no I/O.
+    pub(crate) fn terminal(&self, transport: attempt::Transport) -> Option<attempt::Terminal> {
+        let failure = self.first()?;
+        Some(attempt::Terminal {
+            marker: failure.marker?,
+            site: failure.site,
+            kind: failure.kind,
+            transport,
+        })
     }
 
     pub(crate) fn id(&self) -> u64 {
@@ -78,19 +101,26 @@ impl FailureRecorder {
     }
 
     pub(crate) fn first(&self) -> Option<MediaFailure> {
-        let (site, kind) = match self.first.load(Ordering::Relaxed) {
-            1 => (MediaFailureSite::Body, MediaFailureKind::TemporaryBusy),
-            2 => (MediaFailureSite::Body, MediaFailureKind::Unavailable),
-            3 => (MediaFailureSite::Body, MediaFailureKind::Denied),
+        let (site, kind) = match self.first.load(Ordering::Acquire) {
+            1 => (MediaFailureSite::BodyFirst, MediaFailureKind::TemporaryBusy),
+            2 => (MediaFailureSite::BodyFirst, MediaFailureKind::Unavailable),
+            3 => (MediaFailureSite::BodyFirst, MediaFailureKind::Denied),
             4 => (
                 MediaFailureSite::Supervisor,
                 MediaFailureKind::TemporaryBusy,
             ),
             5 => (MediaFailureSite::Supervisor, MediaFailureKind::Unavailable),
             6 => (MediaFailureSite::Supervisor, MediaFailureKind::Denied),
+            7 => (MediaFailureSite::BodyLater, MediaFailureKind::TemporaryBusy),
+            8 => (MediaFailureSite::BodyLater, MediaFailureKind::Unavailable),
+            9 => (MediaFailureSite::BodyLater, MediaFailureKind::Denied),
             _ => return None,
         };
-        Some(MediaFailure { site, kind })
+        Some(MediaFailure {
+            site,
+            kind,
+            marker: attempt::Marker::new(self.marker.load(Ordering::Relaxed)),
+        })
     }
 }
 
@@ -565,6 +595,85 @@ mod tests {
 
     #[tokio::test]
     async fn media_marker_cannot_arm_a_different_or_replacement_connection() {
+        let first = FailureRecorder::new();
+        let other = FailureRecorder::new();
+        let marker = attempt::Marker::new(41).unwrap();
+        first.record_attempt(
+            MediaFailureSite::BodyFirst,
+            MediaFailureKind::TemporaryBusy,
+            Some(marker),
+        );
+        let saved = first.first().unwrap();
+        first.record_attempt(
+            MediaFailureSite::BodyLater,
+            MediaFailureKind::Denied,
+            attempt::Marker::new(42),
+        );
+        assert_eq!(first.first(), Some(saved));
+        assert_eq!(saved.marker, Some(marker));
+        assert!(other.first().is_none());
+        let terminal = first.terminal(attempt::Transport::Tls).unwrap();
+        assert_eq!(
+            attempt::Terminal::parse(&terminal.to_string()),
+            Some(terminal)
+        );
+        // A reader never accepts a partially published marker/reason tuple.
+        other.first.store(u8::MAX, Ordering::Relaxed);
+        other.marker.store(99, Ordering::Relaxed);
+        assert!(other.first().is_none());
+        assert!(other.terminal(attempt::Transport::Tls).is_none());
+        for invalid in [
+            "",
+            "0",
+            "01",
+            "+1",
+            "-1",
+            " 1",
+            "1 ",
+            "1\n",
+            "18446744073709551616",
+            "secret-canary",
+        ] {
+            assert!(attempt::Marker::parse(invalid).is_none());
+        }
+        assert_eq!(
+            attempt::Marker::parse("18446744073709551615")
+                .unwrap()
+                .get(),
+            u64::MAX
+        );
+
+        let raced = Arc::new(FailureRecorder::new());
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut writers = Vec::new();
+        for (value, site, kind) in [
+            (
+                71,
+                MediaFailureSite::BodyFirst,
+                MediaFailureKind::TemporaryBusy,
+            ),
+            (72, MediaFailureSite::BodyLater, MediaFailureKind::Denied),
+        ] {
+            let raced = raced.clone();
+            let barrier = barrier.clone();
+            writers.push(std::thread::spawn(move || {
+                barrier.wait();
+                raced.record_attempt(site, kind, attempt::Marker::new(value));
+            }));
+        }
+        barrier.wait();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let winner = raced.first().unwrap();
+        assert!(matches!(
+            (winner.marker.unwrap().get(), winner.site, winner.kind),
+            (
+                71,
+                MediaFailureSite::BodyFirst,
+                MediaFailureKind::TemporaryBusy
+            ) | (72, MediaFailureSite::BodyLater, MediaFailureKind::Denied)
+        ));
         for issuer_closed in [false, true] {
             let issuer = control();
             let receiver = control();

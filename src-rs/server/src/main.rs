@@ -344,6 +344,9 @@ async fn serve_private_http(listener: TcpListener, app: Router) -> anyhow::Resul
                         hyper_error.is_some_and(hyper::Error::is_timeout),
                         failure.first(),
                     );
+                    if let Some(event) = failure.terminal(media_connection::attempt::Transport::Http) {
+                        eprintln!("{event}");
+                    }
                 }
                 Err(stop) => {
                     let failure = control.failure_recorder();
@@ -352,6 +355,9 @@ async fn serve_private_http(listener: TcpListener, app: Router) -> anyhow::Resul
                         failure.id(),
                         failure.first(),
                     );
+                    if let Some(event) = failure.terminal(media_connection::attempt::Transport::Http) {
+                        eprintln!("{event}");
+                    }
                 }
             }
         });
@@ -409,6 +415,9 @@ async fn serve_private_tls_connection(
                 error.is_timeout(),
                 failure.first(),
             );
+            if let Some(event) = failure.terminal(media_connection::attempt::Transport::Tls) {
+                eprintln!("{event}");
+            }
         }
         Err(stop) => {
             let failure = control.failure_recorder();
@@ -417,6 +426,9 @@ async fn serve_private_tls_connection(
                 failure.id(),
                 failure.first(),
             );
+            if let Some(event) = failure.terminal(media_connection::attempt::Transport::Tls) {
+                eprintln!("{event}");
+            }
         }
     }
 }

@@ -368,6 +368,7 @@ class Attempt:
                      'src-rs/server/src/multiview_broker_live.rs',
                      'src-rs/server/src/multiview_broker_live_output_tests.rs',
                      'src-rs/server/src/media_connection.rs',
+                     'src-rs/server/src/private_media_attempt.rs',
                      'src-rs/server/tests/multiview_broker_boundary.rs',
                      'src-rs/server/tests/support/streamed_session.rs',
                      'src-rs/server/tests/support/streamed_transport.rs',
@@ -2421,6 +2422,7 @@ class MockMainTests(unittest.TestCase):
         # Check the actual closed fixture modules, independently of Attempt's synthetic --list.
         sources = (
             ('src-rs/server/tests/multiview_production.rs', ''),
+            ('src-rs/server/src/private_media_attempt.rs', 'media_attempt::'),
             ('src-rs/server/tests/support/hls_production.rs', 'hls_production::tests::'),
             ('src-rs/server/tests/support/multiview_production_tls.rs', 'production_tls::'),
         )

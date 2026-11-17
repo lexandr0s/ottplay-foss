@@ -1662,6 +1662,7 @@ def main(argv=None):
                  'src-rs/server/tests/multiview_broker_boundary.rs',
                  'src-rs/server/src/multiview_broker.rs', 'src-rs/server/src/multiview_broker_live.rs',
                  'src-rs/server/src/multiview_broker_live_output_tests.rs', 'src-rs/server/src/media_connection.rs',
+                 'src-rs/server/src/private_media_attempt.rs',
                  'src-rs/server/tests/support/streamed_session.rs', 'src-rs/server/tests/support/streamed_transport.rs',
                  'src-rs/server/tests/support/streamed_archive.rs',
                  'src-rs/server/tests/support/streamed_decoder.rs',

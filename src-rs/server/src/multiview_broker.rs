@@ -1646,6 +1646,7 @@ struct MediaCustody {
     record: Arc<OutputRecord>,
     token: String,
     failure: Arc<FailureRecorder>,
+    attempt: Option<crate::media_connection::attempt::Marker>,
     _permit: OwnedSemaphorePermit,
 }
 impl MediaCustody {
@@ -1668,8 +1669,11 @@ impl MediaAuthority for MediaCustody {
         match result {
             Ok(()) => true,
             Err(error) => {
-                self.failure
-                    .record(MediaFailureSite::Supervisor, Self::failure_kind(error));
+                self.failure.record_attempt(
+                    MediaFailureSite::Supervisor,
+                    Self::failure_kind(error),
+                    self.attempt,
+                );
                 false
             }
         }
@@ -1695,9 +1699,15 @@ impl Stream for GuardedBody {
                 .broker
                 .check_live_output(&self.custody.record, &self.custody.token)
             {
-                self.custody
-                    .failure
-                    .record(MediaFailureSite::Body, MediaCustody::failure_kind(error));
+                self.custody.failure.record_attempt(
+                    if self.offset == 0 {
+                        MediaFailureSite::BodyFirst
+                    } else {
+                        MediaFailureSite::BodyLater
+                    },
+                    MediaCustody::failure_kind(error),
+                    self.custody.attempt,
+                );
                 self.failed = true;
                 return Poll::Ready(Some(Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -1725,9 +1735,15 @@ impl Stream for GuardedBody {
             }
             Ok(None) => Poll::Ready(None),
             Err(error) => {
-                self.custody
-                    .failure
-                    .record(MediaFailureSite::Body, MediaCustody::failure_kind(error));
+                self.custody.failure.record_attempt(
+                    if self.offset == 0 {
+                        MediaFailureSite::BodyFirst
+                    } else {
+                        MediaFailureSite::BodyLater
+                    },
+                    MediaCustody::failure_kind(error),
+                    self.custody.attempt,
+                );
                 self.failed = true;
                 Poll::Ready(Some(Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -1735,6 +1751,20 @@ impl Stream for GuardedBody {
                 ))))
             }
         }
+    }
+}
+fn media_attempt_marker(headers: &HeaderMap) -> Option<crate::media_connection::attempt::Marker> {
+    let mut markers = headers
+        .get_all(crate::media_connection::attempt::HEADER)
+        .iter();
+    let attempt = markers
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .and_then(crate::media_connection::attempt::Marker::parse);
+    if markers.next().is_none() {
+        attempt
+    } else {
+        None
     }
 }
 async fn media(
@@ -1812,11 +1842,15 @@ async fn media(
         } else {
             "video/mp2t"
         };
+        // Diagnostic only, after successful media admission. Invalid/duplicate
+        // values are ignored; no authority, routing or upstream request changes.
+        let attempt = media_attempt_marker(&headers);
         let custody = Arc::new(MediaCustody {
             broker: broker.clone(),
             record,
             token,
             failure,
+            attempt,
             _permit: permit,
         });
         let lease = connection.media_lease(custody.clone());
