@@ -7,7 +7,8 @@ use super::{
         GrantedFile, GrantedStream, PreparedStreamInfo, PresentationClock, StreamInput,
     },
     encoder::{
-        CaptureFence, CaptureVideoFeed, Encoder, EncoderConfig, EncoderSnapshot, EncoderState,
+        CaptureFence, CaptureVideoFeed, CompositorOutcome, CompositorProgress, CompositorStage,
+        Encoder, EncoderConfig, EncoderSnapshot, EncoderState,
     },
     frames::{compose_into, FrameSpec, FrameStatus, FrameView, LatestFrame},
     geometry::{CanvasSpec, ValidatedGeometry},
@@ -336,20 +337,46 @@ impl State {
         self.update_audio_metrics();
         Ok(())
     }
+    #[cfg(test)]
     fn publish_capture(
         &self,
         pixels: Arc<[u8]>,
         captured_fence: CaptureFence,
         captured_at: Instant,
     ) -> Result<bool, Error> {
+        self.publish_capture_observed(pixels, captured_fence, captured_at, None)
+            .map(|attempt| attempt.accepted)
+    }
+    fn publish_capture_observed(
+        &self,
+        pixels: Arc<[u8]>,
+        captured_fence: CaptureFence,
+        captured_at: Instant,
+        progress: Option<&CompositorProgress>,
+    ) -> Result<CapturePublishAttempt, Error> {
         if !self.output_fence().accepts_capture(captured_fence) {
-            return Ok(false);
+            if let Some(progress) = progress {
+                progress.record(CompositorStage::PreFeedRejected, Instant::now());
+            }
+            return Ok(CapturePublishAttempt {
+                accepted: false,
+                reached_feed: false,
+            });
         }
-        self.capture_video
-            .as_ref()
-            .ok_or(Error::OutputFailed)?
+        let feed = self.capture_video.as_ref().ok_or(Error::OutputFailed)?;
+        if let Some(progress) = progress {
+            progress.record(CompositorStage::BeforeFeedCall, Instant::now());
+        }
+        let result = feed
             .publish(pixels, captured_fence, captured_at)
-            .map_err(|_| Error::OutputFailed)
+            .map_err(|_| Error::OutputFailed);
+        if let Some(progress) = progress {
+            progress.record(CompositorStage::FeedReturned, Instant::now());
+        }
+        result.map(|accepted| CapturePublishAttempt {
+            accepted,
+            reached_feed: true,
+        })
     }
     // State remains locked through capture-fence publication. Visual/source
     // changes fence old reuse; focus/audio-only epochs remain video-compatible.
@@ -399,8 +426,24 @@ impl State {
         self.audio_route.store(word, Ordering::Release);
     }
 }
+
+struct CapturePublishAttempt {
+    accepted: bool,
+    reached_feed: bool,
+}
 fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     value.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+fn lock_compositor_state<'a>(
+    state: &'a Mutex<State>,
+    progress: &CompositorProgress,
+    before: CompositorStage,
+    acquired: CompositorStage,
+) -> std::sync::MutexGuard<'a, State> {
+    progress.record(before, Instant::now());
+    let guard = lock(state);
+    progress.record(acquired, Instant::now());
+    guard
 }
 // Worker destruction can wait for a reader holding publication authority.
 // Never retain this collection lock while stopping, joining or dropping one.
@@ -842,6 +885,7 @@ impl Session {
                     .collect::<Vec<_>>(),
             )
         };
+        let compositor_progress = video.compositor_progress();
         let output_stop = Arc::new(AtomicBool::new(false));
         let planned = Arc::new(AtomicBool::new(false));
         let cleanup_uncertain = self.cleanup_uncertain.clone();
@@ -872,8 +916,14 @@ impl Session {
                         compose_stop.store(true, Ordering::Release);
                         break;
                     }
+                    let progress_tick = compositor_progress.begin(Instant::now());
                     let (geometry, fence, frames, captured_at, bootstrap) = {
-                        let state = lock(&compose_state);
+                        let state = lock_compositor_state(
+                            &compose_state,
+                            &compositor_progress,
+                            CompositorStage::BeforeSnapshotState,
+                            CompositorStage::SnapshotStateAcquired,
+                        );
                         let (frames, stamp) = if state.output_bootstrap {
                             (Vec::new(), Instant::now())
                         } else {
@@ -887,6 +937,8 @@ impl Session {
                             state.output_bootstrap,
                         )
                     };
+                    compositor_progress.record(CompositorStage::FramesFrozen, Instant::now());
+                    compositor_progress.record(CompositorStage::Composing, Instant::now());
                     let mut pixels = Vec::new();
                     if bootstrap {
                         pixels.resize(canvas.width as usize * canvas.height as usize * 3, 0);
@@ -897,8 +949,30 @@ impl Session {
                     }
                     let pixels: Arc<[u8]> = pixels.into();
                     {
-                        let state = lock(&compose_state);
-                        if state.publish_capture(pixels, fence, captured_at).is_err() {
+                        let state = lock_compositor_state(
+                            &compose_state,
+                            &compositor_progress,
+                            CompositorStage::BeforePublishState,
+                            CompositorStage::PublishStateAcquired,
+                        );
+                        let result = state.publish_capture_observed(
+                            pixels,
+                            fence,
+                            captured_at,
+                            Some(&compositor_progress),
+                        );
+                        let outcome = match &result {
+                            Ok(attempt) if !attempt.reached_feed => {
+                                CompositorOutcome::PreFeedRejected
+                            }
+                            Ok(attempt) if attempt.accepted => CompositorOutcome::FeedAccepted,
+                            Ok(_) => CompositorOutcome::FeedDeclined,
+                            Err(_) => CompositorOutcome::FeedError,
+                        };
+                        if let Some(tick) = progress_tick {
+                            compositor_progress.complete(tick, outcome, Instant::now());
+                        }
+                        if result.is_err() {
                             compose_session_stop.store(true, Ordering::Release);
                             compose_stop.store(true, Ordering::Release);
                         }
@@ -906,6 +980,8 @@ impl Session {
                     next += period;
                     let now = Instant::now();
                     if next > now {
+                        compositor_progress
+                            .record(CompositorStage::WaitingDeadline, Instant::now());
                         wait_compositor_deadline(&compose_stop, next, Instant::now, thread::sleep);
                     } else {
                         next = now;
@@ -2359,6 +2435,130 @@ mod tests {
         assert!(next_capture >= captured_at);
         // A new actual observation may be visually static. Encoder reuse, not
         // this observation, must retain the earlier capture stamp/sequence.
+
+        // The diagnostic reader is independent of the real compositor State
+        // mutex. A bounded barrier makes a future accidental back-reference
+        // fail this test without leaving a worker blocked during assertion.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let locked_state = Arc::new(Mutex::new(stream_state()));
+            let state_guard = lock(&locked_state);
+            let progress = state_guard
+                .capture_video
+                .as_ref()
+                .unwrap()
+                .compositor_progress();
+            progress.begin(Instant::now()).unwrap();
+            progress.record(CompositorStage::WaitingDeadline, Instant::now());
+            let (before_tx, before_rx) = std::sync::mpsc::channel();
+            let reader_stop = Arc::new(AtomicBool::new(false));
+            let reader_stop_worker = reader_stop.clone();
+            let reader_progress = progress.clone();
+            let snapshot_reader = thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !reader_stop_worker.load(Ordering::Acquire) && Instant::now() < deadline {
+                    if let Some(snapshot) = reader_progress.snapshot(0) {
+                        if snapshot.stage == CompositorStage::BeforeSnapshotState {
+                            let _ = before_tx.send(snapshot.stage);
+                            return;
+                        }
+                    }
+                    thread::yield_now();
+                }
+            });
+            let (tx, rx) = std::sync::mpsc::channel();
+            let worker_state = locked_state.clone();
+            let worker_progress = progress.clone();
+            let state_worker = thread::spawn(move || {
+                let state = lock_compositor_state(
+                    &worker_state,
+                    &worker_progress,
+                    CompositorStage::BeforeSnapshotState,
+                    CompositorStage::SnapshotStateAcquired,
+                );
+                drop(state);
+                let observed = worker_progress.snapshot(0);
+                let _ = tx.send(observed);
+            });
+            let before_lock = before_rx.recv_timeout(Duration::from_secs(5));
+            reader_stop.store(true, Ordering::Release);
+            drop(state_guard);
+            let observed = rx.recv_timeout(Duration::from_secs(5));
+            state_worker.join().unwrap();
+            snapshot_reader.join().unwrap();
+            // The snapshot worker cannot depend on the State lock held above;
+            // both reader and state-acquisition worker are joined before assertions.
+            let before_lock = before_lock.unwrap();
+            assert_eq!(before_lock, CompositorStage::BeforeSnapshotState);
+            let observed = observed.unwrap().unwrap();
+            assert_eq!(observed.output_generation, 0);
+            assert_eq!(observed.attempt_tick, 1);
+            assert_eq!(observed.stage, CompositorStage::SnapshotStateAcquired);
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let state = Arc::new(Mutex::new(stream_state()));
+            let (feed, fence, pixels) = {
+                let state = lock(&state);
+                (
+                    state.capture_video.as_ref().unwrap().clone(),
+                    state.output_fence(),
+                    Arc::<[u8]>::from(vec![1; 8 * 8 * 3]),
+                )
+            };
+            let progress = feed.compositor_progress();
+            let tick = progress.begin(Instant::now()).unwrap();
+            let (before_tx, before_rx) = std::sync::mpsc::channel();
+            let reader_stop = Arc::new(AtomicBool::new(false));
+            let reader_stop_worker = reader_stop.clone();
+            let reader_progress = progress.clone();
+            let reader = thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !reader_stop_worker.load(Ordering::Acquire) && Instant::now() < deadline {
+                    if let Some(snapshot) = reader_progress.snapshot(0) {
+                        if snapshot.stage == CompositorStage::BeforeFeedCall {
+                            let _ = before_tx.send(snapshot.stage);
+                            return;
+                        }
+                    }
+                    thread::yield_now();
+                }
+            });
+            let (tx, rx) = std::sync::mpsc::channel();
+            let worker_state = state.clone();
+            let worker_progress = progress.clone();
+            let (before_feed, publisher) = feed.with_state_locked_for_test(|| {
+                let worker = thread::spawn(move || {
+                    let result = lock(&worker_state).publish_capture_observed(
+                        pixels,
+                        fence,
+                        Instant::now(),
+                        Some(&worker_progress),
+                    );
+                    let outcome = match &result {
+                        Ok(attempt) if !attempt.reached_feed => CompositorOutcome::PreFeedRejected,
+                        Ok(attempt) if attempt.accepted => CompositorOutcome::FeedAccepted,
+                        Ok(_) => CompositorOutcome::FeedDeclined,
+                        Err(_) => CompositorOutcome::FeedError,
+                    };
+                    worker_progress.complete(tick, outcome, Instant::now());
+                    let _ = tx.send(matches!(result, Err(Error::OutputFailed)));
+                });
+                let observed = before_rx.recv_timeout(Duration::from_secs(5));
+                reader_stop.store(true, Ordering::Release);
+                (observed, worker)
+            });
+            let returned_error = rx.recv_timeout(Duration::from_secs(5));
+            publisher.join().unwrap();
+            reader.join().unwrap();
+            assert_eq!(before_feed.unwrap(), CompositorStage::BeforeFeedCall);
+            assert!(returned_error.unwrap());
+            let completed = progress.snapshot(0).unwrap();
+            assert_eq!(completed.stage, CompositorStage::Completed);
+            assert_eq!(completed.outcome, CompositorOutcome::FeedError);
+            assert_eq!(completed.completed_attempt_tick, tick);
+        }
     }
 
     #[test]
@@ -2472,9 +2672,20 @@ mod tests {
             black,
             Instant::now(),
         )));
-        assert!(!state
-            .publish_capture(pixels.clone(), original, Instant::now())
-            .unwrap());
+        let progress = state.capture_video.as_ref().unwrap().compositor_progress();
+        let tick = progress.begin(Instant::now()).unwrap();
+        let rejected = state
+            .publish_capture_observed(pixels.clone(), original, Instant::now(), Some(&progress))
+            .unwrap();
+        assert!(!rejected.accepted && !rejected.reached_feed);
+        progress.complete(tick, CompositorOutcome::PreFeedRejected, Instant::now());
+        let rejected_snapshot = progress.snapshot(0).unwrap();
+        assert_eq!(rejected_snapshot.stage, CompositorStage::Completed);
+        assert_eq!(
+            rejected_snapshot.outcome,
+            CompositorOutcome::PreFeedRejected
+        );
+        assert_eq!(rejected_snapshot.completed_attempt_tick, tick);
         assert!(state
             .publish_capture(pixels.clone(), black, Instant::now())
             .unwrap());

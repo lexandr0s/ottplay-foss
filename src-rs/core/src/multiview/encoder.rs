@@ -3,7 +3,10 @@
 //! do IO or wait on a decoder. Disk limits are polling guards, not OS quotas.
 use super::geometry::CanvasSpec;
 use std::path::{Path, PathBuf};
-use std::sync::{atomic::AtomicBool, Arc, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use std::time::{Duration, Instant};
 
 pub type VideoFeed = Arc<Mutex<Arc<[u8]>>>;
@@ -118,6 +121,232 @@ struct CaptureState {
 pub struct CaptureVideoFeed {
     state: Mutex<CaptureState>,
     bytes: usize,
+    compositor_progress: Arc<CompositorProgress>,
+}
+
+/// Single-compositor-writer, lock-free progress for one output feed.
+/// A reader makes one consistent snapshot; concurrent or overflowing updates
+/// make only this diagnostic unavailable.
+pub(crate) struct CompositorProgress {
+    origin: Instant,
+    version: AtomicU64,
+    disabled: AtomicBool,
+    attempt_tick: AtomicU64,
+    completed_attempt_tick: AtomicU64,
+    stage: AtomicU64,
+    outcome: AtomicU64,
+    elapsed_ns: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompositorProgressSnapshot {
+    /// Generation of the exact feed whose SelectionAge check sampled this tuple.
+    pub output_generation: u64,
+    pub attempt_tick: u64,
+    /// The compositor attempt returned; this does not mean capture was accepted.
+    pub completed_attempt_tick: u64,
+    pub stage: CompositorStage,
+    /// Current attempt's result; None until an attempt returns.
+    pub outcome: CompositorOutcome,
+    pub elapsed_ns: u64,
+    /// Reader time minus the timestamp sampled for this stage update. The
+    /// writer may advance immediately afterward; this is not a dwell proof.
+    pub stage_age_at_sample_ns: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u64)]
+pub enum CompositorStage {
+    NotStarted = 1,
+    WaitingDeadline = 2,
+    BeforeSnapshotState = 3,
+    SnapshotStateAcquired = 4,
+    FramesFrozen = 5,
+    Composing = 6,
+    BeforePublishState = 7,
+    PublishStateAcquired = 8,
+    PreFeedRejected = 9,
+    BeforeFeedCall = 10,
+    FeedReturned = 11,
+    Completed = 12,
+}
+
+impl CompositorStage {
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    fn from_raw(value: u64) -> Option<Self> {
+        Some(match value {
+            1 => Self::NotStarted,
+            2 => Self::WaitingDeadline,
+            3 => Self::BeforeSnapshotState,
+            4 => Self::SnapshotStateAcquired,
+            5 => Self::FramesFrozen,
+            6 => Self::Composing,
+            7 => Self::BeforePublishState,
+            8 => Self::PublishStateAcquired,
+            9 => Self::PreFeedRejected,
+            10 => Self::BeforeFeedCall,
+            11 => Self::FeedReturned,
+            12 => Self::Completed,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u64)]
+pub enum CompositorOutcome {
+    None = 0,
+    PreFeedRejected = 1,
+    FeedDeclined = 2,
+    /// The feed accepted the call; this does not prove encoder selection/use.
+    FeedAccepted = 3,
+    FeedError = 4,
+}
+
+impl CompositorOutcome {
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    fn from_raw(value: u64) -> Option<Self> {
+        Some(match value {
+            0 => Self::None,
+            1 => Self::PreFeedRejected,
+            2 => Self::FeedDeclined,
+            3 => Self::FeedAccepted,
+            4 => Self::FeedError,
+            _ => return None,
+        })
+    }
+}
+
+impl CompositorProgress {
+    fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+            version: AtomicU64::new(0),
+            disabled: AtomicBool::new(false),
+            attempt_tick: AtomicU64::new(0),
+            completed_attempt_tick: AtomicU64::new(0),
+            stage: AtomicU64::new(CompositorStage::NotStarted as u64),
+            outcome: AtomicU64::new(CompositorOutcome::None as u64),
+            elapsed_ns: AtomicU64::new(0),
+        }
+    }
+
+    fn write(&self, update: impl FnOnce()) -> bool {
+        if self.disabled.load(Ordering::SeqCst) {
+            return false;
+        }
+        let version = self.version.load(Ordering::SeqCst);
+        let Some(odd) = version.checked_add(1).filter(|value| value % 2 == 1) else {
+            self.disabled.store(true, Ordering::SeqCst);
+            return false;
+        };
+        self.version.store(odd, Ordering::SeqCst);
+        update();
+        let Some(even) = odd.checked_add(1) else {
+            self.disabled.store(true, Ordering::SeqCst);
+            return false;
+        };
+        self.version.store(even, Ordering::SeqCst);
+        true
+    }
+
+    pub(crate) fn begin(&self, now: Instant) -> Option<u64> {
+        let Some(tick) = self.attempt_tick.load(Ordering::SeqCst).checked_add(1) else {
+            self.disabled.store(true, Ordering::SeqCst);
+            return None;
+        };
+        let Some(elapsed) = now
+            .checked_duration_since(self.origin)
+            .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
+        else {
+            self.disabled.store(true, Ordering::SeqCst);
+            return None;
+        };
+        self.write(|| {
+            self.attempt_tick.store(tick, Ordering::SeqCst);
+            self.stage.store(
+                CompositorStage::BeforeSnapshotState as u64,
+                Ordering::SeqCst,
+            );
+            self.outcome
+                .store(CompositorOutcome::None as u64, Ordering::SeqCst);
+            self.elapsed_ns.store(elapsed, Ordering::SeqCst);
+        })
+        .then_some(tick)
+    }
+
+    pub(crate) fn record(&self, stage: CompositorStage, now: Instant) -> bool {
+        let elapsed = now
+            .checked_duration_since(self.origin)
+            .and_then(|duration| u64::try_from(duration.as_nanos()).ok());
+        let Some(elapsed) = elapsed else {
+            self.disabled.store(true, Ordering::SeqCst);
+            return false;
+        };
+        self.write(|| {
+            self.stage.store(stage as u64, Ordering::SeqCst);
+            self.elapsed_ns.store(elapsed, Ordering::SeqCst);
+        })
+    }
+
+    pub(crate) fn complete(&self, tick: u64, outcome: CompositorOutcome, now: Instant) -> bool {
+        let elapsed = now
+            .checked_duration_since(self.origin)
+            .and_then(|duration| u64::try_from(duration.as_nanos()).ok());
+        let Some(elapsed) = elapsed else {
+            self.disabled.store(true, Ordering::SeqCst);
+            return false;
+        };
+        self.write(|| {
+            self.completed_attempt_tick.store(tick, Ordering::SeqCst);
+            self.outcome.store(outcome as u64, Ordering::SeqCst);
+            self.stage
+                .store(CompositorStage::Completed as u64, Ordering::SeqCst);
+            self.elapsed_ns.store(elapsed, Ordering::SeqCst);
+        })
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    pub(crate) fn snapshot(&self, output_generation: u64) -> Option<CompositorProgressSnapshot> {
+        if self.disabled.load(Ordering::SeqCst) {
+            return None;
+        }
+        let before = self.version.load(Ordering::SeqCst);
+        if before % 2 != 0 {
+            return None;
+        }
+        let attempt_tick = self.attempt_tick.load(Ordering::SeqCst);
+        let completed_attempt_tick = self.completed_attempt_tick.load(Ordering::SeqCst);
+        let stage = self.stage.load(Ordering::SeqCst);
+        let outcome = self.outcome.load(Ordering::SeqCst);
+        let elapsed_ns = self.elapsed_ns.load(Ordering::SeqCst);
+        let after = self.version.load(Ordering::SeqCst);
+        if before != after || after % 2 != 0 || self.disabled.load(Ordering::SeqCst) {
+            return None;
+        }
+        // Sample after reading the stable tuple. Recheck the version afterward
+        // so the sampled stage and elapsed time refer to the same update.
+        let now = Instant::now();
+        let now_elapsed = now.checked_duration_since(self.origin)?.as_nanos();
+        let now_elapsed = u64::try_from(now_elapsed).ok()?;
+        if self.version.load(Ordering::SeqCst) != after || self.disabled.load(Ordering::SeqCst) {
+            return None;
+        }
+        // Reject a stale timestamp or impossible tick relation rather than
+        // reporting a wrapped or internally inconsistent progress snapshot.
+        if now_elapsed < elapsed_ns || completed_attempt_tick > attempt_tick {
+            return None;
+        }
+        Some(CompositorProgressSnapshot {
+            output_generation,
+            attempt_tick,
+            completed_attempt_tick,
+            stage: CompositorStage::from_raw(stage)?,
+            outcome: CompositorOutcome::from_raw(outcome)?,
+            elapsed_ns,
+            stage_age_at_sample_ns: now_elapsed.checked_sub(elapsed_ns)?,
+        })
+    }
 }
 fn capture_target(epoch: Instant, index: u64, rate: u32) -> Result<Instant, EncoderError> {
     if rate == 0 {
@@ -283,6 +512,7 @@ impl CaptureVideoFeed {
         let invalidated_at = Arc::new(OnceLock::new());
         Self {
             bytes: initial.len(),
+            compositor_progress: Arc::new(CompositorProgress::new()),
             state: Mutex::new(CaptureState {
                 active: false,
                 generation: None,
@@ -304,6 +534,17 @@ impl CaptureVideoFeed {
                 last_publication: None,
             }),
         }
+    }
+    pub(crate) fn compositor_progress(&self) -> Arc<CompositorProgress> {
+        self.compositor_progress.clone()
+    }
+    #[cfg(test)]
+    pub(crate) fn with_state_locked_for_test<R>(&self, run: impl FnOnce() -> R) -> R {
+        let _state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        run()
     }
     pub fn invalidate(&self, fence: CaptureFence, changed_at: Instant) -> Result<(), EncoderError> {
         let mut state = self.state.lock().map_err(|_| EncoderError::Io)?;
@@ -650,6 +891,7 @@ impl CaptureVideoFeed {
                                 ),
                             }
                         }),
+                        compositor_progress: self.compositor_progress.snapshot(generation),
                     });
                 }
                 return Err(detail);
@@ -986,6 +1228,7 @@ pub struct EncoderSelectionAge {
     pub bucket_capture_to_target_ns: [Option<i64>; 3],
     pub last_capture_to_target_ns: i64,
     pub last_publication: Option<EncoderPublicationAttempt>,
+    pub compositor_progress: Option<CompositorProgressSnapshot>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EncoderWritePhase {
@@ -3788,6 +4031,39 @@ mod runtime {
         #[test]
         fn selection_age_numeric_snapshot_preserves_buckets_and_last_attempt_outcomes() {
             let (feed, committed, repeats, target) = numeric_age_fixture();
+            let progress = feed.compositor_progress();
+            let tick = progress.begin(Instant::now()).unwrap();
+            let in_progress = progress.snapshot(1).unwrap();
+            assert_eq!(in_progress.attempt_tick, 1);
+            assert_eq!(in_progress.completed_attempt_tick, 0);
+            assert_eq!(in_progress.stage, CompositorStage::BeforeSnapshotState);
+            assert_eq!(in_progress.outcome, CompositorOutcome::None);
+            progress.record(CompositorStage::SnapshotStateAcquired, Instant::now());
+            progress.record(CompositorStage::FramesFrozen, Instant::now());
+            progress.record(CompositorStage::Composing, Instant::now());
+            progress.record(CompositorStage::PublishStateAcquired, Instant::now());
+            progress.record(CompositorStage::PreFeedRejected, Instant::now());
+            progress.complete(tick, CompositorOutcome::PreFeedRejected, Instant::now());
+            // The recorder returns only closed scalar data and is independent
+            // of feed storage; the real held-feed barrier is in persistent tests.
+            let sampled = progress.snapshot(1).unwrap();
+            assert_eq!(sampled.output_generation, 1);
+            assert_eq!(sampled.completed_attempt_tick, sampled.attempt_tick);
+            assert_eq!(sampled.stage, CompositorStage::Completed);
+            assert_eq!(sampled.outcome, CompositorOutcome::PreFeedRejected);
+            let next_feed = CaptureVideoFeed::new(Arc::from(vec![0; 12]), fence(0), Instant::now());
+            next_feed.bind(2).unwrap();
+            let next_snapshot = next_feed.compositor_progress.snapshot(2).unwrap();
+            assert_eq!(next_snapshot.output_generation, 2);
+            assert_eq!(next_snapshot.attempt_tick, 0);
+            assert_eq!(next_snapshot.stage, CompositorStage::NotStarted);
+            let contended = CompositorProgress::new();
+            contended.version.store(1, Ordering::SeqCst);
+            assert!(contended.snapshot(3).is_none());
+            let overflow = CompositorProgress::new();
+            overflow.version.store(u64::MAX - 1, Ordering::SeqCst);
+            assert!(overflow.begin(Instant::now()).is_none());
+            assert!(overflow.snapshot(4).is_none());
             let failure = || {
                 feed.reserve_current_detail(
                     1,
@@ -3810,6 +4086,11 @@ mod runtime {
             assert_eq!(age.committed_sequence, Some(1));
             assert_eq!(age.repeats, 0);
             assert_eq!(age.bucket_sequences, [Some(1), None, None]);
+            let compositor = age.compositor_progress.unwrap();
+            assert_eq!(compositor.output_generation, 1);
+            assert_eq!(compositor.completed_attempt_tick, compositor.attempt_tick);
+            assert_eq!(compositor.stage, CompositorStage::Completed);
+            assert_eq!(compositor.outcome, CompositorOutcome::PreFeedRejected);
             assert_eq!(
                 age.bucket_capture_to_target_ns,
                 [Some(-205_000_000), None, None]
