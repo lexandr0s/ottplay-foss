@@ -88,6 +88,12 @@ def suite_passed(names, ignored=()):
             + f'test result: ok. {len(names)} passed; 0 failed; {len(ignored)} ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
 
 
+PLAYLIST_DROP_REQUIRED_NAMES = (
+    'offline_media::drop_playlist::tests::playlist_relative_members_keep_verified_canonical_parent_after_alias_rebind',
+    'offline_media::drop_playlist::tests::playlist_and_referenced_file_symlinks_are_rejected_without_retained_grants',
+)
+PLAYLIST_DROP_NAMES = (*PLAYLIST_DROP_REQUIRED_NAMES,
+                       'offline_media::drop_playlist::tests::synthetic_future_playlist_regression')
 CORE_REQUIRED_NAMES = (
     'multiview::broker::registry::pending_grant_retention_tests::attachment_promotion_keeps_only_exact_unchanged_sibling_binding_grants',
     'multiview::broker::registry::pending_grant_retention_tests::binding_updates_retain_exact_siblings_but_global_source_and_session_revokes_fail_closed',
@@ -344,6 +350,7 @@ class Attempt:
         self.output = self.parent / 'ottplay-multiview-unix-123-2'
         self.media = FakeMedia(self)
         for name in ('Cargo.toml', 'Cargo.lock', 'src-rs/core/Cargo.toml',
+                     'src-rs/core/src/offline_media.rs', 'src-rs/core/src/offline_media/drop_playlist.rs',
                      'src-rs/core/src/multiview/broker/registry.rs',
                      'src-rs/core/src/multiview/broker/network.rs',
                      'src-rs/core/src/multiview/broker/network_tests.rs',
@@ -353,7 +360,7 @@ class Attempt:
                      'src-rs/core/src/multiview/broker/stream_hls_tests.rs',
                      'src-rs/core/src/multiview/broker/stream_hls_factory_tests.rs',
                      'src-rs/server/src/multiview_media_config.rs',
-                     'src-rs/server/src/multiview_operator.rs',
+                     'src-rs/server/src/multiview_operator.rs', 'src-rs/server/src/multiview_service.rs',
                      'src-rs/server/Cargo.toml', 'src-rs/server/tests/multiview_fixtures.rs',
                      'src-rs/server/tests/multiview_production.rs',
                      'src-rs/server/tests/multiview_activation.rs', 'src-rs/server/src/main.rs',
@@ -361,6 +368,7 @@ class Attempt:
                      'src-rs/server/src/multiview_broker_live.rs',
                      'src-rs/server/src/multiview_broker_live_output_tests.rs',
                      'src-rs/server/src/media_connection.rs',
+                     'src-rs/server/src/private_media_attempt.rs',
                      'src-rs/server/tests/multiview_broker_boundary.rs',
                      'src-rs/server/tests/support/streamed_session.rs',
                      'src-rs/server/tests/support/streamed_transport.rs',
@@ -657,6 +665,10 @@ class Attempt:
                        'input_adapter':'http-hls-ts-v1' if hls else 'http-mpegts-v1',
                        'output_segment_video_proofs':[{'sha256':'a'*64,'bytes':1880,'decoded_video_frames':10,'sample_index':9,'duration_ticks':90000,'time_base':'1/90000','source_identity_unchanged':True}],
                        'sequential_contexts':17,'sequential_output_generations':17,'active_sigterm':True,
+                       'credential_clock':{'startup_sample_ms':1000,'observation_elapsed_ms':1000,
+                           'probe_elapsed_ms':60000,'lower_bound_ms':61000,'short_expires_ms':61000},
+                       'seed_refusal_summaries':[{'seed':seed,'body_first_count':0,'body_later_count':0,
+                           'supervisor_count':0,'last':None,'completed':True} for seed in ('grid','main','replacement')],
                        'scope': 'Normal production HTTPS control/HLS with a private RFC1918 HTTP MPEG-TS adapter, all nine advertised slots and private HLS output; no native-player or physical-television qualification',
                        'tls': {'configured_api_transport':'https','trust':'synthetic_ca_only',
                                'untrusted_ca_rejected':True,'wrong_hostname_rejected':True,
@@ -697,6 +709,9 @@ class Attempt:
                 if self.case == 'hls-nonzero': raise RuntimeError('Synthetic HLS command exited nonzero')
                 if self.case == 'hls-zero-tests': return 'running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;\n'
 
+            if self.case == 'production-no-credential-clock': receipt.pop('credential_clock')
+            if self.case == 'production-no-seed-summaries': receipt.pop('seed_refusal_summaries')
+            if self.case == 'production-incomplete-seed-summary': receipt['seed_refusal_summaries'][1]['completed'] = False
             if self.case == 'production-bad-receipt':
                 receipt['pass'] = False
             elif self.case == 'production-missing-source':
@@ -817,6 +832,12 @@ class Attempt:
             if self.case in ('failed-activation-test', 'leaked-home-fixture-and-failed-test'):
                 text = text.replace(ACTIVATION_NAMES[0] + ' ... ok', ACTIVATION_NAMES[0] + ' ... FAILED')
             return text
+        if name == 'core-playlist-inventory':
+            return ''.join(value + ': test\n' for value in PLAYLIST_DROP_NAMES)
+        if name == 'core-playlist-ignored-inventory':
+            return ''
+        if name == 'core-playlist-ordinary':
+            return suite_passed(PLAYLIST_DROP_NAMES)
         if name == 'core-multiview-inventory':
             if self.case == 'core-zero-inventory':
                 return ''
@@ -1385,6 +1406,98 @@ class BoundaryContracts(unittest.TestCase):
                     self.assertIn('test result: ok.', transcript)
                     entry = next(row for row in attempt.driver.commands if row['name'] == stage + '-ordinary')
                     self.assertTrue(entry['cleanup_confirmed'])
+
+
+class PlaylistDropContracts(unittest.TestCase):
+    def test_required_unix_cases_bind_to_actual_playlist_source(self):
+        self.assertEqual(ci.PLAYLIST_DROP_REQUIRED_TESTS, frozenset(PLAYLIST_DROP_REQUIRED_NAMES))
+        source = (ROOT / 'src-rs/core/src/offline_media/drop_playlist.rs').read_text()
+        for name in PLAYLIST_DROP_REQUIRED_NAMES:
+            self.assertIn('async fn ' + name.rsplit('::', 1)[1] + '()', source)
+
+    def test_all_discovered_tests_reuse_the_compiled_core_on_both_unix_hosts(self):
+        for system in ('Linux', 'Darwin'):
+            with self.subTest(system=system), Attempt(system=system) as attempt:
+                attempt.run()
+                result = attempt.terminal()
+                self.assertEqual(result['status'], 'pass')
+                self.assertEqual(result['ordinary_playlist_drop_tests'], sorted(PLAYLIST_DROP_NAMES))
+                rows = {row['name']: row for row in attempt.driver.commands}
+                for name in ('core-playlist-inventory', 'core-playlist-ignored-inventory', 'core-playlist-ordinary'):
+                    self.assertEqual(rows[name]['argv'][:2], [str(attempt.core_executable), ci.PLAYLIST_DROP_PREFIX])
+                    self.assertTrue(rows[name]['cleanup_confirmed'])
+                self.assertEqual(rows['core-playlist-ordinary']['argv'][2:], ['--test-threads=1', '--color=never'])
+                self.assertEqual(rows['core-playlist-ordinary']['limit'], 60)
+                self.assertEqual(sum(row['name'] == 'core-fixture-build' for row in attempt.driver.commands), 1)
+                names = [row['name'] for row in attempt.driver.commands]
+                self.assertLess(names.index('core-playlist-ordinary'), names.index('core-multiview-ordinary'))
+                before = json.loads((attempt.output / 'evidence/source-before.json').read_text())
+                after = json.loads((attempt.output / 'evidence/source-after.json').read_text())
+                self.assertEqual(before, after)
+                for path in ('src-rs/core/src/offline_media.rs', 'src-rs/core/src/offline_media/drop_playlist.rs'):
+                    self.assertEqual(before['sha256'][path], hashlib.sha256((attempt.root / path).read_bytes()).hexdigest())
+
+    def test_missing_ignored_empty_foreign_and_duplicate_inventory_fail_before_execution(self):
+        cases = [('missing', name) for name in PLAYLIST_DROP_REQUIRED_NAMES]
+        cases += [('ignored', name) for name in PLAYLIST_DROP_NAMES]
+        cases += [(name, '') for name in ('empty', 'foreign', 'duplicate')]
+        for case, target in cases:
+            with self.subTest(case=case, target=target), Attempt() as attempt:
+                original = attempt.response
+                def response(name, argv, original=original, case=case, target=target):
+                    text = original(name, argv)
+                    if name == 'core-playlist-inventory':
+                        if case == 'missing':
+                            return text.replace(target + ': test\n', '')
+                        if case == 'empty':
+                            return ''
+                        if case == 'foreign':
+                            return text + 'other::test: test\n'
+                        if case == 'duplicate':
+                            return text + PLAYLIST_DROP_NAMES[0] + ': test\n'
+                    if name == 'core-playlist-ignored-inventory' and case == 'ignored':
+                        return target + ': test\n'
+                    return text
+                with mock.patch.object(attempt, 'response', side_effect=response), self.assertRaises(RuntimeError):
+                    attempt.run()
+                self.assertEqual(attempt.terminal()['status'], 'fail')
+                self.assertNotIn('core-playlist-ordinary', [row['name'] for row in attempt.driver.commands])
+
+    def test_incomplete_failed_zero_and_nonzero_execution_cannot_claim_success(self):
+        for case in ('missing-discovered', 'failed', 'zero', 'ignored', 'wrong-summary', 'nonzero'):
+            with self.subTest(case=case), Attempt() as attempt:
+                original = attempt.response
+                def response(name, argv, original=original, case=case):
+                    if name != 'core-playlist-ordinary':
+                        return original(name, argv)
+                    if case == 'nonzero':
+                        raise RuntimeError('Synthetic playlist command exited nonzero')
+                    if case == 'zero':
+                        return suite_passed(())
+                    if case == 'missing-discovered':
+                        return suite_passed(PLAYLIST_DROP_REQUIRED_NAMES)
+                    if case == 'ignored':
+                        return suite_passed(PLAYLIST_DROP_NAMES[:-1], PLAYLIST_DROP_NAMES[-1:])
+                    text = suite_passed(PLAYLIST_DROP_NAMES)
+                    if case == 'failed':
+                        return text.replace(PLAYLIST_DROP_NAMES[-1] + ' ... ok', PLAYLIST_DROP_NAMES[-1] + ' ... FAILED')
+                    return text.replace('0 failed;', '1 failed;')
+                with mock.patch.object(attempt, 'response', side_effect=response), self.assertRaises(RuntimeError):
+                    attempt.run()
+                self.assertEqual(attempt.terminal()['status'], 'fail')
+                self.assertNotIn('core-multiview-ordinary', [row['name'] for row in attempt.driver.commands])
+
+    def test_both_playlist_inputs_remain_bound_through_the_final_source_check(self):
+        for path in ('src-rs/core/src/offline_media.rs', 'src-rs/core/src/offline_media/drop_playlist.rs'):
+            with self.subTest(path=path), Attempt() as attempt:
+                original = attempt.response
+                def response(name, argv, original=original, path=path, attempt=attempt):
+                    if name == 'fixture-3':
+                        (attempt.root / path).write_text('synthetic changed playlist source')
+                    return original(name, argv)
+                with mock.patch.object(attempt, 'response', side_effect=response), self.assertRaises(RuntimeError):
+                    attempt.run()
+                self.assertIn('Source or root lock changed', attempt.terminal()['error'])
 
 
 class CoreRequiredContracts(unittest.TestCase):
@@ -2316,6 +2429,7 @@ class MockMainTests(unittest.TestCase):
         # Check the actual closed fixture modules, independently of Attempt's synthetic --list.
         sources = (
             ('src-rs/server/tests/multiview_production.rs', ''),
+            ('src-rs/server/src/private_media_attempt.rs', 'media_attempt::'),
             ('src-rs/server/tests/support/hls_production.rs', 'hls_production::tests::'),
             ('src-rs/server/tests/support/multiview_production_tls.rs', 'production_tls::'),
         )
@@ -2690,6 +2804,46 @@ class MockMainTests(unittest.TestCase):
                 self.assertEqual(generated[generated.index('-t')+1],'600')
 
     def test_normal_server_mpegts_fixture_is_exact_bounded_and_receipt_backed(self):
+        clock = {'startup_sample_ms':1000,'observation_elapsed_ms':1000,
+                 'probe_elapsed_ms':60000,'lower_bound_ms':61000,'short_expires_ms':61000}
+        ci.require_credential_clock(clock)
+        for key, value in [('startup_sample_ms',0),('startup_sample_ms',True),
+                           ('startup_sample_ms',2**64),('short_expires_ms',61001),
+                           ('short_expires_ms',0),('lower_bound_ms',61001),
+                           ('probe_elapsed_ms',-1),('probe_elapsed_ms',True),
+                           ('observation_elapsed_ms',540000),('extra','secret-canary')]:
+            broken = dict(clock); broken[key] = value
+            with self.subTest(credential_clock=broken), self.assertRaisesRegex(Exception,
+                    'Production credential clock evidence malformed or out of bound'):
+                ci.require_credential_clock(broken)
+        for broken in [None, {}, {key:value for key,value in clock.items() if key != 'probe_elapsed_ms'}]:
+            with self.assertRaisesRegex(Exception, 'Production credential clock evidence malformed or out of bound'):
+                ci.require_credential_clock(broken)
+        zero = [{'seed':seed,'body_first_count':0,'body_later_count':0,
+                 'supervisor_count':0,'last':None,'completed':True} for seed in ('grid','main','replacement')]
+        ci.require_seed_refusal_summaries(zero)
+        positive = json.loads(json.dumps(zero))
+        positive[1].update(body_first_count=1, body_later_count=2, supervisor_count=1,
+            last={'site':'body_later','marker':41,'stderr_bytes':123,'stderr_sha256':'a'*64,
+                  'status':None,'response_bytes':None})
+        ci.require_seed_refusal_summaries(positive)
+        negatives = [None, [], zero[:2], zero + zero[:1], list(reversed(zero))]
+        for key, value in [('completed',False),('completed',1),('extra','secret-canary'),
+                           ('body_first_count',True),('body_first_count',-1),
+                           ('body_first_count',2**64),('last',None)]:
+            broken = json.loads(json.dumps(positive)); broken[1][key] = value; negatives.append(broken)
+        for key, value in [('site','unknown'),('marker',0),('marker',True),('marker',2**64),
+                           ('stderr_bytes',0),('stderr_bytes',65537),('stderr_bytes',True),
+                           ('stderr_sha256','A'*64),('stderr_sha256','secret-canary'),
+                           ('status',503),('response_bytes',0),('extra','secret-canary')]:
+            broken = json.loads(json.dumps(positive)); broken[1]['last'][key] = value; negatives.append(broken)
+        broken = json.loads(json.dumps(positive)); broken[1]['body_later_count'] = 0; negatives.append(broken)
+        broken = json.loads(json.dumps(zero)); broken[1]['last'] = positive[1]['last']; negatives.append(broken)
+        for broken in negatives:
+            with self.subTest(seed_summary=broken), self.assertRaisesRegex(Exception,
+                    'Production seed refusal summaries malformed or incomplete') as caught:
+                ci.require_seed_refusal_summaries(broken)
+            self.assertNotIn('secret-canary', str(caught.exception))
         with Attempt() as attempt:
             attempt.run()
             result = attempt.terminal()
@@ -2767,6 +2921,9 @@ class MockMainTests(unittest.TestCase):
             'production-extra-inventory': 'Production normal-binary fixture must have both exact ignored modes and frozen ordinary support',
             'production-not-ignored': 'Production normal-binary fixture must have both exact ignored modes and frozen ordinary support',
             'production-bad-receipt': 'Normal production-server adapter receipt did not qualify its bounded contract',
+            'production-no-credential-clock': 'Production credential clock evidence malformed or out of bound',
+            'production-no-seed-summaries': 'Production seed refusal summaries malformed or incomplete',
+            'production-incomplete-seed-summary': 'Production seed refusal summaries malformed or incomplete',
             'production-missing-source': 'Actual test receipt does not bind the three sealed transport sources',
             'production-no-hls-av': 'Normal production-server adapter receipt did not qualify its bounded contract',
             'production-no-tls': 'Normal production-server adapter receipt did not qualify its bounded contract',

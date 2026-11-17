@@ -99,6 +99,15 @@ var keyStrings = {
         "Automatic plays supported files directly and uses compatible HLS when needed.",
     alhabet: "абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
     always: "always",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Local HLS manifests are not supported; use an HTTP(S) manifest URL",
+    "Playlist contains unsupported sources":
+        "Playlist contains unsupported sources",
+    "Playlist is empty or invalid": "Playlist is empty or invalid",
+    "Playlist is too large": "Playlist is too large",
+    "Playlist local files must be dropped together with the playlist":
+        "Playlist local files must be dropped together with the playlist",
+    "Playlist must use UTF-8": "Playlist must use UTF-8",
     "and enter code": "and enter the code",
     Back: "Back",
     "Back / Forward for 1 minute": "Skip back / forward 1 minute",

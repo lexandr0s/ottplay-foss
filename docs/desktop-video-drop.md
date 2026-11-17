@@ -2,6 +2,30 @@
 
 On PC, PC2, and the Tauri desktop shell, select **one or more video files** and drop them together into the player window. The player starts the first file and uses the selected files as a temporary Local queue. This does not add a provider, import a folder, or replace the saved Local library. The configured provider remains saved for later use.
 
+## Drop an M3U or M3U8 playlist
+
+Drop a UTF-8 `.m3u` or `.m3u8` file into the same window. The player reads its entries in order and starts the first one, using the same temporary queue and previous/next controls. `#EXTINF` supplies the displayed title. The playlist can contain HTTP/HTTPS live streams, HTTP/HTTPS video files, or local video paths. HTTP URLs, including signed query strings, are used directly by the player: the OTT server does not download or relay them. Network access, CORS, mixed-content restrictions, codecs, and autoplay policy still apply.
+
+For example:
+
+```m3u
+#EXTM3U
+#EXTINF:-1,Example live channel
+https://media.example.test/live/index.m3u8
+#EXTINF:120,Example remote video
+https://media.example.test/film.mp4
+#EXTINF:90,Example local video
+movies/clip.mp4
+```
+
+In Tauri, relative local paths are resolved from the playlist's own directory; absolute local paths and local `file:///` URLs are also accepted for supported video files. The playlist author can therefore name local videos outside that directory. Only those individual files receive temporary read capabilities; no directory is imported or scanned. Symlinks and unavailable or unsupported files are rejected. Local media bytes are read from the originals, without copying them into player storage. Playlists from untrusted sources should be inspected before opening because their entries determine which videos or network addresses the player opens.
+
+A browser cannot read neighbouring files merely because a playlist was selected. Drop the local videos together with the playlist, using unambiguous relative paths matching the selected files. Otherwise use Tauri for playlists containing local paths. A browser playlist containing only HTTP/HTTPS URLs needs no additional files.
+
+There are two different uses of M3U8. A channel playlist whose entries point to `.m3u8` URLs opens each URL as **one HLS stream**. A directly dropped HLS manifest containing `#EXT-X-` tags is explicitly rejected; its segment, key, subtitle, and variant references are never treated as separate channels. Put the original HTTP/HTTPS HLS manifest URL in an ordinary channel playlist instead. Nested playlists are not fetched or recursively expanded. VLC/Kodi/header directives do not grant custom HTTP headers or execute commands.
+
+An offer contains at most 128 selected files, at most 128 native local-video grants, and at most 4096 expanded playlist entries. Each playlist is limited to 2 MiB and all playlist text in one offer to 8 MiB. Empty, malformed, oversized, or partially unavailable offers are rejected as a whole. A failed, cancelled, or superseded read leaves the previous playback intact. This operation never changes the saved provider or creates a persistent M3U profile.
+
 Each drop accepts 1–128 files in the order supplied by the operating system or browser. That order may differ from the order in which you clicked files in Finder or Explorer. The channel list displays the queue, and the normal previous/next controls and Repeat setting apply. Files with identical names remain separate queue entries.
 
 A new accepted drop replaces the previous temporary queue. It does not append to it. If any selected file is a directory, unsupported, empty, or unavailable during preparation, the whole new drop is rejected and the previous playback remains intact. A drag cursor may show a copy symbol; the player does not copy the original media into its library.
@@ -28,7 +52,7 @@ This is a boundary for the new application API, not a claim that filesystem path
 
 ## Open With and default applications
 
-The macOS and Linux packages advertise **MP4, M4V, WebM, OGV, AVI, and MKV** as native video types. On macOS, registration uses the `Viewer` role and `Alternate` rank. The application does not select itself as your default player. These declarations follow [Tauri's file-association configuration](https://v2.tauri.app/reference/config/#fileassociation).
+The macOS and Linux packages advertise **MP4, M4V, WebM, OGV, AVI, MKV, M3U, and M3U8** as supported file types. On macOS, registration uses the `Viewer` role and `Alternate` rank. The application does not select itself as your default player. These declarations follow [Tauri's file-association configuration](https://v2.tauri.app/reference/config/#fileassociation).
 
 ### macOS: choose a player once or make it the default
 
@@ -51,7 +75,7 @@ Linux DEB/RPM packages include a desktop entry with video MIME types and file-ar
 
 Windows supports selecting the installed executable manually in **Open With**. Automatic Windows file-association registration is not enabled in this feature, so installation does not assign extension defaults.
 
-On Windows and Linux, this implementation accepts video-file arguments when a process starts. Forwarding a second **Open With** request to an already-running process is not implemented. You can drop a selection into the existing player window instead. Audio-only files, playlists and MOV are not registered as native video types.
+On Windows and Linux, this implementation accepts supported video and playlist file arguments when a process starts. Forwarding a second **Open With** request to an already-running process is not implemented. You can drop a selection into the existing player window instead. Audio-only files and MOV are not registered as native video types.
 
 AVI/MKV still require the existing compatibility backend, and supported extensions do not guarantee that every codec will play. Native package installation, Finder/desktop registration, and real cold/warm OS opening have not yet been verified for this change; the behavior above describes the implementation, not a completed native delivery test.
 

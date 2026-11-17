@@ -652,6 +652,8 @@ var keyStrings = {
     "Loading via proxy...": "Nalaganje prek posrednika ...",
     "Loading. Please wait...": "Nalaganje ... počakajte ...",
     "Loading...": "Nalaganje ...",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Lokalni manifesti HLS niso podprti; uporabite URL manifesta HTTP(S)",
     "Local HTTP remote control": "Lokalni daljinski upravljalnik HTTP",
     "Local source did not respond": "Lokalni vir se ni odzval",
     "Local source unavailable": "Lokalni vir ni na voljo",
@@ -787,9 +789,17 @@ var keyStrings = {
     "Player info:": "informacije o medijskem predvajalniku:",
     "Playing: %1": "Predvajanje: %1",
     Playlist: "Seznam predvajanja",
+    "Playlist contains unsupported sources":
+        "Seznam predvajanja vsebuje nepodprte vire",
     "Playlist file": "Datoteka seznama predvajanja",
+    "Playlist is empty or invalid":
+        "Seznam predvajanja je prazen ali neveljaven",
     "Playlist is not loading directly...Loading via server...":
         "Seznama predvajanja ni bilo mogoče neposredno naložiti. Nalaganje prek strežnika …",
+    "Playlist is too large": "Seznam predvajanja je prevelik",
+    "Playlist local files must be dropped together with the playlist":
+        "Lokalne datoteke seznama predvajanja dodajte skupaj s seznamom",
+    "Playlist must use UTF-8": "Seznam predvajanja mora uporabljati UTF-8",
     "Playlist Name": "Ime seznama predvajanja",
     "Playlist URL": "Seznam predvajanja URL",
     Plex: "Plex",

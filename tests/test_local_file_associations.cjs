@@ -8,6 +8,8 @@ const read = (file) =>
     JSON.parse(fs.readFileSync(path.join(root, file), "utf8"));
 const expected = {
     avi: "video/x-msvideo",
+    m3u: "audio/x-mpegurl",
+    m3u8: "application/vnd.apple.mpegurl",
     m4v: "video/mp4",
     mkv: "video/x-matroska",
     mp4: "video/mp4",
@@ -36,21 +38,26 @@ function associations(platform) {
     return result;
 }
 
-test("macOS registers only native supported video types as an alternate viewer", () => {
+test("macOS registers native OS-drop media and playlist types as an alternate viewer", () => {
     assert.deepEqual(associations("macos"), expected);
     const source = fs.readFileSync(
-        path.join(root, "src-rs/core/src/offline_media.rs"),
+        path.join(root, "src-tauri/src/commands/local_drop.rs"),
         "utf8"
     );
+    // This is the actual OS gesture guard. Core parsing separately validates
+    // playlist content before publishing its transient catalogue.
+    const start = source.indexOf("fn supported_path(");
+    assert.notEqual(start, -1);
     const admission = source.slice(
-        source.indexOf("pub async fn transient_video(")
+        start,
+        source.indexOf("fn opened_paths(", start)
     );
     const list = admission.match(
-        /if !matches!\(\s*extension\.as_str\(\),([\s\S]*?)\)\s*\{/
+        /matches!\(\s*v\.to_ascii_lowercase\(\)\.as_str\(\),([\s\S]*?)\)/
     );
     assert.ok(
         list,
-        "read the actual native admission, not an unrelated media list"
+        "read the actual OS-drop admission, not an unrelated media list"
     );
     const admitted = Array.from(
         list[1].matchAll(/"([a-z0-9]+)"/g),
@@ -59,7 +66,7 @@ test("macOS registers only native supported video types as an alternate viewer",
     assert.deepEqual(admitted.sort(), Object.keys(expected).sort());
 });
 
-test("Linux desktop associations use video MIME types without audio or playlist takeover", () => {
+test("Linux media and playlist associations remain alternate viewers", () => {
     assert.deepEqual(associations("linux"), expected);
 });
 

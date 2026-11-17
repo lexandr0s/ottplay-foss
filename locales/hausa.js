@@ -106,6 +106,16 @@ var keyStrings = {
         "Yanayin atomatik yana kunna fayilolin da ake goyan baya kai tsaye kuma yana amfani da HLS mai dacewa idan ya zama dole.",
     alhabet: "abɓcdɗefghijkƙlmnorstuwyƴzʼáàâéèêíìîóòôpqúùûvx̃́̀̂",
     always: "koyaushe",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Ba a tallafa wa bayanan HLS na cikin na’ura ba; yi amfani da URL na bayanan HTTP(S)",
+    "Playlist contains unsupported sources":
+        "Jerin kunnawa ya ƙunshi tushen da ba a tallafa wa ba",
+    "Playlist is empty or invalid":
+        "Jerin kunnawa babu komai a ciki ko bai dace ba",
+    "Playlist is too large": "Jerin kunnawa ya yi girma sosai",
+    "Playlist local files must be dropped together with the playlist":
+        "Dole a ja fayilolin cikin na’ura tare da jerin kunnawa a sauke su",
+    "Playlist must use UTF-8": "Dole jerin kunnawa ya yi amfani da UTF-8",
     "and enter code": "kuma shigar da lambar",
     Back: "Komawa",
     "Back / Forward for 1 minute": "Tsallaka minti 1 baya / gaba",

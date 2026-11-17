@@ -625,6 +625,8 @@ var keyStrings = {
     "Loading via proxy...": "กำลังโหลดผ่านพรอกซี...",
     "Loading. Please wait...": "กำลังโหลด... กรุณารอสักครู่...",
     "Loading...": "กำลังโหลด...",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "ไม่รองรับไฟล์ HLS manifest ในเครื่อง ให้ใช้ URL HTTP(S) ของ manifest",
     "Local HTTP remote control": "รีโมทคอนโทรล HTTP ภายในเครื่อง",
     "Local source did not respond": "แหล่งข้อมูลในเครื่องไม่ตอบสนอง",
     "Local source unavailable": "แหล่งข้อมูลในเครื่องไม่พร้อมใช้งาน",
@@ -757,9 +759,15 @@ var keyStrings = {
     "Player info:": "ข้อมูลเครื่องเล่น:",
     "Playing: %1": "กำลังเล่น: %1",
     Playlist: "เพลย์ลิสต์",
+    "Playlist contains unsupported sources": "เพลย์ลิสต์มีแหล่งที่ไม่รองรับ",
     "Playlist file": "ไฟล์เพลย์ลิสต์",
+    "Playlist is empty or invalid": "เพลย์ลิสต์ว่างเปล่าหรือไม่ถูกต้อง",
     "Playlist is not loading directly...Loading via server...":
         "ไม่สามารถโหลดเพลย์ลิสต์ได้โดยตรง กำลังโหลดผ่านเซิร์ฟเวอร์...",
+    "Playlist is too large": "เพลย์ลิสต์มีขนาดใหญ่เกินไป",
+    "Playlist local files must be dropped together with the playlist":
+        "ต้องลากไฟล์ในเครื่องของเพลย์ลิสต์มาพร้อมกับเพลย์ลิสต์",
+    "Playlist must use UTF-8": "เพลย์ลิสต์ต้องใช้ UTF-8",
     "Playlist Name": "ชื่อเพลย์ลิสต์",
     "Playlist URL": "เพลย์ลิสต์ URL",
     Plex: "Plex",

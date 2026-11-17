@@ -101,6 +101,15 @@ var keyStrings = {
         "ပံ့ပိုးထားသောဖိုင်များကို တိုက်ရိုက်ဖွင့်ပြီး လိုအပ်သည့်အခါတွင် တွဲဖက်အသုံးပြုနိုင်သော HLS ကို အသုံးပြုပါသည်။",
     alhabet: "ကခဂဃငစဆဇဈဉညဋဌဍဎဏတထဒဓနပဖဗဘမယရလဝသဟဠအဣ၏ဤဥဦဧဩဪဿ၀၁၂၃၄၅၆၇၈၉၊။ာါိီုူေဲံျြွှ့္်း",
     always: "အမြဲတမ်း",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "စက်တွင်း HLS မန်နီဖက်စ်များကို မပံ့ပိုးပါ။ HTTP(S) မန်နီဖက်စ် URL ကို သုံးပါ",
+    "Playlist contains unsupported sources":
+        "ဖွင့်ရန်စာရင်းတွင် မပံ့ပိုးသော ရင်းမြစ်များ ပါဝင်သည်",
+    "Playlist is empty or invalid": "ဖွင့်ရန်စာရင်းသည် ဗလာ သို့မဟုတ် မမှန်ကန်ပါ",
+    "Playlist is too large": "ဖွင့်ရန်စာရင်း အရွယ်အစား ကြီးလွန်းသည်",
+    "Playlist local files must be dropped together with the playlist":
+        "စက်တွင်းဖိုင်များကို ဖွင့်ရန်စာရင်းနှင့်အတူ ဆွဲထည့်ရမည်",
+    "Playlist must use UTF-8": "ဖွင့်ရန်စာရင်းတွင် UTF-8 ကို သုံးရမည်",
     "and enter code": "ကုဒ်ကို ရိုက်ထည့်ပါ။",
     Back: "နောက်သို့",
     "Back / Forward for 1 minute": "နောက်ပြန်/ရှေ့သို့ 1 မိနစ်ကျော်သွားပါ။",

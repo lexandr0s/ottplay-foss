@@ -641,6 +641,8 @@ var keyStrings = {
     "Loading via proxy...": "Завантаження через проксі…",
     "Loading. Please wait...": "Завантаження. Зачекайте…",
     "Loading...": "Завантаження…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Локальні маніфести HLS не підтримуються; використовуйте HTTP(S)-адресу маніфесту",
     "Local HTTP remote control": "Локальний HTTP-пульт",
     "Local source did not respond": "Локальне джерело не відповіло",
     "Local source unavailable": "Локальне джерело недоступне",
@@ -775,9 +777,16 @@ var keyStrings = {
     "Player info:": "Інформація про програвач:",
     "Playing: %1": "Відтворюється: %1",
     Playlist: "Плейлист",
+    "Playlist contains unsupported sources":
+        "Плейлист містить непідтримувані джерела",
     "Playlist file": "Файл плейлиста",
+    "Playlist is empty or invalid": "Плейлист порожній або некоректний",
     "Playlist is not loading directly...Loading via server...":
         "Плейлист не завантажується напряму...Завантаження через сервер...",
+    "Playlist is too large": "Плейлист завеликий",
+    "Playlist local files must be dropped together with the playlist":
+        "Локальні файли плейлиста потрібно додати разом із плейлистом",
+    "Playlist must use UTF-8": "Плейлист має використовувати UTF-8",
     "Playlist Name": "Назва плейлиста",
     "Playlist URL": "Адреса плейлиста",
     Plex: "Plex",

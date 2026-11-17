@@ -649,6 +649,8 @@ var keyStrings = {
     "Loading via proxy...": "Учитавање преко проксија…",
     "Loading. Please wait...": "Учитавање… сачекајте…",
     "Loading...": "Учитавање…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Lokalni HLS manifesti nisu podržani; koristite HTTP(S) URL manifesta",
     "Local HTTP remote control": "Локални HTTP даљински управљач",
     "Local source did not respond": "Локални извор није одговорио",
     "Local source unavailable": "Локални извор није доступан",
@@ -783,9 +785,15 @@ var keyStrings = {
     "Player info:": "информације о медијском плејеру:",
     "Playing: %1": "Репродукција: %1",
     Playlist: "Плаилист",
+    "Playlist contains unsupported sources": "Lista sadrži nepodržane izvore",
     "Playlist file": "Датотека плејлисте",
+    "Playlist is empty or invalid": "Lista je prazna ili neispravna",
     "Playlist is not loading directly...Loading via server...":
         "Плејлиста није могла да се учита директно. Учитавање преко сервера…",
+    "Playlist is too large": "Lista je prevelika",
+    "Playlist local files must be dropped together with the playlist":
+        "Lokalne datoteke liste moraju se dodati zajedno sa listom",
+    "Playlist must use UTF-8": "Lista mora koristiti UTF-8",
     "Playlist Name": "Име плејлисте",
     "Playlist URL": "Плејлиста URL",
     Plex: "Plex",

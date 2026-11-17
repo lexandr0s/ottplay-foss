@@ -139,7 +139,7 @@ interface ProviderDriver {
     logo(id: string | number): string;
     resolveStream?(
         url: string,
-        callback: (url: string | null) => void
+        callback: (url: string | null, transport?: MediaSourceTransport) => void
     ): () => void;
     saveConfiguration?(value: any): boolean;
     saveCredentials(value: ProviderCredentials): boolean | void;
@@ -1002,7 +1002,13 @@ function createOfflineDriver(
                 function (value: string) {
                     retire();
                     resolved = value;
-                    if (current()) done(value);
+                    if (current())
+                        done(
+                            value,
+                            driverField(media, "playbackTransport")
+                                ? media.playbackTransport(value)
+                                : undefined
+                        );
                     else if (driverField(media, localMessage0))
                         media.cancelPlayback(value);
                 },

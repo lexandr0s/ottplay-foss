@@ -102,6 +102,16 @@ var keyStrings = {
         "Az automatikus lejátszás közvetlenül lejátssza a támogatott fájlokat, és szükség esetén a kompatibilis HLS-t használja.",
     alhabet: "aábcdeéfghiíjklmnoóöőpqrstuúüűvwxyz",
     always: "mindig",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "A helyi HLS-jegyzékek nem támogatottak; használjon HTTP(S)-jegyzék URL-t",
+    "Playlist contains unsupported sources":
+        "A lejátszási lista nem támogatott forrásokat tartalmaz",
+    "Playlist is empty or invalid": "A lejátszási lista üres vagy érvénytelen",
+    "Playlist is too large": "A lejátszási lista túl nagy",
+    "Playlist local files must be dropped together with the playlist":
+        "A helyi fájlokat a lejátszási listával együtt kell behúzni",
+    "Playlist must use UTF-8":
+        "A lejátszási listának UTF-8 kódolást kell használnia",
     "and enter code": "és adja meg a kódot",
     Back: "Vissza",
     "Back / Forward for 1 minute": "1 perc ugrás vissza / előre",

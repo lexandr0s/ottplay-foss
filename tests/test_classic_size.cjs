@@ -15,6 +15,8 @@ let {
     INTERFACE_NOTIFICATION_SETTINGS_ALLOWANCE,
     DESKTOP_DROP_ALLOWANCE,
     DESKTOP_VIDEO_QUEUE_ALLOWANCE,
+    DESKTOP_PLAYLIST_DROP_ALLOWANCE,
+    DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE,
     AUTO_RELAY_STALL_RECOVERY_ENTRY_ALLOWANCE,
     NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE,
     FAVORITES_CATEGORY_PERSISTENCE_ALLOWANCE,
@@ -180,13 +182,58 @@ function projectCapsWithoutAllowances(names) {
 }
 function capsWithoutAllowances(names) {
     return projectCapsWithoutAllowances([
+        "DESKTOP_PLAYLIST_DROP_ALLOWANCE",
+        "DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE",
         "VIDEO_FIT_LIFECYCLE_ENTRY_ALLOWANCE",
         ...names,
     ]);
 }
 {
-    const evidence = require("../docs/evidence/video-fit-lifecycle-size-20261111.json");
+    const before = projectCapsWithoutAllowances([
+        "DESKTOP_PLAYLIST_DROP_ALLOWANCE",
+    ]);
     const actual = require("../scripts/classic-size.cjs");
+    const evidence = require("../docs/evidence/desktop-playlist-drop-size.json");
+    assert(Object.isFrozen(DESKTOP_PLAYLIST_DROP_ALLOWANCE));
+    assert.deepEqual(DESKTOP_PLAYLIST_DROP_ALLOWANCE, evidence.addedAllowance);
+    for (const metric of ["bytes", "gzipBytes"]) {
+        assert.equal(
+            actual.OPTIONAL_BUDGETS["local-drop"][metric] -
+                before.OPTIONAL_BUDGETS["local-drop"][metric],
+            DESKTOP_PLAYLIST_DROP_ALLOWANCE[metric]
+        );
+        assert(
+            evidence.measured[metric] <=
+                actual.OPTIONAL_BUDGETS["local-drop"][metric]
+        );
+        for (const name of ["BASE_TOTAL_BUDGET", "TOTAL_BUDGET"])
+            assert.equal(
+                actual[name][metric] - before[name][metric],
+                DESKTOP_PLAYLIST_DROP_ALLOWANCE[metric],
+                name + " counts the lazy playlist feature once"
+            );
+    }
+    for (const name of [
+        "BUDGET",
+        "LEGACY_TOTAL_BUDGET",
+        "PROVIDER_BUDGET",
+        "OPTIONAL_BUDGET",
+    ])
+        assert.deepEqual(
+            actual[name],
+            before[name],
+            name + " unchanged by optional playlist parsing"
+        );
+    for (const [name, cap] of Object.entries(before.OPTIONAL_BUDGETS))
+        if (name !== "local-drop")
+            assert.deepEqual(actual.OPTIONAL_BUDGETS[name], cap);
+}
+{
+    const evidence = require("../docs/evidence/video-fit-lifecycle-size-20261111.json");
+    const actual = projectCapsWithoutAllowances([
+        "DESKTOP_PLAYLIST_DROP_ALLOWANCE",
+        "DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE",
+    ]);
     const before = capsWithoutAllowances([]);
     const allowance = VIDEO_FIT_LIFECYCLE_ENTRY_ALLOWANCE;
     assert(Object.isFrozen(allowance));
@@ -305,6 +352,51 @@ function capsWithoutAllowances(names) {
             }
         }
     }
+}
+{
+    const before = projectCapsWithoutAllowances([
+        "DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE",
+    ]);
+    const actual = require("../scripts/classic-size.cjs");
+    const evidence = require("../docs/evidence/desktop-playlist-drop-size.json");
+    assert(Object.isFrozen(DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE));
+    assert.deepEqual(
+        DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE,
+        evidence.transportEntryAllowance
+    );
+    for (const metric of ["bytes", "gzipBytes"]) {
+        const measured = evidence.transportEntryMeasurement;
+        assert.equal(
+            measured.candidateWeb[metric] - measured.baselineWeb[metric],
+            measured.maximumDelta[metric]
+        );
+        assert(
+            measured.maximumDelta[metric] <=
+                DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE[metric]
+        );
+    }
+    for (const name of [
+        "BUDGET",
+        "LEGACY_TOTAL_BUDGET",
+        "BASE_TOTAL_BUDGET",
+        "TOTAL_BUDGET",
+    ])
+        for (const metric of ["bytes", "gzipBytes"])
+            assert.equal(
+                actual[name][metric] - before[name][metric],
+                DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE[metric],
+                name + " counts transport routing once"
+            );
+    for (const name of [
+        "PROVIDER_BUDGET",
+        "OPTIONAL_BUDGET",
+        "OPTIONAL_BUDGETS",
+    ])
+        assert.deepEqual(
+            actual[name],
+            before[name],
+            name + " remains unchanged by transport routing"
+        );
 }
 // Keep immutable earlier receipts on their original caps. Live inspectors below
 // still restore latestCaps, including this independently measured feature cost.
@@ -1723,6 +1815,7 @@ assert.deepEqual(
 );
 assert.deepEqual(latestOptionalBundles["local-drop"], [
     "build/offline/dropped-video.js",
+    "build/offline/dropped-playlist.js",
     "build/plugins/local-drop.js",
 ]);
 for (const metric of ["bytes", "gzipBytes"]) {

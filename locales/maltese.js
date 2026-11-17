@@ -656,6 +656,8 @@ var keyStrings = {
     "Loading via proxy...": "Qed jitgħabba permezz ta’ proksi…",
     "Loading. Please wait...": "Qed jitgħabba… jekk jogħġbok stenna…",
     "Loading...": "Qed jitgħabba…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Manifesti HLS lokali mhumiex appoġġati; uża URL tal-manifest HTTP(S)",
     "Local HTTP remote control": "Kontroll mill-bogħod HTTP lokali",
     "Local source did not respond": "Is-sors lokali ma weġibx",
     "Local source unavailable": "Is-sors lokali mhux disponibbli",
@@ -791,9 +793,16 @@ var keyStrings = {
     "Player info:": "Informazzjoni tal-plejer:",
     "Playing: %1": "Qed jindaqq: %1",
     Playlist: "Lista tad-daqq",
+    "Playlist contains unsupported sources":
+        "Il-playlist fiha sorsi mhux appoġġati",
     "Playlist file": "Fajl tal-lista tad-daqq",
+    "Playlist is empty or invalid": "Il-playlist hija vojta jew invalida",
     "Playlist is not loading directly...Loading via server...":
         "Il-lista tad-daqq ma setgħetx titgħabba direttament. Qed titgħabba mis-server…",
+    "Playlist is too large": "Il-playlist hija kbira wisq",
+    "Playlist local files must be dropped together with the playlist":
+        "Il-fajls lokali tal-playlist għandhom jitniżżlu flimkien mal-playlist",
+    "Playlist must use UTF-8": "Il-playlist trid tuża UTF-8",
     "Playlist Name": "Isem tal-lista tad-daqq",
     "Playlist URL": "URL tal-lista tad-daqq",
     Plex: "Plex",
