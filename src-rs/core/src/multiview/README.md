@@ -196,3 +196,18 @@ requests capped at 5 ms and checks cancellation between requests. This improves
 cancellation responsiveness and avoids requesting a whole output period in one
 sleep; it does not guarantee an operating-system wakeup deadline, change capture
 frequency or relax the capture-age and output-debt limits.
+
+A server-side decode-open failure can also retain a close observation from that
+specific Play operation before retiring its source. The `decode_open_failure`
+record uses `try_lock` on its control mutex and copies only the first-close record and
+scalar session flags. It never calls the full Core snapshot, reads a cancellation
+token, waits for the session mutex, or retains a source/resource handle. A busy or
+poisoned mutex produces `observation_present=false`.
+
+`observation_mode=retained_only` means no fresh Core state was sampled;
+`session_cancelled=not_observed` is unknown, not evidence that cancellation was
+false. A stored first-close record remains historical evidence for this session,
+not necessarily the first event by wall-clock time. Source cleanup and reservation
+retirement retain their original result; diagnostic output is deferred until
+Pending/done and the operation receipt are complete. Do not attribute a nearby
+untagged watchdog line from another session to the failed Play operation.
