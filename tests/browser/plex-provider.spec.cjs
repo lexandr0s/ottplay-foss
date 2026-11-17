@@ -3,6 +3,13 @@ const path = require("node:path");
 const { test, expect } = require("../helpers/browser-test.cjs");
 const installShakaLifecycleDiagnostics = require("./shaka-lifecycle-diagnostics.cjs");
 const observeAspectReadiness = require("../helpers/aspect-readiness-diagnostics.cjs");
+const installFirefoxVideojsPhase = require("../helpers/firefox-videojs-phase.cjs");
+const firefoxVideojsPhase = process.env.CI_FIREFOX_VIDEOJS_PHASE;
+if (
+    firefoxVideojsPhase &&
+    !["append-active", "append-completed"].includes(firefoxVideojsPhase)
+)
+    throw new Error("Unknown Firefox Video.js phase");
 
 // Serialized by Playwright: keep this predicate self-contained.
 function aspectMediaReady({ engine, previous, target }) {
@@ -428,72 +435,126 @@ async function openPlexChannels(page, engine) {
             window.providerMediaClient &&
             !window.__ottActiveProviderDriver.catalogLoading()
     );
-    await observeAspectReadiness(page, { engine, phase: "open-channels" }, () =>
-        page.evaluate(() => {
-            // Synchronous observations preserve the four calls and their order.
-            // An after mark means call return, not completion of asynchronous work.
-            // Console delivery may stop on a crash; a missing mark proves nothing.
-            function mark(step) {
-                try {
-                    let media = null;
-                    try {
-                        const video = window.video;
-                        const seconds = (value) =>
-                            Number.isFinite(value) && Math.abs(value) <= 1e9
-                                ? Math.round(value * 1000) / 1000
-                                : null;
-                        const integer = (value, max) =>
-                            Number.isInteger(value) &&
-                            value >= 0 &&
-                            value <= max
-                                ? value
-                                : null;
-                        const boolean = (value) =>
-                            typeof value === "boolean" ? value : null;
-                        if (video) {
-                            const ranges = video.buffered;
-                            const count = integer(ranges?.length, 100000);
-                            media = {
-                                bufferedRangeCount: count,
-                                currentTime: seconds(video.currentTime),
-                                duration: seconds(video.duration),
-                                ended: boolean(video.ended),
-                                errorCode: integer(video.error?.code, 4),
-                                lastBufferEnd:
-                                    count > 0
-                                        ? seconds(ranges.end(count - 1))
-                                        : null,
-                                networkState: integer(video.networkState, 3),
-                                paused: boolean(video.paused),
-                                readyState: integer(video.readyState, 4),
-                                sourcePresent: !!video.currentSrc,
-                            };
+    const onPhase = (message) => {
+        const prefix = "Firefox Video.js phase: ";
+        const text = message.text();
+        if (!text.startsWith(prefix) || text.length > 256) return;
+        try {
+            const record = JSON.parse(text.slice(prefix.length));
+            if (
+                record.mode === firefoxVideojsPhase &&
+                record.attempts === 1 &&
+                record.phaseObserved === true &&
+                Object.keys(record).sort().join(",") ===
+                    "attempts,mode,phaseObserved"
+            )
+                console.error(prefix + JSON.stringify(record));
+        } catch (_) {
+            // Never forward arbitrary page output or native errors.
+        }
+    };
+    const observePhase = engine === "video.js" && !!firefoxVideojsPhase;
+    if (observePhase) page.on("console", onPhase);
+    try {
+        await observeAspectReadiness(
+            page,
+            { engine, phase: "open-channels" },
+            () =>
+                page.evaluate(() => {
+                    const transition = () => {
+                        // Synchronous observations preserve the four calls and their order.
+                        // An after mark means call return, not completion of asynchronous work.
+                        // Console delivery may stop on a crash; a missing mark proves nothing.
+                        function mark(step) {
+                            try {
+                                let media = null;
+                                try {
+                                    const video = window.video;
+                                    const seconds = (value) =>
+                                        Number.isFinite(value) &&
+                                        Math.abs(value) <= 1e9
+                                            ? Math.round(value * 1000) / 1000
+                                            : null;
+                                    const integer = (value, max) =>
+                                        Number.isInteger(value) &&
+                                        value >= 0 &&
+                                        value <= max
+                                            ? value
+                                            : null;
+                                    const boolean = (value) =>
+                                        typeof value === "boolean"
+                                            ? value
+                                            : null;
+                                    if (video) {
+                                        const ranges = video.buffered;
+                                        const count = integer(
+                                            ranges?.length,
+                                            100000
+                                        );
+                                        media = {
+                                            bufferedRangeCount: count,
+                                            currentTime: seconds(
+                                                video.currentTime
+                                            ),
+                                            duration: seconds(video.duration),
+                                            ended: boolean(video.ended),
+                                            errorCode: integer(
+                                                video.error?.code,
+                                                4
+                                            ),
+                                            lastBufferEnd:
+                                                count > 0
+                                                    ? seconds(
+                                                          ranges.end(count - 1)
+                                                      )
+                                                    : null,
+                                            networkState: integer(
+                                                video.networkState,
+                                                3
+                                            ),
+                                            paused: boolean(video.paused),
+                                            readyState: integer(
+                                                video.readyState,
+                                                4
+                                            ),
+                                            sourcePresent: !!video.currentSrc,
+                                        };
+                                    }
+                                } catch (_) {
+                                    // Even an unavailable media element can leave a step mark.
+                                }
+                                console.log(
+                                    "Plex channel transition: " +
+                                        JSON.stringify({ media, step })
+                                );
+                            } catch (_) {
+                                // Observations must not suppress or replace the next call.
+                            }
                         }
-                    } catch (_) {
-                        // Even an unavailable media element can leave a step mark.
-                    }
-                    console.log(
-                        "Plex channel transition: " +
-                            JSON.stringify({ media, step })
-                    );
-                } catch (_) {
-                    // Observations must not suppress or replace the next call.
-                }
-            }
-            mark(0);
-            window.stbStop();
-            mark(1);
-            mark(2);
-            window.closeList();
-            mark(3);
-            mark(4);
-            window.__ottMedia.useSource(null);
-            mark(5);
-            mark(6);
-            window.__ottMedia.open(null);
-            mark(7);
-        })
-    );
+                        mark(0);
+                        window.stbStop();
+                        mark(1);
+                        mark(2);
+                        window.closeList();
+                        mark(3);
+                        mark(4);
+                        window.__ottMedia.useSource(null);
+                        mark(5);
+                        mark(6);
+                        window.__ottMedia.open(null);
+                        mark(7);
+                    };
+                    const phase = window.__ottFirefoxVideojsPhase;
+                    if (phase)
+                        return phase
+                            .run(transition)
+                            .finally(() => phase.restore());
+                    transition();
+                })
+        );
+    } finally {
+        if (observePhase) page.off("console", onPhase);
+    }
     await expect(page.locator("#listCaption")).toContainText(
         await page.evaluate(() => window._("Channel list. Category: "))
     );
@@ -1457,6 +1518,13 @@ for (const { engine, strict } of [
             test.setTimeout(60000);
             if (engine === "shaka")
                 await context.addInitScript(installShakaLifecycleDiagnostics);
+            if (firefoxVideojsPhase && engine === "video.js") {
+                if (browserName !== "firefox")
+                    throw new Error("Firefox phase requires Firefox");
+                await context.addInitScript(installFirefoxVideojsPhase, {
+                    mode: firefoxVideojsPhase,
+                });
+            }
             const local = new URL(baseURL).origin;
             const errors = [];
             const films = [

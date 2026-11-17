@@ -410,3 +410,340 @@ posixTest(
         assert.equal(fs.existsSync(owner.root), false);
     }
 );
+
+const installVideojsPhase = require("./helpers/firefox-videojs-phase.cjs");
+function phaseFixture(mode, noAudio = false) {
+    class Buffer {
+        updating = false;
+        buffered = { length: 0 };
+        listeners = new Set();
+        appendBuffer(value) {
+            this.value = value;
+            this.updating = true;
+        }
+        addEventListener(_, fn) {
+            this.listeners.add(fn);
+        }
+        removeEventListener(_, fn) {
+            this.listeners.delete(fn);
+        }
+        complete() {
+            this.updating = false;
+            this.buffered.length = 1;
+            for (const fn of this.listeners) fn();
+        }
+    }
+    class Source {
+        readyState = "open";
+        sourceBuffers = [];
+        addSourceBuffer() {
+            const buffer = new Buffer();
+            this.sourceBuffers.push(buffer);
+            return buffer;
+        }
+        removeSourceBuffer(buffer) {
+            this.sourceBuffers.splice(this.sourceBuffers.indexOf(buffer), 1);
+        }
+    }
+    class Video {}
+    let handle = {};
+    let timer;
+    const microtasks = [];
+    const video = new Video();
+    const scope = {
+        HTMLVideoElement: Video,
+        MediaSource: Source,
+        SourceBuffer: Buffer,
+        URL: { createObjectURL: () => "blob:owned", revokeObjectURL() {} },
+        __ottMedia: { current: () => handle },
+        addEventListener() {},
+        clearTimeout() {
+            timer = undefined;
+        },
+        console: { log() {} },
+        queueMicrotask(fn) {
+            microtasks.push(fn);
+        },
+        removeEventListener() {},
+        setTimeout(fn, ms) {
+            assert.equal(ms, 8000);
+            timer = fn;
+            return 1;
+        },
+        video,
+        videojs: {
+            getPlayer: () => ({ tech: () => ({ el: () => scope.video }) }),
+        },
+    };
+    const original = [
+        Source.prototype.addSourceBuffer,
+        Buffer.prototype.appendBuffer,
+        scope.URL.createObjectURL,
+        scope.URL.revokeObjectURL,
+    ];
+    installVideojsPhase({ mode }, scope);
+    const source = new Source();
+    video.currentSrc = scope.URL.createObjectURL(source);
+    const audio = noAudio ? null : source.addSourceBuffer("audio/mp4");
+    const buffer = source.addSourceBuffer("video/mp4");
+    return {
+        audio,
+        buffer,
+        scope,
+        source,
+        flush() {
+            while (microtasks.length) microtasks.shift()();
+        },
+        retireOwner() {
+            handle = {};
+        },
+        timeout() {
+            timer();
+        },
+        restored() {
+            assert.deepEqual(
+                [
+                    Source.prototype.addSourceBuffer,
+                    Buffer.prototype.appendBuffer,
+                    scope.URL.createObjectURL,
+                    scope.URL.revokeObjectURL,
+                ],
+                original
+            );
+            assert.equal(buffer.listeners.size, 0);
+            if (audio) assert.equal(audio.listeners.size, 0);
+        },
+    };
+}
+test("Video.js phase runs once after native append stack, with owned audio and video", async () => {
+    const f = phaseFixture("append-active");
+    let calls = 0;
+    const done = f.scope.__ottFirefoxVideojsPhase.run(() => {
+        assert.equal(f.buffer.updating, true);
+        calls++;
+    });
+    const bytes = new Uint8Array([1, 2]);
+    f.buffer.appendBuffer(bytes);
+    assert.equal(
+        f.buffer.value,
+        bytes,
+        "Original native append gets identical bytes"
+    );
+    assert.equal(calls, 0, "Transition must not reenter appendBuffer");
+    f.flush();
+    await done;
+    assert.equal(calls, 1);
+    f.buffer.appendBuffer(bytes);
+    f.flush();
+    assert.equal(calls, 1);
+    f.restored();
+});
+test("Video.js completed phase requires real updateend and nonempty buffered ranges", async () => {
+    const f = phaseFixture("append-completed");
+    let calls = 0;
+    const done = f.scope.__ottFirefoxVideojsPhase.run(() => calls++);
+    f.buffer.appendBuffer(new Uint8Array());
+    f.flush();
+    assert.equal(calls, 0);
+    f.buffer.complete();
+    assert.equal(calls, 0);
+    f.flush();
+    await done;
+    assert.equal(calls, 1);
+    f.restored();
+});
+for (const kind of [
+    "missed",
+    "retired",
+    "wrapper",
+    "no-audio",
+    "revoked",
+    "foreign-source",
+    "foreign-tech",
+]) {
+    test(`Video.js phase rejects ${kind} without fabricated transition`, async () => {
+        const f = phaseFixture("append-active", kind === "no-audio");
+        let calls = 0;
+        if (kind === "wrapper") f.scope.video = {};
+        const done = f.scope.__ottFirefoxVideojsPhase.run(() => calls++);
+        const rejected = assert.rejects(done, /Firefox Video.js/);
+        f.buffer.appendBuffer(new Uint8Array());
+        if (kind === "missed") f.buffer.complete();
+        if (kind === "retired") f.retireOwner();
+        if (kind === "revoked") f.scope.URL.revokeObjectURL("blob:owned");
+        if (kind === "foreign-source")
+            f.scope.video.currentSrc = "blob:foreign";
+        if (kind === "foreign-tech")
+            f.scope.videojs.getPlayer = () => ({
+                tech: () => ({ el: () => ({}) }),
+            });
+        f.flush();
+        if (kind !== "wrapper") f.timeout();
+        await rejected;
+        assert.equal(calls, 0);
+        f.scope.__ottFirefoxVideojsPhase.restore();
+        f.restored();
+    });
+}
+test("Video.js phase restores hooks after transition error and explicit retirement", async () => {
+    const f = phaseFixture("append-active");
+    const done = f.scope.__ottFirefoxVideojsPhase.run(() => {
+        throw new Error("closed failure");
+    });
+    const rejected = assert.rejects(done, /closed failure/);
+    f.buffer.appendBuffer(new Uint8Array());
+    f.flush();
+    await rejected;
+    f.restored();
+    const g = phaseFixture("append-active");
+    const stopped = assert.rejects(
+        g.scope.__ottFirefoxVideojsPhase.run(() => assert.fail()),
+        /retired/
+    );
+    g.scope.__ottFirefoxVideojsPhase.restore();
+    await stopped;
+    g.restored();
+});
+
+for (const kind of [
+    "removed-audio",
+    "removed-video",
+    "buffered-throws",
+    "buffered-throws-observe",
+]) {
+    test(`Video.js live buffer membership rejects ${kind} without page error`, async () => {
+        const f = phaseFixture("append-completed");
+        let calls = 0;
+        const rejected = assert.rejects(
+            f.scope.__ottFirefoxVideojsPhase.run(() => calls++),
+            /precondition/
+        );
+        f.buffer.appendBuffer(new Uint8Array());
+        if (kind === "removed-audio") f.source.removeSourceBuffer(f.audio);
+        if (kind === "buffered-throws-observe") {
+            f.buffer.updating = false;
+            Object.defineProperty(f.buffer, "buffered", {
+                get() {
+                    throw new Error("InvalidStateError");
+                },
+            });
+            assert.doesNotThrow(() => {
+                for (const listener of f.buffer.listeners) listener();
+            });
+        } else assert.doesNotThrow(() => f.buffer.complete());
+        // Remove video after observation, before the deferred transition.
+        if (kind === "removed-video") f.source.removeSourceBuffer(f.buffer);
+        if (kind === "buffered-throws")
+            Object.defineProperty(f.buffer, "buffered", {
+                get() {
+                    throw new Error("InvalidStateError");
+                },
+            });
+        assert.doesNotThrow(() => f.flush());
+        f.timeout();
+        await rejected;
+        assert.equal(calls, 0);
+        f.restored();
+    });
+}
+
+test("ordinary Plex transition remains synchronous with its original four calls", () => {
+    const ts = require("typescript");
+    const vm = require("node:vm");
+    const file = ts.createSourceFile(
+        "plex-provider.spec.cjs",
+        fs.readFileSync(
+            path.join(__dirname, "browser/plex-provider.spec.cjs"),
+            "utf8"
+        ),
+        ts.ScriptTarget.Latest,
+        true
+    );
+    let callback;
+    function visit(node, inside = false) {
+        inside =
+            inside ||
+            (ts.isFunctionDeclaration(node) &&
+                node.name?.text === "openPlexChannels");
+        if (
+            inside &&
+            ts.isCallExpression(node) &&
+            ts.isPropertyAccessExpression(node.expression) &&
+            node.expression.name.text === "evaluate"
+        ) {
+            const candidate = node.arguments[0];
+            if (candidate?.getText(file).includes("const transition =")) {
+                assert.ok(!callback, "exactly one initial transition callback");
+                callback = candidate;
+            }
+        }
+        ts.forEachChild(node, (child) => visit(child, inside));
+    }
+    visit(file);
+    assert.ok(callback);
+    const calls = [];
+    const steps = [];
+    const context = {
+        window: {
+            stbStop: () => calls.push("stop"),
+            closeList: () => calls.push("close"),
+            __ottMedia: {
+                useSource: (value) => calls.push(["source", value]),
+                open: (value) => calls.push(["open", value]),
+            },
+        },
+        console: {
+            log: (value) =>
+                steps.push(JSON.parse(value.slice(value.indexOf("{"))).step),
+        },
+    };
+    const result = vm.runInNewContext(
+        "(" + callback.getText(file) + ")()",
+        context
+    );
+    assert.equal(result, undefined);
+    assert.deepEqual(calls, [
+        "stop",
+        "close",
+        ["source", null],
+        ["open", null],
+    ]);
+    assert.deepEqual(steps, [0, 1, 2, 3, 4, 5, 6, 7]);
+});
+
+test("phase diagnostics use a separate manual-only pinned caller and closed phase matrix", () => {
+    const workflow = fs.readFileSync(
+        path.join(__dirname, "../.github/workflows/ci.yml"),
+        "utf8"
+    );
+    const job = workflow.split("\n  firefox-phase-diagnostic:\n")[1];
+    assert.ok(job);
+    assert.match(
+        workflow,
+        /options: \[\s*"off",\s*"both"\s*\]\s+default: "off"/
+    );
+    assert.match(job, /github\.event_name == 'workflow_dispatch'/);
+    assert.match(job, /inputs\.firefox-videojs-phase == 'both'/);
+    assert.match(job, /needs\.build\.result == 'success'/);
+    assert.match(job, /needs: \[\s*build,\s*browser-compatibility\s*\]/);
+    assert.match(job, /max-parallel: 1/);
+    assert.match(job, /phase: \[\s*append-active,\s*append-completed\s*\]/);
+    const rows = JSON.parse(job.match(/browser-matrix: '(\[[^\n]+\])'/)[1]);
+    const inventory = require("../.github/browser-compatibility.json");
+    const declared = inventory.find(
+        (row) => row.id === "ubuntu-latest-firefox-1-62-1"
+    );
+    assert.ok(declared);
+    assert.deepEqual(rows, [{ ...declared, tier: "required" }]);
+    assert.match(
+        job,
+        /browser-evidence-prefix: firefox-phase-\$\{\{ matrix\.phase \}\}/
+    );
+    assert.doesNotMatch(job, /browser-matrix-file:|browser-release-channel:/);
+    const command = job.match(/browser-test-command: ([^\n]+)/)[1];
+    assert.equal(
+        command,
+        "CI_FIREFOX_CRASH_DIAGNOSTICS=1 CI_FIREFOX_VIDEOJS_PHASE=${{ matrix.phase }} node scripts/browser-acceptance.cjs"
+    );
+    assert.doesNotMatch(command, /inputs\./);
+});
