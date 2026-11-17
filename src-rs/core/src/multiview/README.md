@@ -240,3 +240,27 @@ quantization and AAC priming are distinct from integer resampler rounding. The
 one-sample rounding ambiguity and possible boundary-packet ambiguity remain;
 loss-free edge claims require adjacent-segment coverage. Neither these checks nor
 a passing diagnostic identify the cause of an earlier native timing failure.
+
+Private-media authority contention is intentionally fail-closed. A request can
+pass admission and then lose a nonblocking authority check before the first body
+chunk. Hyper may encounter that body error before flushing its buffered response
+headers; the client then reports a request-execution error without an HTTP status.
+That error category alone does not establish contention as the cause.
+
+A connection-local, resource-free atomic recorder retains only the first closed
+authority failure code and its call site. It performs no logging, waiting, extra
+authorization checks or media I/O in body/authority callbacks. The terminal
+connection diagnostic is emitted only after supervision has released its actual
+connection future, body and armed custody. It contains a local diagnostic ID and
+closed failure classes, never URLs, credentials, headers, response bodies or raw
+error strings. The ID is for correlation within that server process, not a
+credential or a globally unique identifier. Concurrent first-failure selection is
+atomic order, not proof of the earliest event by wall-clock time.
+
+The existing held-mutex regression keeps its post-header terminal-body and real
+connection-close assertions. Its pre-header arm uses a test-only service barrier
+after admission, the actual held authority mutex and a real Hyper duplex. It
+checks that no status/header bytes escape, the recorded cause is temporary busy,
+custody is released and a new request works after unlocking. This controlled
+interleaving does not prove that a past hosted or physical-device failure took
+the same path. No retry, authorization, freshness or deadline policy is relaxed.
