@@ -49,7 +49,7 @@ Odtwarzacz korzysta z tego bezwzględnego adresu HTTPS:
 
 Żąda klipu tylko po wybraniu **Odtwórz**, nigdy jako wstępnego ładowania przy uruchamianiu. Plik ma **464 652 bajty**, wideo H.264 baseline 640×360 / 25 fps i dźwięk stereo AAC. Jest wyłączony z pakietów Web, OTTPlay Server, Tauri, Capacitor i kontenerów. [Plik źródłowy](../diagnostics/av-v1.mp4), generator i weryfikator pozostają w repozytorium; nie są zapasową wersją offline w zainstalowanym odtwarzaczu.
 
-Wymagane są internet i działające połączenie HTTPS z tym hostem. Nie ma wbudowanego zapasu ani alternatywnego URL diagnostycznego. Otwarcie powyższego linku w przeglądarce pomaga sprawdzić dostępność pliku, ale nie testuje własności dekodera odtwarzacza ani powrotu do kanału. Usługa hostingowa otrzymuje zwykłe dane połączenia; zobacz [szczegóły prywatności](privacy-policy.md#optional-hosted-audio-video-check).
+Wymagane są internet i działające połączenie HTTPS z tym hostem. Nie ma wbudowanego zapasu ani alternatywnego URL diagnostycznego. Otwarcie powyższego linku w przeglądarce pomaga sprawdzić dostępność pliku, ale nie testuje własności dekodera odtwarzacza ani powrotu do kanału. Usługa hostingowa otrzymuje zwykłe dane połączenia; zobacz [szczegóły prywatności](privacy-policy.md#optional-hosted-audiovideo-check).
 
 <a id="how-playback-returns"></a>
 

@@ -49,7 +49,7 @@ Pemutar memakai alamat HTTPS absolut ini:
 
 Klip diminta hanya saat memilih **Putar**, tidak pernah sebagai pramuat saat mulai. Berkas berukuran **464 652 byte**, dengan video H.264 baseline 640×360 / 25 fps dan audio stereo AAC. Berkas tidak disertakan dalam paket Web, OTTPlay Server, Tauri, Capacitor, atau kontainer. [Berkas sumber](../diagnostics/av-v1.mp4), generator, dan verifikator tetap berada di repositori; semuanya bukan cadangan offline di pemutar yang terpasang.
 
-Diperlukan akses internet dan koneksi HTTPS yang berfungsi ke host itu. Tidak ada cadangan bawaan atau URL diagnostik alternatif. Membuka tautan di atas pada browser dapat memeriksa ketersediaan berkas, tetapi tidak menguji kepemilikan dekoder atau perilaku kembali ke saluran milik pemutar. Layanan hosting menerima informasi koneksi biasa; lihat [rincian privasi](privacy-policy.md#optional-hosted-audio-video-check).
+Diperlukan akses internet dan koneksi HTTPS yang berfungsi ke host itu. Tidak ada cadangan bawaan atau URL diagnostik alternatif. Membuka tautan di atas pada browser dapat memeriksa ketersediaan berkas, tetapi tidak menguji kepemilikan dekoder atau perilaku kembali ke saluran milik pemutar. Layanan hosting menerima informasi koneksi biasa; lihat [rincian privasi](privacy-policy.md#optional-hosted-audiovideo-check).
 
 <a id="how-playback-returns"></a>
 

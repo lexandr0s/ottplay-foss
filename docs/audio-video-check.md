@@ -71,7 +71,7 @@ There is no bundled fallback or alternate diagnostic URL. Opening the link
 above in a browser can help check file availability, but does not exercise the
 player's decoder ownership or return-to-channel behavior. The hosting service
 receives normal connection information; see the
-[privacy details](privacy-policy.md#optional-hosted-audio-video-check).
+[privacy details](privacy-policy.md#optional-hosted-audiovideo-check).
 
 ## How playback returns
 

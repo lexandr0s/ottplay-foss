@@ -49,7 +49,7 @@ Oynatıcı şu mutlak HTTPS adresini kullanır:
 
 Klibi yalnızca **Oynat** seçildiğinde ister; başlangıçta ön yükleme yapmaz. Dosya **464 652 bayttır**; 640×360 / 25 fps H.264 baseline video ve AAC stereo ses içerir. Web, OTTPlay Server, Tauri, Capacitor ve kapsayıcı paketlerinden çıkarılmıştır. [Kaynak dosya](../diagnostics/av-v1.mp4), üretici ve doğrulayıcı depoda kalır; kurulu oynatıcıda çevrimdışı yedek değildir.
 
-İnternet erişimi ve o sunucuya çalışan bir HTTPS bağlantısı gerekir. Paketlenmiş yedek veya alternatif tanılama URL'si yoktur. Yukarıdaki bağlantıyı tarayıcıda açmak dosyanın erişilebilirliğini kontrol etmeye yardımcı olur ancak oynatıcının kod çözücü sahipliğini veya kanala dönüş davranışını sınamaz. Barındırma hizmeti normal bağlantı bilgilerini alır; [gizlilik ayrıntılarına](privacy-policy.md#optional-hosted-audio-video-check) bakın.
+İnternet erişimi ve o sunucuya çalışan bir HTTPS bağlantısı gerekir. Paketlenmiş yedek veya alternatif tanılama URL'si yoktur. Yukarıdaki bağlantıyı tarayıcıda açmak dosyanın erişilebilirliğini kontrol etmeye yardımcı olur ancak oynatıcının kod çözücü sahipliğini veya kanala dönüş davranışını sınamaz. Barındırma hizmeti normal bağlantı bilgilerini alır; [gizlilik ayrıntılarına](privacy-policy.md#optional-hosted-audiovideo-check) bakın.
 
 <a id="how-playback-returns"></a>
 

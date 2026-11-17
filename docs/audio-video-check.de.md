@@ -49,7 +49,7 @@ Der Player verwendet diese absolute HTTPS-Adresse:
 
 Er fordert den Clip nur bei **Wiedergabe** an, niemals als Vorladen beim Start. Die Datei umfasst **464 652 Bytes**, mit H.264-Baseline-Video bei 640×360 / 25 fps und AAC-Stereoton. Sie ist aus Web-, OTTPlay-Server-, Tauri-, Capacitor- und Container-Paketen ausgeschlossen. [Quelldatei](../diagnostics/av-v1.mp4), Generator und Prüfer bleiben im Repository; sie sind kein Offline-Ersatz im installierten Player.
 
-Internetzugang und eine funktionierende HTTPS-Verbindung zu diesem Host sind erforderlich. Es gibt keinen mitgelieferten Ersatz und keine alternative Diagnose-URL. Das Öffnen des Links im Browser kann die Dateiverfügbarkeit prüfen, testet aber weder die Decoder-Zuständigkeit des Players noch die Rückkehr zum Kanal. Der Hostingdienst erhält gewöhnliche Verbindungsdaten; siehe [Datenschutzdetails](privacy-policy.md#optional-hosted-audio-video-check).
+Internetzugang und eine funktionierende HTTPS-Verbindung zu diesem Host sind erforderlich. Es gibt keinen mitgelieferten Ersatz und keine alternative Diagnose-URL. Das Öffnen des Links im Browser kann die Dateiverfügbarkeit prüfen, testet aber weder die Decoder-Zuständigkeit des Players noch die Rückkehr zum Kanal. Der Hostingdienst erhält gewöhnliche Verbindungsdaten; siehe [Datenschutzdetails](privacy-policy.md#optional-hosted-audiovideo-check).
 
 <a id="how-playback-returns"></a>
 

@@ -49,7 +49,7 @@
 
 只有選擇**播放**才會請求短片，啟動時絕不預載入。檔案大小為 **464 652 位元組**，影片為 H.264 baseline、640×360 / 25 fps，音訊為 AAC 立體聲。該檔案不包含在 Web、OTTPlay Server、Tauri、Capacitor 或容器軟體包中。[原始檔](../diagnostics/av-v1.mp4)、生成器和驗證器保留在儲存庫裡，但不是已安裝播放器的離線備用方案。
 
-需要網際網路訪問以及到該主機的正常 HTTPS 連線。沒有內建備用檔案或替代診斷 URL。在瀏覽器中開啟上述連結可以幫助檢查檔案是否可用，但不會驗證播放器的解碼器所有權或返回頻道行為。託管服務會接收普通連線資訊；參見[隱私詳情](privacy-policy.md#optional-hosted-audio-video-check)。
+需要網際網路訪問以及到該主機的正常 HTTPS 連線。沒有內建備用檔案或替代診斷 URL。在瀏覽器中開啟上述連結可以幫助檢查檔案是否可用，但不會驗證播放器的解碼器所有權或返回頻道行為。託管服務會接收普通連線資訊；參見[隱私詳情](privacy-policy.md#optional-hosted-audiovideo-check)。
 
 <a id="how-playback-returns"></a>
 
