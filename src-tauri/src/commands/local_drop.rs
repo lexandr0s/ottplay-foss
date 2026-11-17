@@ -697,25 +697,47 @@ mod tests {
         let second = path().with_file_name("streams.m3u8");
         assert!(supported_paths(&[first.clone(), second.clone(), path()]));
         assert!(supported_paths(&vec![first.clone(); MAX_DROPPED_VIDEOS]));
-        assert!(!supported_paths(&vec![first.clone(); MAX_DROPPED_VIDEOS + 1]));
-        assert!(!supported_paths(&[first.clone(), first.with_extension("txt")]));
+        assert!(!supported_paths(&vec![
+            first.clone();
+            MAX_DROPPED_VIDEOS + 1
+        ]));
+        assert!(!supported_paths(&[
+            first.clone(),
+            first.with_extension("txt")
+        ]));
         assert!(!supported_path(std::path::Path::new("relative.m3u")));
         assert!(!supported_path(&first.with_file_name("control\n.m3u")));
-        assert!(!supported_path(std::path::Path::new("https://source.invalid/list.m3u")));
+        assert!(!supported_path(std::path::Path::new(
+            "https://source.invalid/list.m3u"
+        )));
     }
     #[test]
     fn playlist_system_open_and_argv_keep_order_and_local_only_authority() {
         let cwd = std::env::temp_dir();
         let first = cwd.join("first ü.M3U8");
         let second = cwd.join("second.m3u");
-        let urls = [url::Url::from_file_path(&first).unwrap(), url::Url::from_file_path(&second).unwrap()];
-        assert_eq!(opened_paths(&urls), Some(vec![first.clone(), second.clone()]));
-        assert_eq!(argument_paths(&["first ü.M3U8".into(), "second.m3u".into()], &cwd),
-            Some(vec![first.clone(), second.clone()]));
-        assert_eq!(argument_paths(&[urls[1].as_str().into(), urls[0].as_str().into()], &cwd),
-            Some(vec![second, first]));
-        for raw in ["https://source.invalid/list.m3u", "file://remote/list.m3u8",
-            "file:///list.m3u?token=1", "file:///list.m3u8#fragment"] {
+        let urls = [
+            url::Url::from_file_path(&first).unwrap(),
+            url::Url::from_file_path(&second).unwrap(),
+        ];
+        assert_eq!(
+            opened_paths(&urls),
+            Some(vec![first.clone(), second.clone()])
+        );
+        assert_eq!(
+            argument_paths(&["first ü.M3U8".into(), "second.m3u".into()], &cwd),
+            Some(vec![first.clone(), second.clone()])
+        );
+        assert_eq!(
+            argument_paths(&[urls[1].as_str().into(), urls[0].as_str().into()], &cwd),
+            Some(vec![second, first])
+        );
+        for raw in [
+            "https://source.invalid/list.m3u",
+            "file://remote/list.m3u8",
+            "file:///list.m3u?token=1",
+            "file:///list.m3u8#fragment",
+        ] {
             assert!(opened_paths(&[urls[0].clone(), url::Url::parse(raw).unwrap()]).is_none());
             assert!(argument_paths(&[raw.into()], &cwd).is_none());
         }
@@ -733,12 +755,17 @@ mod tests {
         assert_eq!(slots.start(&pending, now).unwrap(), [selected]);
         slots.advance_page();
         assert!(slots.finish(&pending, 2, now).is_err());
-        assert!(slots.flight.is_some(), "page changes retain ownership until filesystem work drains");
+        assert!(
+            slots.flight.is_some(),
+            "page changes retain ownership until filesystem work drains"
+        );
         slots.reject(&pending);
         let next = slots.reserve(&[path().with_extension("m3u")], now).unwrap();
         assert!(slots.ready(&next, now));
         assert!(slots.start(&next, now + DROP_LIFETIME).is_err());
-        assert!(slots.issued.is_empty(), "page retirement revokes previously issued media too");
+        assert!(
+            slots.issued.is_empty(),
+            "page retirement revokes previously issued media too"
+        );
     }
-
 }
