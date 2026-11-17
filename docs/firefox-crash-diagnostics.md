@@ -61,6 +61,32 @@ initial dump was preserved. Actual collection on a crashing pinned browser must
 be established by a future CI summary. No full dump or external native analyzer
 is executed by this helper.
 
+## Build capability remains unverified
+
+The environment handling above does not establish compiled crash-reporting
+support. Playwright 1.62.1 [pins Firefox 153.0, revision 1538](https://github.com/microsoft/playwright/blob/v1.62.1/packages/playwright-core/browsers.json).
+Its public tag imports selected sources from an
+[internal browser-build repository](https://github.com/microsoft/playwright/blob/v1.62.1/browser_patches/roll_from_upstream.sh),
+without publishing that revision's build recipe or mozconfig. The last public
+[2022 recipe disabled crashreporter](https://github.com/microsoft/playwright/blob/a07a4a25a26e2fa6a976fb2ff174f25b24414da6/browser_patches/firefox/build.sh#L86);
+this is historical evidence, not proof that revision 1538 uses that setting.
+
+Mozilla's [build selection](https://github.com/mozilla-firefox/firefox/blob/f1b6c0f86b96b7e0688c26f65803576f27cdaf88/toolkit/crashreporter/moz.build)
+uses a [dummy implementation](https://github.com/mozilla-firefox/firefox/blob/f1b6c0f86b96b7e0688c26f65803576f27cdaf88/toolkit/crashreporter/nsDummyExceptionHandler.cpp)
+when crashreporter is compiled out. Launch environment variables cannot restore
+that missing implementation. Neither file presence nor a missing dump establishes
+the current build configuration.
+
+A bounded metadata-only probe of the [official Ubuntu 24.04 revision 1538 ZIP](https://cdn.playwright.dev/dbazure/download/playwright/builds/firefox/1538/firefox-ubuntu-24.04.zip)
+confirmed Firefox 153.0 and BuildID `20260722044132`. It read 143,276 bytes including
+the pinned registry source, then stopped: both outer `omni.ja` entries were
+DEFLATE-compressed and individually exceeded the 8 MiB read budget, preventing
+random-access inspection of nested buildconfig metadata. No browser was run and
+no build flags were obtained. Package metadata does not establish the identity
+or capability of the exact CI-installed binary. Capability remains unverified;
+actual crash-signature collection still needs evidence from the pinned CI
+browser, and dump availability is not promised.
+
 ## Source basis
 
 - [Mozilla crash reporter architecture](https://firefox-source-docs.mozilla.org/toolkit/crashreporter/crashreporter/)
