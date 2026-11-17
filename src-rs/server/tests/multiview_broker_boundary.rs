@@ -1029,6 +1029,37 @@ impl Drop for TestConnection {
     }
 }
 
+// Test-only hooks retain real response bytes and the real broker authority.
+// The chunk hook is synchronous: returning Pending here would let Hyper flush
+// headers and would no longer prove the buffered-before-Response interleaving.
+enum BeforeResponseTrigger {
+    BeforeBody,
+    BodyLater(Box<dyn FnOnce(usize) + Send>),
+    Supervisor,
+}
+struct HoldAfterFirstChunk {
+    inner: std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, axum::Error>> + Send>>,
+    hook: Option<Box<dyn FnOnce(usize) + Send>>,
+}
+impl futures_util::Stream for HoldAfterFirstChunk {
+    type Item = Result<Bytes, axum::Error>;
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let next = this.inner.as_mut().poll_next(cx);
+        if let std::task::Poll::Ready(Some(Ok(bytes))) = &next {
+            if !bytes.is_empty() {
+                if let Some(hook) = this.hook.take() {
+                    hook(bytes.len());
+                }
+            }
+        }
+        next
+    }
+}
+
 // Unlike TestConnection::begin, this one holds the real authority mutex after
 // the route has admitted a response but before Hyper receives that response.
 struct PreHeaderTestConnection {
@@ -1042,6 +1073,10 @@ struct PreHeaderTestConnection {
 }
 impl PreHeaderTestConnection {
     fn new(app: axum::Router) -> Self {
+        Self::with_trigger(app, BeforeResponseTrigger::BeforeBody)
+    }
+
+    fn with_trigger(app: axum::Router, trigger: BeforeResponseTrigger) -> Self {
         let (client, server) = tokio::io::duplex(1_024);
         let control = media_connection::ConnectionControl::with_test_budgets(
             Duration::from_secs(30),
@@ -1051,7 +1086,11 @@ impl PreHeaderTestConnection {
         let requests = control.clone();
         let (admitted_tx, admitted_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let response_barrier = Arc::new(std::sync::Mutex::new(Some((admitted_tx, release_rx))));
+        let response_barrier = Arc::new(std::sync::Mutex::new(Some((
+            admitted_tx,
+            release_rx,
+            trigger,
+        ))));
         let task = tokio::spawn(async move {
             let io = hyper_util::rt::TokioIo::new(owner.watch_io(server));
             owner
@@ -1065,15 +1104,32 @@ impl PreHeaderTestConnection {
                             request.extensions_mut().insert(requests.clone());
                             let response_barrier = response_barrier.clone();
                             async move {
-                                let response = app.call(request).await.unwrap();
+                                let mut response = app.call(request).await.unwrap();
                                 let admitted = response
                                     .extensions()
                                     .get::<media_connection::MediaLease>()
                                     .is_some();
                                 let barrier = response_barrier.lock().unwrap().take();
-                                if let Some((admitted_tx, release_rx)) = barrier {
+                                if let Some((admitted_tx, release_rx, trigger)) = barrier {
+                                    if matches!(&trigger, BeforeResponseTrigger::Supervisor) {
+                                        // Arm actual custody, but never hand the response to
+                                        // Hyper before the independent authority check runs.
+                                        response =
+                                            requests.prepare_response(response, version).unwrap();
+                                        let _ = admitted_tx.send(admitted);
+                                        let _ = release_rx.await;
+                                        return Ok::<_, std::convert::Infallible>(response);
+                                    }
                                     let _ = admitted_tx.send(admitted);
                                     let _ = release_rx.await;
+                                    if let BeforeResponseTrigger::BodyLater(hook) = trigger {
+                                        response = response.map(|body| {
+                                            Body::from_stream(HoldAfterFirstChunk {
+                                                inner: Box::pin(body.into_data_stream()),
+                                                hook: Some(hook),
+                                            })
+                                        });
+                                    }
                                 }
                                 let response = requests
                                     .prepare_response(response, version)
@@ -1684,6 +1740,7 @@ impl Drop for HeldMediaMutex {
 
 async fn media_mutex_contention_fails_closed_then_recovers(registry_lock: bool) {
     preheader_media_mutex_contention_fails_closed_then_recovers(registry_lock).await;
+    buffered_and_supervised_refusals_before_response(registry_lock).await;
     {
         let fixture = Fixture::new();
         let output = fixture.output(131_072, 10_000);
@@ -1839,6 +1896,93 @@ async fn media_mutex_contention_fails_closed_then_recovers(registry_lock: bool) 
         .broker
         .acknowledge_reaped(&output.session_id, &output.output_generation)
         .unwrap();
+}
+
+async fn buffered_and_supervised_refusals_before_response(registry_lock: bool) {
+    for (marker, site) in [
+        (61, media_connection::MediaFailureSite::BodyLater),
+        (62, media_connection::MediaFailureSite::Supervisor),
+    ] {
+        let fixture = Arc::new(Fixture::new());
+        let output = fixture.output(131_072, 10_000);
+        // Read the actual small cached playlist, not the large segment: the
+        // pinned Hyper write buffer must fit the first data frame before flush.
+        let held_slot = Arc::new(std::sync::Mutex::new(None::<HeldMediaMutex>));
+        let yielded = Arc::new(AtomicU64::new(0));
+        let trigger = if site == media_connection::MediaFailureSite::BodyLater {
+            let fixture = fixture.clone();
+            let held_slot = held_slot.clone();
+            let yielded = yielded.clone();
+            BeforeResponseTrigger::BodyLater(Box::new(move |length| {
+                assert!(
+                    length > 0 && length < 1_024,
+                    "small complete playlist chunk"
+                );
+                yielded.store(length as u64, Ordering::SeqCst);
+                // Existing bounded rendezvous waits for the actual mutex owner;
+                // it does not synthesize a body error or change the real chunk.
+                let held = HeldMediaMutex::new(&fixture, registry_lock);
+                *held_slot.lock().unwrap() = Some(held);
+            }))
+        } else {
+            BeforeResponseTrigger::Supervisor
+        };
+        let mut connection =
+            PreHeaderTestConnection::with_trigger(fixture.broker.router(), trigger);
+        connection.admit(&output.playlist_path, marker).await;
+        if site == media_connection::MediaFailureSite::Supervisor {
+            assert!(connection.control.is_armed_for_test());
+            *held_slot.lock().unwrap() = Some(HeldMediaMutex::new(&fixture, registry_lock));
+            // Deliberately keep the service barrier Pending. The supervisor,
+            // rather than body polling, must close this armed connection.
+        } else {
+            connection.release_response();
+        }
+        let result = connection.finished().await;
+        if site == media_connection::MediaFailureSite::Supervisor {
+            assert!(matches!(
+                result,
+                Err(media_connection::MediaStop::AuthorityRevoked)
+            ));
+            assert_eq!(yielded.load(Ordering::SeqCst), 0);
+        } else {
+            assert!(matches!(result, Ok(Err(error)) if error.is_user()));
+            assert!(yielded.load(Ordering::SeqCst) > 0);
+        }
+        let held = held_slot
+            .lock()
+            .unwrap()
+            .take()
+            .expect("actual mutex remains held");
+        assert!(held.is_held());
+        assert!(!connection.control.is_armed_for_test());
+        assert!(connection.response_bytes().await.is_empty());
+        let failure = connection.control.failure_recorder().first().unwrap();
+        assert_eq!(failure.site, site);
+        assert_eq!(
+            failure.kind,
+            media_connection::MediaFailureKind::TemporaryBusy
+        );
+        assert_eq!(failure.marker.unwrap().get(), marker);
+        let terminal = connection
+            .control
+            .failure_recorder()
+            .terminal(media_connection::attempt::Transport::Http)
+            .unwrap();
+        assert_eq!(
+            media_connection::attempt::Terminal::parse(&terminal.to_string()),
+            Some(terminal)
+        );
+        held.release();
+        let recovered = get(&fixture.broker, &output.playlist_path).await;
+        assert_eq!(recovered.status(), StatusCode::OK);
+        drop(recovered);
+        fixture.broker.revoke_output(&output.session_id).unwrap();
+        fixture
+            .broker
+            .acknowledge_reaped(&output.session_id, &output.output_generation)
+            .unwrap();
+    }
 }
 
 async fn preheader_media_mutex_contention_fails_closed_then_recovers(registry_lock: bool) {

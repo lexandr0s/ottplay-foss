@@ -703,7 +703,8 @@ struct FixtureReadFailure {
     temporary_busy: bool,
     transport_error: Option<TransportErrorFlags>,
     elapsed_ms: Option<u64>,
-    preheader_refusal: Option<PreheaderRefusal>,
+    seed_refusal: Option<SeedRefusal>,
+    seed_evaluation: Option<SeedEvaluation>,
 }
 impl FixtureReadFailure {
     fn without_body(
@@ -719,7 +720,8 @@ impl FixtureReadFailure {
             temporary_busy: false,
             transport_error: None,
             elapsed_ms: None,
-            preheader_refusal: None,
+            seed_refusal: None,
+            seed_evaluation: None,
         }
     }
     fn transport(
@@ -737,7 +739,8 @@ impl FixtureReadFailure {
             temporary_busy: false,
             transport_error: Some(TransportErrorFlags::capture(error)),
             elapsed_ms: Some(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)),
-            preheader_refusal: None,
+            seed_refusal: None,
+            seed_evaluation: None,
         }
     }
     fn response(stage: FixtureReadStage, status: u16, bytes: &[u8]) -> Self {
@@ -753,7 +756,8 @@ impl FixtureReadFailure {
                 && bytes == br#"{"error":"temporary_busy","version":1}"#,
             transport_error: None,
             elapsed_ms: None,
-            preheader_refusal: None,
+            seed_refusal: None,
+            seed_evaluation: None,
         }
     }
 }
@@ -777,15 +781,20 @@ impl std::fmt::Display for FixtureReadFailure {
             write!(out, " elapsed_ms={elapsed_ms} transport_timeout={} transport_connect={} transport_request={} transport_body={} transport_decode={} transport_builder={}",
                 flags.timeout, flags.connect, flags.request, flags.body, flags.decode, flags.builder)?;
         }
-        if let Some(proof) = self.preheader_refusal {
+        if let Some(evaluation) = self.seed_evaluation {
             write!(
                 out,
-                " preheader_busy_marker={} stderr_bytes={} stderr_sha256=",
-                proof.marker.get(),
-                proof.stderr_bytes
+                " seed_evaluation_marker={} seed_evaluation={}",
+                evaluation.marker.get(),
+                evaluation.outcome.code()
             )?;
-            for byte in proof.stderr_sha256 {
-                write!(out, "{byte:02x}")?;
+            if let Some((length, digest)) = evaluation.snapshot {
+                write!(out, " checked_stderr_bytes={length} checked_stderr_sha256=")?;
+                for byte in digest {
+                    write!(out, "{byte:02x}")?;
+                }
+            } else {
+                write!(out, " checked_stderr_bytes=none checked_stderr_sha256=none")?;
             }
         }
         Ok(())
@@ -1514,10 +1523,85 @@ fn next_seed_attempt(counter: &AtomicU64) -> Option<media_attempt::Marker> {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct PreheaderRefusal {
+struct SeedRefusal {
     marker: media_attempt::Marker,
+    site: media_attempt::Site,
     stderr_bytes: usize,
     stderr_sha256: [u8; 32],
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeedEvaluationOutcome {
+    Accepted,
+    IneligibleTransport,
+    DeadlineElapsed,
+    StartUnavailable,
+    SnapshotUnavailable,
+    SnapshotChanged,
+    MissingRecord,
+    IncompleteRecord,
+    MalformedRecord,
+    DuplicateMarker,
+    WrongKind,
+    WrongTransport,
+}
+impl SeedEvaluationOutcome {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::IneligibleTransport => "ineligible_transport",
+            Self::DeadlineElapsed => "deadline_elapsed",
+            Self::StartUnavailable => "start_unavailable",
+            Self::SnapshotUnavailable => "snapshot_unavailable",
+            Self::SnapshotChanged => "snapshot_changed",
+            Self::MissingRecord => "missing_record",
+            Self::IncompleteRecord => "incomplete_record",
+            Self::MalformedRecord => "malformed_record",
+            Self::DuplicateMarker => "duplicate_marker",
+            Self::WrongKind => "wrong_kind",
+            Self::WrongTransport => "wrong_transport",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug)]
+struct SeedEvaluation {
+    marker: media_attempt::Marker,
+    outcome: SeedEvaluationOutcome,
+    // Fingerprint only the actual bounded snapshot checked once for this attempt.
+    // Missing/unsafe files have no fingerprint; diagnostics never reread them.
+    snapshot: Option<(usize, [u8; 32])>,
+}
+fn seed_site(site: media_attempt::Site) -> (&'static str, usize) {
+    match site {
+        media_attempt::Site::BodyFirst => ("body_first", 0),
+        media_attempt::Site::BodyLater => ("body_later", 1),
+        media_attempt::Site::Supervisor => ("supervisor", 2),
+    }
+}
+#[derive(Default)]
+struct SeedRefusalSummary {
+    counts: [u64; 3],
+    last: Option<SeedRefusal>,
+}
+impl SeedRefusalSummary {
+    fn record(&mut self, proof: SeedRefusal) {
+        let index = seed_site(proof.site).1;
+        self.counts[index] = self.counts[index].saturating_add(1);
+        self.last = Some(proof);
+    }
+}
+impl std::fmt::Display for SeedRefusalSummary {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Some(proof) = self.last else {
+            return Ok(());
+        };
+        write!(out, "private_media_seed_refusal version=1 body_first_count={} body_later_count={} supervisor_count={} last_site={} last_marker={} status=None response_bytes=None checked_stderr_bytes={} checked_stderr_sha256=",
+            self.counts[0], self.counts[1], self.counts[2], seed_site(proof.site).0,
+            proof.marker.get(), proof.stderr_bytes)?;
+        for byte in proof.stderr_sha256 {
+            write!(out, "{byte:02x}")?;
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Copy)]
 struct StderrStart {
@@ -1602,11 +1686,16 @@ impl StderrStart {
         Some(&bytes[self.length..])
     }
 }
-fn matching_preheader_refusal(bytes: &[u8], marker: media_attempt::Marker) -> bool {
-    // Incomplete tails cannot qualify. Malformed event-schema lines are fatal,
-    // including a damaged/extra field that could hide a duplicate marker.
-    if bytes.is_empty() || bytes.last() != Some(&b'\n') {
-        return false;
+fn matching_seed_refusal(
+    bytes: &[u8],
+    marker: media_attempt::Marker,
+) -> Result<media_attempt::Site, SeedEvaluationOutcome> {
+    if bytes.is_empty() {
+        return Err(SeedEvaluationOutcome::MissingRecord);
+    }
+    // A partial line, malformed event or ambiguous marker never qualifies.
+    if bytes.last() != Some(&b'\n') {
+        return Err(SeedEvaluationOutcome::IncompleteRecord);
     }
     let mut matching = None;
     for line in bytes[..bytes.len() - 1].split(|byte| *byte == b'\n') {
@@ -1616,24 +1705,31 @@ fn matching_preheader_refusal(bytes: &[u8], marker: media_attempt::Marker) -> bo
         {
             continue;
         }
-        let Some(event) = std::str::from_utf8(line)
+        let event = std::str::from_utf8(line)
             .ok()
             .and_then(media_attempt::Terminal::parse)
-        else {
-            return false;
-        };
+            .ok_or(SeedEvaluationOutcome::MalformedRecord)?;
         if event.marker == marker {
             if matching.is_some() {
-                return false;
+                return Err(SeedEvaluationOutcome::DuplicateMarker);
             }
             matching = Some(event);
         }
     }
-    matching.is_some_and(|event| {
-        event.site == media_attempt::Site::BodyFirst
-            && event.kind == media_attempt::Kind::TemporaryBusy
-            && event.transport == media_attempt::Transport::Tls
-    })
+    let event = matching.ok_or(SeedEvaluationOutcome::MissingRecord)?;
+    if event.kind != media_attempt::Kind::TemporaryBusy {
+        return Err(SeedEvaluationOutcome::WrongKind);
+    }
+    if event.transport != media_attempt::Transport::Tls {
+        return Err(SeedEvaluationOutcome::WrongTransport);
+    }
+    // These are the exhaustive known refusal sites of this immutable custody.
+    // A yielded body chunk is not an application Response or a socket-write ACK.
+    match event.site {
+        media_attempt::Site::BodyFirst
+        | media_attempt::Site::BodyLater
+        | media_attempt::Site::Supervisor => Ok(event.site),
+    }
 }
 fn is_seed_send_failure(failure: &FixtureReadFailure) -> bool {
     failure.stage == FixtureReadStage::HttpSend
@@ -1658,32 +1754,54 @@ fn classify_seed_refusal_evidence(
     deadline: Instant,
 ) -> FixtureReadFailure {
     let (dev, ino, bytes) = snapshot;
-    if is_seed_send_failure(&failure)
-        && now < deadline
-        && start
+    let fingerprint =
+        (bytes.len() <= 65536).then(|| (bytes.len(), <[u8; 32]>::from(Sha256::digest(bytes))));
+    let matched = if !is_seed_send_failure(&failure) {
+        Err(SeedEvaluationOutcome::IneligibleTransport)
+    } else if now >= deadline {
+        Err(SeedEvaluationOutcome::DeadlineElapsed)
+    } else if fingerprint.is_none() {
+        Err(SeedEvaluationOutcome::SnapshotUnavailable)
+    } else {
+        start
             .appended(dev, ino, bytes)
-            .is_some_and(|tail| matching_preheader_refusal(tail, marker))
-    {
-        failure.temporary_busy = true;
-        failure.preheader_refusal = Some(PreheaderRefusal {
-            marker,
-            stderr_bytes: bytes.len(),
-            stderr_sha256: Sha256::digest(bytes).into(),
-        });
-    }
+            .ok_or(SeedEvaluationOutcome::SnapshotChanged)
+            .and_then(|tail| matching_seed_refusal(tail, marker))
+    };
+    let outcome = match matched {
+        Ok(site) => {
+            let (stderr_bytes, stderr_sha256) = fingerprint.expect("bounded checked snapshot");
+            failure.temporary_busy = true;
+            failure.seed_refusal = Some(SeedRefusal {
+                marker,
+                site,
+                stderr_bytes,
+                stderr_sha256,
+            });
+            SeedEvaluationOutcome::Accepted
+        }
+        Err(outcome) => outcome,
+    };
+    failure.seed_evaluation = Some(SeedEvaluation {
+        marker,
+        outcome,
+        snapshot: fingerprint,
+    });
     failure
 }
 fn classify_seed_refusal(
-    failure: FixtureReadFailure,
+    mut failure: FixtureReadFailure,
     marker: media_attempt::Marker,
     start: Option<StderrStart>,
     deadline: Instant,
 ) -> FixtureReadFailure {
-    if !is_seed_send_failure(&failure) || Instant::now() >= deadline {
+    if !is_seed_send_failure(&failure) {
         return failure;
     }
-    if let Some(start) = start {
-        // One immediate bounded snapshot, never waiting for a delayed logger.
+    let outcome = if Instant::now() >= deadline {
+        SeedEvaluationOutcome::DeadlineElapsed
+    } else if let Some(start) = start {
+        // Exactly one immediate bounded read. Never wait for a terminal logger.
         if let Some((dev, ino, bytes)) = owned_stderr_snapshot() {
             return classify_seed_refusal_evidence(
                 failure,
@@ -1694,7 +1812,15 @@ fn classify_seed_refusal(
                 deadline,
             );
         }
-    }
+        SeedEvaluationOutcome::SnapshotUnavailable
+    } else {
+        SeedEvaluationOutcome::StartUnavailable
+    };
+    failure.seed_evaluation = Some(SeedEvaluation {
+        marker,
+        outcome,
+        snapshot: None,
+    });
     failure
 }
 
@@ -1725,30 +1851,40 @@ fn playlist_snapshot_seed_until(
     deadline: Instant,
 ) -> Result<(u64, Vec<String>), FixtureReadFailure> {
     let mut last_busy = None;
-    loop {
+    let mut summary = SeedRefusalSummary::default();
+    let result = loop {
         let now = Instant::now();
         let Some(_) = seed_request_timeout(now, deadline) else {
-            return Err(seed_deadline_failure(last_busy));
+            break Err(seed_deadline_failure(last_busy));
         };
         let marker =
             next_seed_attempt(&NEXT_SEED_ATTEMPT).expect("private media attempt counter exhausted");
         let stderr_start = StderrStart::capture();
         // Snapshot work consumes this SAME deadline; do not restore its time.
         let Some(timeout) = seed_request_timeout(Instant::now(), deadline) else {
-            return Err(seed_deadline_failure(last_busy));
+            break Err(seed_deadline_failure(last_busy));
         };
         match playlist_snapshot_attempt_with_timeout(base, playlist_path, timeout, Some(marker)) {
-            Ok(snapshot) => return Ok(snapshot),
+            Ok(snapshot) => break Ok(snapshot),
             Err(failure) => {
                 let failure = classify_seed_refusal(failure, marker, stderr_start, deadline);
+                if let Some(proof) = failure.seed_refusal {
+                    summary.record(proof);
+                }
                 let Some(delay) = seed_busy_retry_delay(&failure, Instant::now(), deadline) else {
-                    return Err(failure);
+                    break Err(failure);
                 };
                 last_busy = Some(failure);
                 thread::sleep(delay);
             }
         }
+    };
+    // One closed summary per seed call, only after its requests have completed.
+    // Preserve the original status=None: this is not a fabricated HTTP 503.
+    if summary.last.is_some() {
+        eprintln!("{summary} completed={}", result.is_ok());
     }
+    result
 }
 fn parse_playlist_snapshot_response(
     playlist_url: &reqwest::Url,
@@ -1806,7 +1942,7 @@ fn playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts() {
         transport: media_attempt::Transport::Tls,
     };
     let line = format!("{event}\n");
-    assert!(matching_preheader_refusal(line.as_bytes(), marker));
+    assert!(matching_seed_refusal(line.as_bytes(), marker).is_ok());
     for bytes in [
         Vec::new(),
         line.trim_end().as_bytes().to_vec(),
@@ -1819,43 +1955,32 @@ fn playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts() {
             .into_bytes(),
         line.replace(" terminal=closed", " terminal=open")
             .into_bytes(),
-        line.replace("site=body_first", "site=body_later")
-            .into_bytes(),
-        line.replace("site=body_first", "site=supervisor")
-            .into_bytes(),
+        line.replace("site=body_first", "site=unknown").into_bytes(),
         line.replace("reason=temporary_busy", "reason=unavailable")
             .into_bytes(),
         line.replace("reason=temporary_busy", "reason=denied")
             .into_bytes(),
         line.replace("transport=tls", "transport=http").into_bytes(),
     ] {
-        assert!(!matching_preheader_refusal(&bytes, marker));
+        assert!(matching_seed_refusal(&bytes, marker).is_err());
     }
     let old = b"previous complete event\n";
     let start = StderrStart::from_snapshot(7, 8, old).unwrap();
     assert!(StderrStart::from_snapshot(7, 8, b"incomplete old tail").is_none());
     assert!(StderrStart::from_snapshot(7, 8, &vec![0; 65537]).is_none());
     let stale = StderrStart::from_snapshot(7, 8, line.as_bytes()).unwrap();
-    assert!(!matching_preheader_refusal(
-        stale.appended(7, 8, line.as_bytes()).unwrap(),
-        marker
-    ));
-    assert!(!matching_preheader_refusal(
+    assert!(matching_seed_refusal(stale.appended(7, 8, line.as_bytes()).unwrap(), marker).is_err());
+    assert!(matching_seed_refusal(
         format!("{line}private_media_attempt broken\n").as_bytes(),
         marker
-    ));
-    assert!(!matching_preheader_refusal(
-        format!("{line} {line}").as_bytes(),
-        marker
-    ));
+    )
+    .is_err());
+    assert!(matching_seed_refusal(format!("{line} {line}").as_bytes(), marker).is_err());
     let unrelated = media_attempt::Terminal {
         marker: media_attempt::Marker::new(42).unwrap(),
         ..event
     };
-    assert!(matching_preheader_refusal(
-        format!("{unrelated}\n{line}").as_bytes(),
-        marker
-    ));
+    assert!(matching_seed_refusal(format!("{unrelated}\n{line}").as_bytes(), marker).is_ok());
     let bytes = [old.as_slice(), line.as_bytes()].concat();
     let now = Instant::now();
     let deadline = now + Duration::from_millis(100);
@@ -1874,11 +1999,12 @@ fn playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts() {
             decode: false,
         }),
         elapsed_ms: Some(2),
-        preheader_refusal: None,
+        seed_refusal: None,
+        seed_evaluation: None,
     };
     let recognized =
         classify_seed_refusal_evidence(send, marker, start, (7, 8, &bytes), now, deadline);
-    assert!(recognized.temporary_busy && recognized.preheader_refusal.is_some());
+    assert!(recognized.temporary_busy && recognized.seed_refusal.is_some());
     assert_eq!(recognized.status, None);
     assert_eq!(recognized.response_bytes, None);
     assert_eq!(recognized.response_sha256, None);
@@ -1889,7 +2015,7 @@ fn playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts() {
         Some(Duration::from_millis(100))
     );
     let retained = seed_deadline_failure(Some(recognized));
-    assert!(retained.preheader_refusal.is_some() && retained.status.is_none());
+    assert!(retained.seed_refusal.is_some() && retained.status.is_none());
     for (dev, ino, snapshot, at) in [
         (7, 9, bytes.as_slice(), now),
         (9, 8, bytes.as_slice(), now),
@@ -1946,6 +2072,124 @@ fn playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts() {
     let mut got_bytes = send;
     got_bytes.response_bytes = Some(0);
     assert!(!is_seed_send_failure(&got_bytes));
+    // All known sites describe the same refusal, but only before the client
+    // obtains a Response. Server body offset is not an application/wire boundary.
+    let mut summary = SeedRefusalSummary::default();
+    for site in [
+        media_attempt::Site::BodyFirst,
+        media_attempt::Site::BodyLater,
+        media_attempt::Site::Supervisor,
+    ] {
+        let line = format!("{}\n", media_attempt::Terminal { site, ..event });
+        let snapshot = [old.as_slice(), line.as_bytes()].concat();
+        let accepted =
+            classify_seed_refusal_evidence(send, marker, start, (7, 8, &snapshot), now, deadline);
+        assert!(accepted.temporary_busy);
+        assert_eq!(accepted.seed_refusal.unwrap().site, site);
+        assert_eq!(
+            accepted.seed_evaluation.unwrap().outcome,
+            SeedEvaluationOutcome::Accepted
+        );
+        assert_eq!(accepted.status, None);
+        assert_eq!(accepted.response_bytes, None);
+        assert_eq!(accepted.response_sha256, None);
+        assert!(accepted.transport_error.unwrap().request);
+        summary.record(accepted.seed_refusal.unwrap());
+        for field in 0..12 {
+            let mut fatal = send;
+            match field {
+                0 => fatal.stage = FixtureReadStage::HttpBody,
+                1 => {
+                    fatal.stage = FixtureReadStage::HttpBody;
+                    fatal.status = Some(200);
+                    fatal.response_bytes = Some(0);
+                }
+                2 => fatal.status = Some(200),
+                3 => fatal.response_bytes = Some(0),
+                4 => fatal.response_bytes = Some(1),
+                5 => fatal.response_sha256 = Some([0; 32]),
+                6 => fatal.transport_error.as_mut().unwrap().timeout = true,
+                7 => fatal.transport_error.as_mut().unwrap().connect = true,
+                8 => fatal.transport_error.as_mut().unwrap().builder = true,
+                9 => fatal.transport_error.as_mut().unwrap().body = true,
+                10 => fatal.transport_error.as_mut().unwrap().decode = true,
+                _ => fatal.transport_error.as_mut().unwrap().request = false,
+            }
+            let rejected = classify_seed_refusal_evidence(
+                fatal,
+                marker,
+                start,
+                (7, 8, &snapshot),
+                now,
+                deadline,
+            );
+            assert!(!rejected.temporary_busy);
+            assert!(rejected.seed_refusal.is_none());
+            assert_eq!(
+                rejected.seed_evaluation.unwrap().outcome,
+                SeedEvaluationOutcome::IneligibleTransport
+            );
+            assert!(seed_busy_retry_delay(&rejected, now, deadline).is_none());
+        }
+        let expired = classify_seed_refusal_evidence(
+            send,
+            marker,
+            start,
+            (7, 8, &snapshot),
+            deadline,
+            deadline,
+        );
+        assert!(!expired.temporary_busy);
+        assert_eq!(
+            expired.seed_evaluation.unwrap().outcome,
+            SeedEvaluationOutcome::DeadlineElapsed
+        );
+    }
+    assert_eq!(summary.counts, [1, 1, 1]);
+    let printed = summary.to_string();
+    assert!(printed.contains("body_first_count=1 body_later_count=1 supervisor_count=1"));
+    assert!(printed.contains("last_site=supervisor last_marker=41 status=None response_bytes=None"));
+    let checked_hash: [u8; 32] = Sha256::digest(&bytes).into();
+    for (tail, outcome) in [
+        (Vec::new(), SeedEvaluationOutcome::MissingRecord),
+        (
+            line.trim_end().as_bytes().to_vec(),
+            SeedEvaluationOutcome::IncompleteRecord,
+        ),
+        (
+            format!("{line}{line}").into_bytes(),
+            SeedEvaluationOutcome::DuplicateMarker,
+        ),
+        (
+            line.replace("reason=temporary_busy", "secret-canary")
+                .into_bytes(),
+            SeedEvaluationOutcome::MalformedRecord,
+        ),
+        (
+            line.replace("reason=temporary_busy", "reason=denied")
+                .into_bytes(),
+            SeedEvaluationOutcome::WrongKind,
+        ),
+        (
+            line.replace("transport=tls", "transport=http").into_bytes(),
+            SeedEvaluationOutcome::WrongTransport,
+        ),
+    ] {
+        let snapshot = [old.as_slice(), &tail].concat();
+        let rejected =
+            classify_seed_refusal_evidence(send, marker, start, (7, 8, &snapshot), now, deadline);
+        assert_eq!(rejected.seed_evaluation.unwrap().outcome, outcome);
+        assert_eq!(
+            rejected.seed_evaluation.unwrap().snapshot,
+            Some((snapshot.len(), Sha256::digest(&snapshot).into()))
+        );
+        assert!(!rejected.temporary_busy);
+        assert!(!rejected.to_string().contains("secret-canary"));
+    }
+    assert_eq!(
+        recognized.seed_evaluation.unwrap().snapshot,
+        Some((bytes.len(), checked_hash))
+    );
     let counter = AtomicU64::new(1);
     assert_eq!(next_seed_attempt(&counter).unwrap().get(), 1);
     assert_eq!(next_seed_attempt(&counter).unwrap().get(), 2);
