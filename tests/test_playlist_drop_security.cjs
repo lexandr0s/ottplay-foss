@@ -364,7 +364,7 @@ test("UTF-8 BOM is usable but invalid encoded bytes and unpaired parser surrogat
     assert.equal(f.created.length, 0);
 });
 
-test("2MiB per file, 8MiB batch and 128-input admission limits run before reads", async () => {
+test("8 MiB per file, 16 MiB batch and 128-input admission limits run before reads", async () => {
     const f = host();
     let reads = 0;
     const sized = (size, name) => {
@@ -380,14 +380,14 @@ test("2MiB per file, 8MiB batch and 128-input admission limits run before reads"
     };
     await assert.rejects(
         playlists.createDroppedPlaylists(f.w, [
-            sized(2 * MiB + 1, "large.m3u"),
+            sized(8 * MiB + 1, "large.m3u"),
         ]),
         closedError
     );
     await assert.rejects(
         playlists.createDroppedPlaylists(
             f.w,
-            Array.from({ length: 5 }, (_, i) => sized(2 * MiB, i + ".m3u"))
+            Array.from({ length: 3 }, (_, i) => sized(8 * MiB, i + ".m3u"))
         ),
         closedError
     );
@@ -402,7 +402,28 @@ test("2MiB per file, 8MiB batch and 128-input admission limits run before reads"
     assert.equal(f.created.length, 0);
 });
 
-test("128 inputs and 4096 entries are accepted, but aggregate expanded entry 4097 is rejected atomically", async () => {
+test("a 15,000-item remote playlist with long links builds an ordered catalog without file grants", async () => {
+    const f = host();
+    const count = 15000;
+    const url = remote + "?token=" + "a".repeat(153) + "&i=";
+    const text =
+        "#EXTM3U\n" +
+        Array.from(
+            { length: count },
+            (_, i) => "#EXTINF:-1,Movie " + i + "\n" + url + i
+        ).join("\n");
+    assert.ok(Buffer.byteLength(text) > 2 * MiB);
+    const lease = await playlists.createDroppedPlaylists(f.w, [document(text)]);
+    assert.equal(lease.catalog.items.length, count);
+    assert.equal(new Set(lease.itemIds).size, count);
+    assert.equal(lease.catalog.items[0].url, url + 0);
+    assert.equal(lease.catalog.items[count - 1].url, url + (count - 1));
+    assert.equal(lease.catalog.items[count - 1].name, "Movie 14999");
+    assert.equal(f.created.length, 0);
+    lease.release();
+});
+
+test("128 inputs and 20,000 entries are accepted, but aggregate expanded entry 20,001 is rejected atomically", async () => {
     const f = host();
     const inputs = Array.from({ length: 128 }, (_, i) =>
         document("#EXTM3U\n" + remote + "?i=" + i, i + ".m3u")
@@ -414,18 +435,18 @@ test("128 inputs and 4096 entries are accepted, but aggregate expanded entry 409
         "#EXTM3U\n" +
         Array.from({ length: count }, (_, i) => remote + "?i=" + i).join("\n");
     const exact = await playlists.createDroppedPlaylists(f.w, [
-        document(body(4096)),
+        document(body(20000)),
     ]);
-    assert.equal(exact.catalog.items.length, 4096);
+    assert.equal(exact.catalog.items.length, 20000);
     exact.release();
     await assert.rejects(
-        playlists.createDroppedPlaylists(f.w, [document(body(4097))]),
+        playlists.createDroppedPlaylists(f.w, [document(body(20001))]),
         closedError
     );
     await assert.rejects(
         playlists.createDroppedPlaylists(f.w, [
-            document(body(2048), "a.m3u"),
-            document(body(2049), "b.m3u"),
+            document(body(10000), "a.m3u"),
+            document(body(10001), "b.m3u"),
         ]),
         closedError
     );
@@ -517,24 +538,24 @@ test("mixed remote/local playlists retain the single source identity required by
     assert.deepEqual(f.revoked, [f.created[0].url]);
 });
 
-test("exact 2MiB documents and exact 8MiB total remain usable without copying media", async () => {
+test("exact 8 MiB documents and exact 16 MiB total remain usable without copying media", async () => {
     const f = host();
     const prefix = "#EXTM3U\n#",
         suffix = "\n" + remote + "\n";
     const body =
         prefix +
-        "x".repeat(2 * MiB - Buffer.byteLength(prefix + suffix)) +
+        "x".repeat(8 * MiB - Buffer.byteLength(prefix + suffix)) +
         suffix;
-    assert.equal(Buffer.byteLength(body), 2 * MiB);
-    const files = Array.from({ length: 4 }, (_, i) =>
+    assert.equal(Buffer.byteLength(body), 8 * MiB);
+    const files = Array.from({ length: 2 }, (_, i) =>
         document(body, "limit-" + i + ".m3u")
     );
     assert.equal(
         files.reduce((sum, file) => sum + file.size, 0),
-        8 * MiB
+        16 * MiB
     );
     const lease = await playlists.createDroppedPlaylists(f.w, files);
-    assert.equal(lease.catalog.items.length, 4);
+    assert.equal(lease.catalog.items.length, 2);
     assert.equal(f.created.length, 0);
     assert.deepEqual(f.forbidden, []);
     lease.release();

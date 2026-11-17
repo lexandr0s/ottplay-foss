@@ -15,6 +15,7 @@ let {
     INTERFACE_NOTIFICATION_SETTINGS_ALLOWANCE,
     DESKTOP_DROP_ALLOWANCE,
     DESKTOP_DROP_PREFERENCES_ALLOWANCE,
+    DESKTOP_DROP_RECOVERY_ALLOWANCE,
     DESKTOP_VIDEO_QUEUE_ALLOWANCE,
     DESKTOP_PLAYLIST_DROP_ALLOWANCE,
     DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE,
@@ -115,7 +116,11 @@ const latestCaps = Object.freeze({
 const latestOptionalBundles = CLASSIC_OPTIONAL_BUNDLES;
 function projectCapsWithoutAllowances(names, preserveDropPreferences = false) {
     if (!preserveDropPreferences)
-        names = ["DESKTOP_DROP_PREFERENCES_ALLOWANCE", ...names];
+        names = [
+            "DESKTOP_DROP_PREFERENCES_ALLOWANCE",
+            "DESKTOP_DROP_RECOVERY_ALLOWANCE",
+            ...names,
+        ];
     assert.equal(new Set(names).size, names.length);
     const filename = require.resolve("../scripts/classic-size.cjs");
     let source = fs.readFileSync(filename, "utf8");
@@ -193,7 +198,10 @@ function capsWithoutAllowances(names) {
     ]);
 }
 {
-    const before = projectCapsWithoutAllowances([]);
+    const before = projectCapsWithoutAllowances(
+        ["DESKTOP_DROP_PREFERENCES_ALLOWANCE"],
+        true
+    );
     const { entry, appearance } = DESKTOP_DROP_PREFERENCES_ALLOWANCE;
     const evidence = require("../docs/evidence/desktop-drop-preferences-size.json");
     for (const metric of ["bytes", "gzipBytes"]) {
@@ -234,6 +242,32 @@ function capsWithoutAllowances(names) {
                 latestCaps.OPTIONAL_BUDGETS[name],
                 before.OPTIONAL_BUDGETS[name]
             );
+}
+{
+    const before = projectCapsWithoutAllowances(
+        ["DESKTOP_DROP_RECOVERY_ALLOWANCE"],
+        true
+    );
+    const evidence = require("../docs/evidence/desktop-drop-recovery-size.json");
+    for (const metric of ["bytes", "gzipBytes"]) {
+        const actual = Math.max(
+            ...evidence.measurements.flatMap(({ measurements }) =>
+                measurements.map(
+                    ({ baseline, candidate }) =>
+                        candidate[metric] - baseline[metric]
+                )
+            )
+        );
+        assert.equal(DESKTOP_DROP_RECOVERY_ALLOWANCE[metric], actual);
+        for (const key of [
+            "BUDGET",
+            "LEGACY_TOTAL_BUDGET",
+            "BASE_TOTAL_BUDGET",
+            "TOTAL_BUDGET",
+        ])
+            assert.equal(latestCaps[key][metric] - before[key][metric], actual);
+    }
+    assert.deepEqual(latestCaps.OPTIONAL_BUDGETS, before.OPTIONAL_BUDGETS);
 }
 {
     const before = projectCapsWithoutAllowances([

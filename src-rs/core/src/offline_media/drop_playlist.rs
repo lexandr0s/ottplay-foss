@@ -2,17 +2,17 @@
 //! this module never fetches, proxies, recursively opens or persists them.
 use super::*;
 
-pub(super) const MAX_PLAYLIST_BYTES: usize = 2 * 1024 * 1024;
-const MAX_TOTAL_TEXT: usize = 8 * 1024 * 1024;
+pub(super) const MAX_PLAYLIST_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TOTAL_TEXT: usize = 16 * 1024 * 1024;
 const MAX_LINE: usize = 8192;
 const MAX_TITLE: usize = 1024;
-pub(super) const TOO_LARGE: &str = "Dropped playlist exceeds the 2 MiB file or 8 MiB batch limit";
+pub(super) const TOO_LARGE: &str = "Dropped playlist exceeds the 8 MiB file or 16 MiB batch limit";
 pub(super) const EMPTY: &str = "Dropped playlist contains no playable entries";
 const INVALID: &str = "Dropped playlist contains an invalid entry";
 const HLS: &str =
     "Local HLS manifests are not supported; add the HTTP(S) manifest URL as a playlist entry";
 const NESTED: &str = "Nested local playlists are not supported";
-const ITEMS: &str = "Dropped playlists exceed 4096 entries or 128 local files";
+const ITEMS: &str = "Dropped playlists exceed 20000 entries or 128 local files";
 
 pub(super) enum Member {
     Local(usize),
@@ -594,7 +594,11 @@ mod tests {
             MAX_DROPPED_VIDEOS
         );
         assert_eq!(
-            parsed(&"movie.mp4\n".repeat(MAX_DROPPED_VIDEOS + 1)).err(),
+            parsed(&format!(
+                "{remote}{}",
+                "movie.mp4\n".repeat(MAX_DROPPED_VIDEOS + 1)
+            ))
+            .err(),
             Some(ITEMS)
         );
         assert!(parsed(&format!("https://example.invalid/{}", "x".repeat(MAX_LINE))).is_err());
@@ -603,6 +607,31 @@ mod tests {
             "x".repeat(MAX_TITLE + 1)
         ))
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn playlist_with_15_000_long_remote_links_builds_ordered_catalog_without_local_grants() {
+        use std::fmt::Write;
+
+        let f = Fixture::new().await;
+        let count = 15_000;
+        let url = format!(
+            "https://example.invalid/movie.mp4?token={}&i=",
+            "a".repeat(153)
+        );
+        let mut text = "#EXTM3U\n".to_owned();
+        for index in 0..count {
+            writeln!(text, "#EXTINF:-1,Movie {index}\n{url}{index}").unwrap();
+        }
+        assert!(text.len() > 2 * 1024 * 1024);
+        let manifest = f.manifest(text).await;
+        let batch = f.library.transient_videos(vec![manifest]).await.unwrap();
+        let catalog = batch.catalog(&f.endpoint()).unwrap();
+        assert_eq!(catalog.items.len(), count);
+        assert_eq!(catalog.items[0].url, format!("{url}0"));
+        assert_eq!(catalog.items[count - 1].url, format!("{url}{}", count - 1));
+        assert_eq!(catalog.items[count - 1].name, "Movie 14999");
+        assert!(f.library.transient.lock().unwrap().entries.is_empty());
     }
 
     #[tokio::test]
@@ -725,11 +754,26 @@ mod tests {
             f.library.transient_videos(vec![oversized]).await.err(),
             Some(TOO_LARGE)
         );
-        let mut text = "# harmless\n".repeat(MAX_PLAYLIST_BYTES / 12);
-        text.push_str("https://example.invalid/live\n");
+        let entry = "https://example.invalid/live\n";
+        let line = format!("#{}\n", "x".repeat(4094));
+        let comment_bytes = MAX_PLAYLIST_BYTES - entry.len();
+        let mut text = line.repeat((comment_bytes - 2) / line.len());
+        let padding = comment_bytes - text.len();
+        text.push('#');
+        text.push_str(&"x".repeat(padding - 2));
+        text.push('\n');
+        text.push_str(entry);
+        assert_eq!(text.len(), MAX_PLAYLIST_BYTES);
         let large = f.manifest(text).await;
+        let exact = f
+            .library
+            .transient_videos(vec![large.clone(), large.clone()])
+            .await
+            .unwrap();
+        assert_eq!(exact.catalog(&f.endpoint()).unwrap().items.len(), 2);
+        drop(exact);
         assert_eq!(
-            f.library.transient_videos(vec![large; 5]).await.err(),
+            f.library.transient_videos(vec![large; 3]).await.err(),
             Some(TOO_LARGE)
         );
         assert!(f.library.transient.lock().unwrap().groups.is_empty());

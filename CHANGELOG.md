@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Configure Shuffle and Repeat for dropped media. Play dropped HTTP(S) lists
+  of up to 20,000 entries and resume an interrupted direct HTTP(S) file from
+  its playback position after the media server comes back online.
+
 - Browse Modern media catalogues in separate category rows with keyboard,
   mouse-wheel and touch navigation. Preserve the selected occurrence and
   existing playback actions while rendering only a bounded window of cards.

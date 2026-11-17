@@ -254,11 +254,11 @@ export function installLocalMedia(w: any): any {
         return owner == null ? undefined : owner[key];
     }
     function playbackItem(url: string): any {
-        return compatibility
-            ? compatibility.d(url)
-            : last?.items.filter(function (item: any) {
-                  return item.url === url;
-              })[0];
+        if (compatibility) return compatibility.d(url);
+        var items = last?.items;
+        if (items)
+            for (var i = 0; i < items.length; i++)
+                if (items[i].url === url) return items[i];
     }
     function compatibilityPlayback(url: string): boolean {
         return (
@@ -1595,6 +1595,30 @@ export function installLocalMedia(w: any): any {
         hasDroppedVideo: function (): boolean {
             return ownsDrop(droppedPlayback);
         },
+        captureDroppedHttpFile: function (
+            url: string
+        ): (() => boolean) | undefined {
+            var drop = currentDrop();
+            var driver = w.__ottActiveProviderDriver;
+            if (
+                !drop ||
+                localField(driver, "id") !== "offline" ||
+                last !== drop.catalog ||
+                !/^https?:\/\//i.test(url)
+            )
+                return;
+            var item = playbackItem(url);
+            if (
+                (localField(item, "type") !== "stream" &&
+                    (localField(item, "source") !== "linked" ||
+                        localField(item, "size") !== 0)) ||
+                api.playbackTransport(url) !== "file"
+            )
+                return;
+            return function () {
+                return driver === w.__ottActiveProviderDriver && ownsDrop(drop);
+            };
+        },
         importFiles: importFiles,
         isDroppedCatalog: function (value: any): boolean {
             var drop = currentDrop();
@@ -1744,7 +1768,7 @@ export function installLocalMedia(w: any): any {
                     catalog.available === false ||
                     !Array.isArray(catalog.items) ||
                     !catalog.items.length ||
-                    catalog.items.length > 4096 ||
+                    catalog.items.length > 20000 ||
                     !Array.isArray(catalog.sources) ||
                     catalog.sources.length !== 1 ||
                     typeof release !== "function" ||

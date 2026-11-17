@@ -582,9 +582,11 @@ test("ordinary remote activation retains its existing promotable session contrac
     assert.deepEqual(f.releases, []);
 });
 
-test("expanded playlist queues keep more than 128 entries without changing the saved provider", async () => {
+test("dropped queues admit 15000 ordered HTTP media entries without changing the saved provider", async () => {
     const f = fixture();
-    const value = queue(Array.from({ length: 4096 }, (_, i) => "station-" + i));
+    const value = queue(
+        Array.from({ length: 15000 }, (_, i) => "station-" + i)
+    );
     value.items.forEach((item, i) => {
         item.url = "https://media.example.test/" + i + ".m3u8";
         item.mime = "application/vnd.apple.mpegurl";
@@ -595,8 +597,8 @@ test("expanded playlist queues keep more than 128 entries without changing the s
         () => f.releases.push("playlist")
     );
     const delivered = await f.api.playbackList();
-    assert.equal(delivered.items.length, 4096);
-    assert.equal(delivered.items[4095].url, value.items[4095].url);
+    assert.equal(delivered.items.length, 15000);
+    assert.equal(delivered.items[14999].url, value.items[14999].url);
     assert.deepEqual(f.saved, f.before);
     f.api.cancelDroppedVideo();
     assert.deepEqual(f.releases, ["playlist"]);
@@ -667,6 +669,53 @@ test("real mixed playlist builder hands one temporary source to the real Local p
     assert.deepEqual(f.saved, f.before);
     f.api.cancelDroppedVideo();
     assert.deepEqual(revoked, ["blob:mixed-local"]);
+});
+
+test("long recovery is scoped to remote direct files in the currently owned drop", async () => {
+    const f = fixture();
+    const value = queue([
+        "browser-remote",
+        "native-remote",
+        "native-local",
+        "live",
+    ]);
+    const [browser, native, local, hls] = value.items;
+    Object.assign(browser, {
+        type: "stream",
+        url: "https://example.test/browser.mp4",
+    });
+    Object.assign(native, {
+        source: "linked",
+        size: 0,
+        url: "https://example.test/native.mp4",
+    });
+    Object.assign(local, {
+        source: "linked",
+        size: 512,
+        url:
+            "http://127.0.0.1:8899/offline-media/" +
+            "a".repeat(32) +
+            "/" +
+            local.id,
+    });
+    Object.assign(hls, {
+        type: "stream",
+        mime: "application/vnd.apple.mpegurl",
+        url: "https://example.test/live.m3u8",
+    });
+    f.api.playDroppedVideo(
+        value,
+        () => true,
+        () => {}
+    );
+    await f.api.playbackList();
+    const browserOwner = f.api.captureDroppedHttpFile(browser.url);
+    assert.ok(browserOwner());
+    assert.ok(f.api.captureDroppedHttpFile(native.url)());
+    assert.equal(f.api.captureDroppedHttpFile(local.url), undefined);
+    assert.equal(f.api.captureDroppedHttpFile(hls.url), undefined);
+    f.api.cancelDroppedVideo();
+    assert.equal(browserOwner(), false);
 });
 
 test("owned Local catalog membership distinguishes adaptive transport from direct files", async () => {

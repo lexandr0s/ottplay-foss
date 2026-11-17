@@ -843,6 +843,11 @@ const DESKTOP_DROP_PREFERENCES_ALLOWANCE = Object.freeze({
     entry: Object.freeze({ bytes: 1327, gzipBytes: 381 }),
     appearance: Object.freeze({ bytes: 330, gzipBytes: 127 }),
 });
+// Shared entry cost only. See docs/evidence/desktop-drop-recovery-size.json.
+const DESKTOP_DROP_RECOVERY_ALLOWANCE = Object.freeze({
+    bytes: 1465,
+    gzipBytes: 470,
+});
 // Bounded recovery after relay failure adds 425 raw and at most 259 gzip bytes.
 // Existing raw caps cover the change. Count the measured gzip cost once per
 // entry and aggregate; preserve identity headroom and unrelated asset caps.
@@ -953,6 +958,7 @@ const BUDGET = Object.freeze({
         DESKTOP_DROP_ALLOWANCE.entry.bytes +
         DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.bytes +
         DESKTOP_DROP_PREFERENCES_ALLOWANCE.entry.bytes +
+        DESKTOP_DROP_RECOVERY_ALLOWANCE.bytes +
         NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE.bytes +
         FAVORITES_CATEGORY_PERSISTENCE_ALLOWANCE.entry.bytes +
         LOCAL_FAVORITE_WRITE_RECOVERY_ALLOWANCE.entry.bytes +
@@ -997,6 +1003,7 @@ const BUDGET = Object.freeze({
         DESKTOP_DROP_ALLOWANCE.entry.gzipBytes +
         DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.gzipBytes +
         DESKTOP_DROP_PREFERENCES_ALLOWANCE.entry.gzipBytes +
+        DESKTOP_DROP_RECOVERY_ALLOWANCE.gzipBytes +
         VIDEO_FIT_LIFECYCLE_ENTRY_ALLOWANCE.gzipBytes +
         AUTO_RELAY_STALL_RECOVERY_ENTRY_ALLOWANCE.gzipBytes +
         NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE.gzipBytes +
@@ -1223,6 +1230,7 @@ const LEGACY_TOTAL_BUDGET = Object.freeze({
         DESKTOP_DROP_ALLOWANCE.entry.bytes +
         DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.bytes +
         DESKTOP_DROP_PREFERENCES_ALLOWANCE.entry.bytes +
+        DESKTOP_DROP_RECOVERY_ALLOWANCE.bytes +
         NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE.bytes +
         FAVORITES_CATEGORY_PERSISTENCE_ALLOWANCE.entry.bytes +
         LOCAL_FAVORITE_WRITE_RECOVERY_ALLOWANCE.entry.bytes +
@@ -1282,6 +1290,7 @@ const LEGACY_TOTAL_BUDGET = Object.freeze({
         DESKTOP_DROP_ALLOWANCE.entry.gzipBytes +
         DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.gzipBytes +
         DESKTOP_DROP_PREFERENCES_ALLOWANCE.entry.gzipBytes +
+        DESKTOP_DROP_RECOVERY_ALLOWANCE.gzipBytes +
         VIDEO_FIT_LIFECYCLE_ENTRY_ALLOWANCE.gzipBytes +
         AUTO_RELAY_STALL_RECOVERY_ENTRY_ALLOWANCE.gzipBytes +
         NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE.gzipBytes +
@@ -1534,6 +1543,7 @@ const BASE_TOTAL_BUDGET = Object.freeze({
         DESKTOP_DROP_ALLOWANCE.entry.bytes +
         DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.bytes +
         DESKTOP_DROP_PREFERENCES_ALLOWANCE.entry.bytes +
+        DESKTOP_DROP_RECOVERY_ALLOWANCE.bytes +
         DESKTOP_DROP_ALLOWANCE.optional.bytes +
         NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE.bytes +
         FAVORITES_CATEGORY_PERSISTENCE_ALLOWANCE.entry.bytes +
@@ -1641,6 +1651,7 @@ const BASE_TOTAL_BUDGET = Object.freeze({
         DESKTOP_DROP_ALLOWANCE.entry.gzipBytes +
         DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.gzipBytes +
         DESKTOP_DROP_PREFERENCES_ALLOWANCE.entry.gzipBytes +
+        DESKTOP_DROP_RECOVERY_ALLOWANCE.gzipBytes +
         DESKTOP_DROP_ALLOWANCE.optional.gzipBytes +
         VIDEO_FIT_LIFECYCLE_ENTRY_ALLOWANCE.gzipBytes +
         AUTO_RELAY_STALL_RECOVERY_ENTRY_ALLOWANCE.gzipBytes +
@@ -2426,6 +2437,7 @@ module.exports = {
     collectBundleMeasurement,
     DESKTOP_DROP_ALLOWANCE,
     DESKTOP_DROP_PREFERENCES_ALLOWANCE,
+    DESKTOP_DROP_RECOVERY_ALLOWANCE,
     DESKTOP_FAVORITES_KEY_ALLOWANCE,
     DESKTOP_VIDEO_QUEUE_ALLOWANCE,
     DESKTOP_PLAYLIST_DROP_ALLOWANCE,
