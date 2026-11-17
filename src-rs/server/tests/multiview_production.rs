@@ -671,12 +671,35 @@ impl FixtureReadStage {
     }
 }
 #[derive(Clone, Copy, Debug)]
+struct TransportErrorFlags {
+    timeout: bool,
+    connect: bool,
+    request: bool,
+    body: bool,
+    decode: bool,
+    builder: bool,
+}
+impl TransportErrorFlags {
+    fn capture(error: &reqwest::Error) -> Self {
+        Self {
+            timeout: error.is_timeout(),
+            connect: error.is_connect(),
+            request: error.is_request(),
+            body: error.is_body(),
+            decode: error.is_decode(),
+            builder: error.is_builder(),
+        }
+    }
+}
+#[derive(Clone, Copy, Debug)]
 struct FixtureReadFailure {
     stage: FixtureReadStage,
     status: Option<u16>,
     response_bytes: Option<usize>,
     response_sha256: Option<[u8; 32]>,
     temporary_busy: bool,
+    transport_error: Option<TransportErrorFlags>,
+    elapsed_ms: Option<u64>,
 }
 impl FixtureReadFailure {
     fn without_body(
@@ -690,6 +713,25 @@ impl FixtureReadFailure {
             response_bytes,
             response_sha256: None,
             temporary_busy: false,
+            transport_error: None,
+            elapsed_ms: None,
+        }
+    }
+    fn transport(
+        stage: FixtureReadStage,
+        error: &reqwest::Error,
+        elapsed: Duration,
+        status: Option<u16>,
+        response_bytes: Option<usize>,
+    ) -> Self {
+        Self {
+            stage,
+            status,
+            response_bytes,
+            response_sha256: None,
+            temporary_busy: false,
+            transport_error: Some(TransportErrorFlags::capture(error)),
+            elapsed_ms: Some(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)),
         }
     }
     fn response(stage: FixtureReadStage, status: u16, bytes: &[u8]) -> Self {
@@ -703,6 +745,8 @@ impl FixtureReadFailure {
             temporary_busy: stage == FixtureReadStage::HttpStatus
                 && status == 503
                 && bytes == br#"{"error":"temporary_busy","version":1}"#,
+            transport_error: None,
+            elapsed_ms: None,
         }
     }
 }
@@ -719,10 +763,14 @@ impl std::fmt::Display for FixtureReadFailure {
             for byte in digest {
                 write!(out, "{byte:02x}")?;
             }
-            Ok(())
         } else {
-            write!(out, "none")
+            write!(out, "none")?;
         }
+        if let (Some(flags), Some(elapsed_ms)) = (self.transport_error, self.elapsed_ms) {
+            write!(out, " elapsed_ms={elapsed_ms} transport_timeout={} transport_connect={} transport_request={} transport_body={} transport_decode={} transport_builder={}",
+                flags.timeout, flags.connect, flags.request, flags.body, flags.decode, flags.builder)?;
+        }
+        Ok(())
     }
 }
 
@@ -782,8 +830,15 @@ fn http_checked_with_timeout(
             if let Some(value) = body {
                 request = request.json(value);
             }
-            let mut response = request.send().await.map_err(|_| {
-                FixtureReadFailure::without_body(FixtureReadStage::HttpSend, None, None)
+            let request_started = Instant::now();
+            let mut response = request.send().await.map_err(|error| {
+                FixtureReadFailure::transport(
+                    FixtureReadStage::HttpSend,
+                    &error,
+                    request_started.elapsed(),
+                    None,
+                    None,
+                )
             })?;
             if response
                 .content_length()
@@ -797,9 +852,11 @@ fn http_checked_with_timeout(
                 let chunk = match response.chunk().await {
                     Ok(Some(chunk)) => chunk,
                     Ok(None) => break,
-                    Err(_) => {
-                        return Err(FixtureReadFailure::without_body(
+                    Err(error) => {
+                        return Err(FixtureReadFailure::transport(
                             FixtureReadStage::HttpBody,
+                            &error,
+                            request_started.elapsed(),
                             Some(status),
                             Some(bytes.len()),
                         ))
@@ -1577,6 +1634,32 @@ fn playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts() {
         let record = error.to_string();
         assert!(record.contains(stage.code()) && record.ends_with("response_sha256=none"));
     }
+    // Construct a builder error locally so this privacy check never initializes
+    // the shared fixture client or performs network/TLS work.
+    let reqwest_error = reqwest::Client::builder()
+        .user_agent("transport-secret-canary\n")
+        .build()
+        .unwrap_err()
+        .with_url(
+            reqwest::Url::parse(
+                "https://transport-secret-canary:secret@example.invalid/path?token=transport-secret-canary",
+            )
+            .unwrap(),
+        );
+    let error = FixtureReadFailure::transport(
+        FixtureReadStage::HttpSend,
+        &reqwest_error,
+        Duration::from_millis(7),
+        None,
+        None,
+    );
+    let flags = error.transport_error.expect("builder classification");
+    assert!(flags.builder);
+    assert_eq!(error.elapsed_ms, Some(7));
+    let record = error.to_string();
+    assert!(record.contains("transport_builder=true"));
+    assert!(!record.contains("transport-secret-canary"));
+    assert!(!record.contains("http://") && !record.contains("https://"));
     let escaped = std::panic::catch_unwind(|| {
         parse_playlist_snapshot_response(
             &path,

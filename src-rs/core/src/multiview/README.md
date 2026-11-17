@@ -212,6 +212,12 @@ retirement retain their original result; diagnostic output is deferred until
 Pending/done and the operation receipt are complete. Do not attribute a nearby
 untagged watchdog line from another session to the failed Play operation.
 
+Normal-server fixture transport failures retain only closed error-category flags
+and elapsed request milliseconds, alongside the existing status/count/digest
+fields. They never retain a reqwest error, URL, headers or response body. These
+flags are evidence, not permission to retry or a diagnosis of the native cause;
+request deadlines and exact temporary-busy handling are unchanged.
+
 The normal-server audio health oracle applies only to completed live segments of
 this fixed 10 fps, one-second-GOP, 48 kHz stereo AAC output profile. It requires a
 complete video window (at least ten decoded frames and at least one second of
