@@ -16,3 +16,13 @@ It does not reproduce or fix the historical unresolved OPFS query. The existing 
 Chromium’s protocol supports native file drops through [`Input.dispatchDragEvent`](https://chromedevtools.github.io/devtools-protocol/tot/Input/). Chromium’s own [File System Access drag/drop browser test](https://chromium.googlesource.com/chromium/src/+/main/content/browser/file_system_access/file_system_access_drag_drop_browsertest.cc) exercises dropped files and directories using `getAsFileSystemHandle()`.
 
 For a locally installed Chromium executable other than the revision installed by the checked-in Playwright version, the test accepts `OTT_ISSUE1004_CHROMIUM_PATH`; CI should use its normally pinned Playwright-managed browser. Record the actual Chromium and Playwright versions with every result. A pass in a different runtime is not a reproduction or dismissal of the historical failure.
+
+## CI routing
+
+The ordinary PR Quality gate runs this test in its existing Windows Chromium
+browser job, before the unchanged direct-media/OPFS case. The manually invoked
+Linux CI build also runs it before that case. Registration as an npm script alone
+is not automatic PR coverage; `tests/test_ci_inventory.cjs` checks the actual
+workflow call graph and keeps the manual-only inventory strict.
+
+The local macOS result is separate from either hosted platform qualification.
