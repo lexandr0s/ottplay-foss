@@ -211,3 +211,26 @@ not necessarily the first event by wall-clock time. Source cleanup and reservati
 retirement retain their original result; diagnostic output is deferred until
 Pending/done and the operation receipt are complete. Do not attribute a nearby
 untagged watchdog line from another session to the failed Play operation.
+
+The normal-server audio health oracle applies only to completed live segments of
+this fixed 10 fps, one-second-GOP, 48 kHz stereo AAC output profile. It requires a
+complete video window (at least ten decoded frames and at least one second of
+actual timestamp duration), exactly one audio and one video stream, 1024-sample AAC
+frames and exact internal audio timestamp continuity. Both audio endpoints must
+be within one AAC quantum, `1024/48000` seconds, of the corresponding video
+endpoints, using checked rational arithmetic. A common timestamp-origin shift is
+allowed; an audio-only shift is not.
+
+Probe, RGB and PCM checks share the same immutable TS identity. If the actual AAC
+frames contain `N` samples per channel, mono 16 kHz PCM must contain either
+`floor(N/3)` or `ceil(N/3)` samples and an even byte count. The existing eight-second
+PCM maximum, process/byte budgets, and all tone, replacement, freshness and
+cleanup assertions remain mandatory. This replaces the invalid one-second PCM minimum: a complete
+one-second video segment can legitimately contain 46 AAC frames, or 47104 source
+samples, yielding 15701/15702 mono samples rather than 16000.
+
+This is a fixed-profile health contract, not a universal HLS validator. Endpoint
+quantization and AAC priming are distinct from integer resampler rounding. The
+one-sample rounding ambiguity and possible boundary-packet ambiguity remain;
+loss-free edge claims require adjacent-segment coverage. Neither these checks nor
+a passing diagnostic identify the cause of an earlier native timing failure.
