@@ -385,6 +385,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO баптаулары",
     "Drop one video file at a time":
         "Бір уақытта бір бейнефайлды сүйреп апарып тастаңыз",
+    "Dropped files": "Сүйреп әкелінген файлдар",
     Duration: "Ұзақтығы",
     Edit: "Өңдеу",
     "Edit access key": "Кіру кілтін өңдеу",

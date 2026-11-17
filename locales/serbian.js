@@ -380,6 +380,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO подешавања",
     "Drop one video file at a time":
         "Превуците и отпустите по једну видео-датотеку",
+    "Dropped files": "Превучене датотеке",
     Duration: "Трајање",
     Edit: "Уреди",
     "Edit access key": "Уредите приступни кључ",

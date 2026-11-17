@@ -383,6 +383,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dejinta Dragon Media PRO",
     "Drop one video file at a time":
         "Jiid oo dhig hal fayl oo fiidiyow ah markiiba",
+    "Dropped files": "Faylasha la jiiday ee la dhigay",
     Duration: "Muddada",
     Edit: "Wax ka beddel",
     "Edit access key": "Wax ka beddel furaha gelitaanka",

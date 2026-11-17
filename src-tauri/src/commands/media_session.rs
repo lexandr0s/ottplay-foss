@@ -185,7 +185,7 @@ fn ensure_controls(app: &AppHandle, state: &MediaSessionState) -> Result<(), Str
                 MediaControlEvent::Toggle => {
                     eval_main(
                         &app_cb,
-                        "if(window.stbIsPlaying&&window.stbPause&&window.stbContinue){if(window.stbIsPlaying())window.stbPause();else window.stbContinue();} true;",
+                        "if(window.stbIsPlaying&&window.stbPause&&window.stbContinue){if(window.stbIsPlaying(true))window.stbPause();else window.stbContinue();} true;",
                     );
                 }
                 MediaControlEvent::Next => eval_main(&app_cb, JS_NEXT),

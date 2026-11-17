@@ -396,6 +396,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Einstellungen für Dragon Media PRO",
     "Drop one video file at a time":
         "Ziehen Sie jeweils nur eine Videodatei hierher",
+    "Dropped files": "Abgelegte Dateien",
     Duration: "Dauer",
     Edit: "Bearbeiten",
     "Edit access key": "Zugangsschlüssel bearbeiten",

@@ -380,6 +380,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO-ийн тохиргоо",
     "Drop one video file at a time":
         "Нэг удаад нэг видео файлыг чирж оруулна уу",
+    "Dropped files": "Чирж оруулсан файлууд",
     Duration: "Үргэлжлэх хугацаа",
     Edit: "Засах",
     "Edit access key": "Хандалтын түлхүүрийг засах",

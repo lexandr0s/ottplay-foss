@@ -382,6 +382,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO sozlamalari",
     "Drop one video file at a time":
         "Har safar bittadan video faylni sudrab tashlang",
+    "Dropped files": "Sudrab tashlangan fayllar",
     Duration: "Davomiylik",
     Edit: "Tahrirlash",
     "Edit access key": "Kirish kalitini tahrirlash",

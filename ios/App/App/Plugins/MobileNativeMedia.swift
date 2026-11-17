@@ -585,7 +585,7 @@ public class MobileNativeMedia: CAPPlugin, CAPBridgedPlugin {
                 return .success
             }
             self.evalVideoJS(
-                "if(window.stbIsPlaying&&window.stbPause&&window.stbContinue){if(window.stbIsPlaying())window.stbPause();else window.stbContinue();} true;"
+                "if(window.stbIsPlaying&&window.stbPause&&window.stbContinue){if(window.stbIsPlaying(true))window.stbPause();else window.stbContinue();} true;"
             )
             return .success
         }

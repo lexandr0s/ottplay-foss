@@ -387,6 +387,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO asetukset",
     "Drop one video file at a time":
         "Vedä ja pudota yksi videotiedosto kerrallaan",
+    "Dropped files": "Pudotetut tiedostot",
     Duration: "Kesto",
     Edit: "Muokkaa",
     "Edit access key": "Muokkaa pääsyavainta",

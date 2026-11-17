@@ -401,11 +401,11 @@ test("playlist failures translate every safe diagnostic and redact unknown nativ
             "Local HLS manifests are not supported; use an HTTP(S) manifest URL",
         ],
         [
-            "Dropped playlist exceeds the 2 MiB file or 8 MiB batch limit",
+            "Dropped playlist exceeds the 8 MiB file or 16 MiB batch limit",
             "Playlist is too large",
         ],
         [
-            "Dropped playlists exceed 4096 entries or 128 local files",
+            "Dropped playlists exceed 20000 entries or 128 local files",
             "Playlist is too large",
         ],
         [

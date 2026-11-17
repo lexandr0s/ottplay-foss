@@ -382,6 +382,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Ntọala Dragon Media PRO",
     "Drop one video file at a time":
         "Dọrọ ma tụnye naanị otu faịlụ vidiyo n'otu oge",
+    "Dropped files": "Faịlụ ndị a dọtara ma tụnye",
     Duration: "Ogologo oge",
     Edit: "Dezie",
     "Edit access key": "Dezie igodo nnweta",

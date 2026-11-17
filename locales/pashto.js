@@ -373,6 +373,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO ترتیبات",
     "Drop one video file at a time":
         "په یو وخت کې یوازې یو ویډیو فایل راکش او خوشې کړئ",
+    "Dropped files": "راکش او خوشې شوي فایلونه",
     Duration: "موده",
     Edit: "تدوین",
     "Edit access key": "د لاسرسي کیلي سمول",

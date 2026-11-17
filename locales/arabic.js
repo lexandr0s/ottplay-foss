@@ -375,6 +375,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "إعدادات Dragon Media PRO",
     "Drop one video file at a time": "اسحب وأفلت ملف فيديو واحدًا في كل مرة",
+    "Dropped files": "الملفات التي تم سحبها وإفلاتها",
     Duration: "المدة",
     Edit: "تحرير",
     "Edit access key": "تحرير مفتاح الوصول",

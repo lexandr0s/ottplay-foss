@@ -395,6 +395,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Instellingen voor Dragon Media PRO",
     "Drop one video file at a time":
         "Sleep één videobestand tegelijk en zet het neer",
+    "Dropped files": "Neergezette bestanden",
     Duration: "Duur",
     Edit: "Bewerken",
     "Edit access key": "Toegangssleutel bewerken",

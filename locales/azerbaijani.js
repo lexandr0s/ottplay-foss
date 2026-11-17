@@ -387,6 +387,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO ayarları",
     "Drop one video file at a time":
         "Hər dəfə yalnız bir video faylını sürükləyib buraxın",
+    "Dropped files": "Sürüklənib buraxılmış fayllar",
     Duration: "Müddət",
     Edit: "Redaktə et",
     "Edit access key": "Giriş açarını dəyiş",

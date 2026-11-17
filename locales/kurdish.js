@@ -380,6 +380,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Mîhengên Dragon Media PRO",
     "Drop one video file at a time":
         "Her carê tenê pelek vîdyoyê bikişîne û berde",
+    "Dropped files": "Pelên ku hatine kişandin û berdan",
     Duration: "Dem",
     Edit: "Biguherîne",
     "Edit access key": "Mifteya gihîştinê biguherînin",

@@ -329,7 +329,11 @@ function seekCoreMedia(
         position < 0
     )
         return;
-    if (!startup) _coreSeekRevision++;
+    if (!startup) {
+        _coreSeekRevision++;
+        if (coreStreamAttempt?.droppedHttp())
+            coreStreamAttempt.bookmark(position);
+    }
     cancelCoreSeek();
     var local = (window as any).__ottLocalMedia;
     var compatibilityUrl = (window as any).__ottCoreCompatibilityUrl;
@@ -1218,9 +1222,12 @@ export function stbEventToKeyCode(event: any): number {
  * - Automatically restores previous audio/subtitle track settings via applyChannelPreference.
  */
 interface CoreStreamAttempt {
+    bookmark(position: number): void;
     dispose(): void;
+    droppedHttp(): boolean;
     fail(kind: string, status?: number, position?: number): void;
     loading(): boolean;
+    nativeFailureKind(code: number): "network" | "decode";
     pause(): void;
     progress(resetRetryBudget?: boolean): void;
     resume(): boolean;
@@ -1228,6 +1235,7 @@ interface CoreStreamAttempt {
         pending: boolean;
         terminal: boolean;
     };
+    wantsReconnect(): boolean;
 }
 var coreStreamAttempt: CoreStreamAttempt | null = null;
 // Retained for the whole engine lease: an internal retry must not erase history.
@@ -1269,19 +1277,22 @@ function createCoreStreamAttempt(
     restart: (url: string, position?: number) => void,
     admitted?: () => boolean,
     captureRetryIntent?: () => (() => boolean) | null,
-    notify?: (type: string) => void
+    notify?: (type: string) => void,
+    droppedHttp?: () => boolean,
+    initialPosition?: number
 ): CoreStreamAttempt {
     var policy = (window as any).__ottStreamPolicy;
     var owner = policy && policy.capture();
     if (policy) policy.reset();
     var endpoints = policy ? policy.endpoints(primary) : [primary];
-    var resumePosition: number | undefined;
+    var resumePosition = initialPosition;
     var endpoint = 0,
         attempts = 0,
         retries = 0,
         parseRetried = false,
         decodeRetried = false;
     var retryIntent: (() => boolean) | null = null;
+    var droppedNetworkFailure = false;
     // Intent changes cancel this retry without retiring the playback watcher.
     function intentCurrent(): boolean {
         if (!retryIntent || retryIntent()) return true;
@@ -1360,13 +1371,21 @@ function createCoreStreamAttempt(
                     return;
                 restart(endpoints[endpoint], resumePosition);
             },
-            Math.min(2000, 500 * Math.max(1, attempts + 1))
+            droppedHttp
+                ? Math.min(30000, 500 * 2 ** Math.min(retries - 1, 6))
+                : Math.min(2000, 500 * Math.max(1, attempts + 1))
         );
     }
     return {
+        bookmark: function (position: number) {
+            if (isFinite(position) && position >= 0) resumePosition = position;
+        },
         dispose: function () {
             disposed = true;
             clear();
+        },
+        droppedHttp: function () {
+            return !!droppedHttp && droppedHttp() && active();
         },
         fail: function (kind: string, status?: number, position?: number) {
             if (ended || !loading()) return;
@@ -1377,7 +1396,7 @@ function createCoreStreamAttempt(
             // Parallel requests may report denial/DRM after a transient failure.
             // Terminal errors cancel that scheduled retry and any future attempts.
             if (pending && !denied && recoverable) return;
-            resumePosition =
+            var latestPosition =
                 position !== undefined
                     ? position
                     : video &&
@@ -1385,9 +1404,17 @@ function createCoreStreamAttempt(
                         isFinite(video.currentTime)
                       ? video.currentTime
                       : undefined;
+            // A connection refusal can leave a fresh decoder without a clock.
+            // Keep the last cursor through consecutive failed attachments.
+            if (!droppedHttp) resumePosition = latestPosition;
+            else if (latestPosition !== undefined)
+                resumePosition = Math.max(resumePosition || 0, latestPosition);
             var transient =
                 !status || status === 408 || status === 429 || status >= 500;
-            if (
+            if (droppedHttp && !denied && transient && kind === "network") {
+                droppedNetworkFailure = true;
+                retries++;
+            } else if (
                 !denied &&
                 transient &&
                 retries < 2 &&
@@ -1427,17 +1454,37 @@ function createCoreStreamAttempt(
                 if (active() && notify) notify("failed");
                 return;
             }
-            retryIntent = captureRetryIntent ? captureRetryIntent() : null;
+            retryIntent =
+                !droppedHttp && captureRetryIntent
+                    ? captureRetryIntent()
+                    : null;
             pending = true;
             report("waiting");
             showShift(_("Reconnecting…"));
             schedule();
         },
         loading: loading,
+        nativeFailureKind: function (code: number) {
+            return code === 2 ||
+                (code === 4 &&
+                    droppedHttp &&
+                    (droppedNetworkFailure || navigator.onLine === false))
+                ? "network"
+                : "decode";
+        },
         pause: clear,
         progress: function (resetRetryBudget = true) {
+            if (droppedHttp && pending && active()) {
+                // Native range loading can resume before our timeout. An
+                // advancing decoder already owns the correct connection.
+                clear();
+                pending = false;
+            }
             if (!active() || pending || ended) return;
-            if (resetRetryBudget) retries = 0;
+            if (resetRetryBudget) {
+                retries = 0;
+                droppedNetworkFailure = false;
+            }
             // A local decoder can recover before a queued retry. Its clock
             // invalidates the retry intent without emitting another playing
             // event, so retire only our own earlier loading notification.
@@ -1454,6 +1501,14 @@ function createCoreStreamAttempt(
         },
         state: function () {
             return { pending: pending, terminal: ended };
+        },
+        wantsReconnect: function () {
+            return (
+                droppedNetworkFailure &&
+                !ended &&
+                (window as any).forcePlay !== false &&
+                active()
+            );
         },
     };
 }
@@ -1548,6 +1603,14 @@ function startCoreEngine(
     }
     // Shaka detach is asynchronous and may otherwise clear the next engine's src.
     var revision = 0;
+    var droppedHttp = transient
+        ? undefined
+        : (coreCall(
+              (window as any).__ottLocalMedia,
+              "captureDroppedHttpFile",
+              [sourceUrl],
+              3
+          ) as (() => boolean) | undefined);
     var localRetryCurrent: (() => boolean) | null = null;
     var localRetryIntent: (() => boolean) | null = null;
     function captureLocalRetryIntent(): (() => boolean) | null {
@@ -1566,7 +1629,9 @@ function startCoreEngine(
         return localRetryIntent;
     }
     function retryCurrent(): boolean {
-        return !localRetryCurrent || localRetryCurrent();
+        return droppedHttp
+            ? droppedHttp()
+            : !localRetryCurrent || localRetryCurrent();
     }
     function watchLocal(): void {
         cancelCoreAutoPlayback();
@@ -1637,15 +1702,19 @@ function startCoreEngine(
             last = next;
             if (
                 (window as any).forcePlay === false ||
-                media.paused ||
-                media.seeking ||
+                (media.paused &&
+                    (!droppedHttp ||
+                        (media.readyState >= 3 && !media.error))) ||
+                (!droppedHttp && media.seeking) ||
                 elapsed <= 0 ||
-                elapsed > 2.5
+                (elapsed > 2.5 && !droppedHttp)
             ) {
                 stalled = now;
                 progress = 0;
             } else if (
                 media.readyState >= 2 &&
+                !media.paused &&
+                !media.seeking &&
                 delta > 0 &&
                 delta <= elapsed * (media.playbackRate || 1) + 0.5
             ) {
@@ -1653,8 +1722,10 @@ function startCoreEngine(
                 // Brief reads from an unstable mount must not renew the retry
                 // budget. Count observed wall time, not seek/rate advancement.
                 progress = discontinuity ? 0 : progress + elapsed;
-                if (progress > 0 && coreStreamAttempt)
+                if (progress > 0 && coreStreamAttempt) {
+                    if (droppedHttp) coreStreamAttempt.bookmark(next);
                     coreStreamAttempt.progress(progress >= 10);
+                }
             } else {
                 progress = 0;
                 if (now - stalled >= 30000 && coreStreamAttempt) {
@@ -1666,7 +1737,9 @@ function startCoreEngine(
                                 ? _corePendingSeekPosition
                                 : media.readyState > 0 && isFinite(next)
                                   ? next
-                                  : position
+                                  : droppedHttp
+                                    ? undefined
+                                    : position
                         );
                     }
                     stalled = now;
@@ -1872,7 +1945,7 @@ function startCoreEngine(
                   if (video) {
                       // Read before destroy(): decoder teardown may reset currentTime.
                       // Live endpoints always start at their own live edge.
-                      if (!streamOwner || !streamOwner.live)
+                      if (droppedHttp || !streamOwner || !streamOwner.live)
                           position =
                               resumePosition !== undefined
                                   ? resumePosition
@@ -1891,7 +1964,9 @@ function startCoreEngine(
               },
               retryCurrent,
               captureLocalRetryIntent,
-              notify
+              notify,
+              droppedHttp,
+              droppedHttp ? position : undefined
           );
     if (_coreShakaTeardown) {
         if (session === _playSession) _coreShakaTeardown.resume = start;
@@ -2651,18 +2726,21 @@ export function stbContinue(): void {
     if (stbIsStandby()) return;
     var handle = getCoreMediaBackend().current();
     if (!handle) return;
-    if (video && video.paused) handle.resume();
+    if (coreStreamAttempt?.droppedHttp() || (video && video.paused))
+        handle.resume();
     else handle.pause();
 }
-export function stbIsPlaying(): boolean {
+export function stbIsPlaying(forToggle = false): boolean {
     // A diagnostic clip is not the live channel: do not enter its catch-up path.
     if (coreAvTest && coreAvTest.active()) return false;
     var handle = getCoreMediaBackend().current();
     return (
         !!handle &&
         !!video &&
-        !video.paused &&
-        (handle.snapshot().phase !== "loading" || video.readyState >= 2)
+        ((forToggle && coreStreamAttempt?.wantsReconnect() === true) ||
+            (!video.paused &&
+                (handle.snapshot().phase !== "loading" ||
+                    video.readyState >= 2)))
     );
 }
 /**
@@ -4420,15 +4498,31 @@ function openCoreEngineLease(
                 "loadedmetadata",
             ].forEach(function (name) {
                 var callback = function () {
+                    if (
+                        !pip &&
+                        name === "ended" &&
+                        active() &&
+                        media &&
+                        (window as any).forcePlay !== false &&
+                        coreStreamAttempt?.droppedHttp() &&
+                        (media.error ||
+                            (isFinite(media.duration) &&
+                                media.currentTime + 0.25 < media.duration))
+                    ) {
+                        if (!media.error) coreStreamFailure("network");
+                        return;
+                    }
                     if (active()) event(name);
                     if (!pip && name === "playing" && active()) {
                         var policy = (window as any).__ottStreamPolicy;
                         if (policy) policy.report({ state: "playing" });
                     }
                     if (!pip && name === "error" && active()) {
+                        var nativeAttempt = _coreNativeAttempt;
                         setTimeout(function () {
                             if (
                                 active() &&
+                                nativeAttempt === _coreNativeAttempt &&
                                 _corePlaybackMode === 0 &&
                                 !(
                                     _coreAutoCancel && _coreAutoCancel.pending()
@@ -4437,9 +4531,9 @@ function openCoreEngineLease(
                                 media.error
                             )
                                 coreStreamFailure(
-                                    media.error.code === 2
-                                        ? "network"
-                                        : "decode"
+                                    coreStreamAttempt?.nativeFailureKind(
+                                        media.error.code
+                                    ) || "decode"
                                 );
                         }, 0);
                     }

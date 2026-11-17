@@ -385,6 +385,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Iisetingi ze-Dragon Media PRO",
     "Drop one video file at a time":
         "Tsala uze ulahle ifayile yevidiyo enye ngexesha",
+    "Dropped files": "Iifayile ezitsaliweyo zaza zaphoswa",
     Duration: "Ubude bexesha",
     Edit: "Hlela",
     "Edit access key": "Hlela isitshixo sokufikelela",

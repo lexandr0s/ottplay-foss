@@ -380,6 +380,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Stillingar fyrir Dragon Media PRO",
     "Drop one video file at a time":
         "Dragðu og slepptu einni myndskeiðsskrá í einu",
+    "Dropped files": "Skrár sem var sleppt",
     Duration: "Lengd",
     Edit: "Breyta",
     "Edit access key": "Breyta aðgangslykli",

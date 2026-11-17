@@ -140,7 +140,7 @@ test("parser rejects malformed header, unsafe schemes, absolute paths and oversi
     }
     assert.throws(() =>
         f.exports.parseDroppedPlaylist(
-            "#EXTM3U\n" + "x".repeat(2 * 1024 * 1024)
+            "#EXTM3U\n" + "x".repeat(8 * 1024 * 1024)
         )
     );
 });
@@ -353,8 +353,8 @@ test("aggregate playlist record cap is checked before any local path lookup", as
         });
         return file;
     }
-    const first = trackedPlaylist("first.m3u", 2048);
-    const second = trackedPlaylist("second.m3u", 2049);
+    const first = trackedPlaylist("first.m3u", 10000);
+    const second = trackedPlaylist("second.m3u", 10001);
     await assert.rejects(
         f.exports.createDroppedPlaylists(f.host, [first, second]),
         (error) => error.droppedPlaylistCode === "playlist_limit"
@@ -364,7 +364,7 @@ test("aggregate playlist record cap is checked before any local path lookup", as
 });
 
 test("aggregate cap includes standalone videos and admits the exact boundary", async () => {
-    for (const count of [4095, 4096]) {
+    for (const count of [19999, 20000]) {
         const f = fixture();
         const playlist = f.file(
             "limit.m3u",
@@ -376,7 +376,7 @@ test("aggregate cap includes standalone videos and admits the exact boundary", a
             playlist,
             video,
         ]);
-        if (count === 4096) {
+        if (count === 20000) {
             await assert.rejects(
                 pending,
                 (error) => error.droppedPlaylistCode === "playlist_limit"
@@ -384,7 +384,7 @@ test("aggregate cap includes standalone videos and admits the exact boundary", a
             assert.equal(f.created.length, 0);
         } else {
             const lease = await pending;
-            assert.equal(lease.catalog.items.length, 4096);
+            assert.equal(lease.catalog.items.length, 20000);
             assert.equal(f.created.length, 1);
             lease.release();
             assert.equal(f.revoked.length, 1);

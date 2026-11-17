@@ -390,6 +390,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Настройки за Dragon Media PRO",
     "Drop one video file at a time": "Плъзгайте и пускайте по един видеофайл",
+    "Dropped files": "Плъзнати и пуснати файлове",
     Duration: "Продължителност",
     Edit: "Редактирай",
     "Edit access key": "Редактиране на ключа за достъп",

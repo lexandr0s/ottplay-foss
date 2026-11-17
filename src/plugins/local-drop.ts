@@ -75,8 +75,8 @@ export function installLocalDrop(w: any): any {
         if (text === "Dropped playlist must be UTF-8") text = 5;
         if (
             text ===
-                "Dropped playlist exceeds the 2 MiB file or 8 MiB batch limit" ||
-            text === "Dropped playlists exceed 4096 entries or 128 local files"
+                "Dropped playlist exceeds the 8 MiB file or 16 MiB batch limit" ||
+            text === "Dropped playlists exceed 20000 entries or 128 local files"
         )
             text = codes.playlist_limit;
         if (

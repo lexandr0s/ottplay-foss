@@ -386,6 +386,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PROの設定",
     "Drop one video file at a time":
         "動画ファイルは一度に1つずつドラッグ＆ドロップしてください",
+    "Dropped files": "ドラッグ＆ドロップしたファイル",
     Duration: "期間",
     Edit: "編集",
     "Edit access key": "アクセスキーの編集",

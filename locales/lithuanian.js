@@ -378,6 +378,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO nustatymai",
     "Drop one video file at a time":
         "Vilkite ir numeskite po vieną vaizdo failą",
+    "Dropped files": "Nuvilkti failai",
     Duration: "Trukmė",
     Edit: "Redaguoti",
     "Edit access key": "Redaguoti prieigos raktą",

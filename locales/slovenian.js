@@ -381,6 +381,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "nastavitve Dragon Media PRO",
     "Drop one video file at a time":
         "Povlecite in spustite po eno videodatoteko",
+    "Dropped files": "Povlečene in spuščene datoteke",
     Duration: "Trajanje",
     Edit: "Uredi",
     "Edit access key": "Ključ za dostop do urejanja",

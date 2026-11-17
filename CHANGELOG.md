@@ -170,6 +170,25 @@
 - Keep Local videos Up/Down mapped to previous/next file after finite-media detection, while respecting custom key mappings and open menus.
 - Resume the exact selected Local videos file at its saved playback position after Q, page closure, or native app exit. Capture the decoder clock before exit/stop; keep completed files and explicit channel changes starting at zero.
 
+## [1.1.72] - 2026-11-17
+
+### Changes
+
+- Configure Shuffle and Repeat for dropped media independently of the Local
+  library. Play dropped playlists of up to 20,000 entries.
+- Resume an interrupted direct HTTP(S) file from its playback position when its
+  media server comes back online. Keep the dropped queue and playback order.
+
+### Upgrade
+
+- Use a reachable HTTPS media origin with byte-range support when playing
+  remote files through the hosted player.
+
+### Security
+
+- Recovery reopens the current media URL from the user's drop. The player
+  limits local-file grants to 128 and checks playlist sizes before admission.
+
 ## [1.1.71] - 2026-11-12
 
 ### Changes

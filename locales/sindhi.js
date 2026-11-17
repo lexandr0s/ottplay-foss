@@ -368,6 +368,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Dragon Media PRO جون سيٽنگون",
     "Drop one video file at a time": "هڪ وقت ۾ هڪ وڊيو فائل ڇڪي ڇڏيو",
+    "Dropped files": "ڇڪي ڇڏيل فائلون",
     Duration: "مدو",
     Edit: "سنواريو",
     "Edit access key": "رسائي چاٻي سنواريو",

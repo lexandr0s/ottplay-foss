@@ -10,6 +10,7 @@ import {
 import {
     createLocalPlaybackSelection,
     localSourceScan,
+    orderLocalItems,
 } from "../offline/playback-selection";
 import { installOfflineProfiles } from "../offline/profiles";
 import { resolveNativePlugin, tauriInvoke } from "./native-bridge";
@@ -48,6 +49,7 @@ export function installLocalMedia(w: any): any {
     var remoteLinkSequence = 0;
     // The drop belongs to a playback session, never to the saved Local library.
     var droppedPlayback: any = null;
+    var dropRepeatModes = ["all", "one", "off"];
     function releaseDrop(drop: any): void {
         if (!drop || drop.released) return;
         drop.released = true;
@@ -252,11 +254,11 @@ export function installLocalMedia(w: any): any {
         return owner == null ? undefined : owner[key];
     }
     function playbackItem(url: string): any {
-        return compatibility
-            ? compatibility.d(url)
-            : last?.items.filter(function (item: any) {
-                  return item.url === url;
-              })[0];
+        if (compatibility) return compatibility.d(url);
+        var items = last?.items;
+        if (items)
+            for (var i = 0; i < items.length; i++)
+                if (items[i].url === url) return items[i];
     }
     function compatibilityPlayback(url: string): boolean {
         return (
@@ -1511,6 +1513,30 @@ export function installLocalMedia(w: any): any {
             catalogRevision++;
             stopLocalRead();
         },
+        captureDroppedHttpFile: function (
+            url: string
+        ): (() => boolean) | undefined {
+            var drop = currentDrop();
+            var driver = w.__ottActiveProviderDriver;
+            if (
+                !drop ||
+                localField(driver, "id") !== "offline" ||
+                last !== drop.catalog ||
+                !/^https?:\/\//i.test(url)
+            )
+                return;
+            var item = playbackItem(url);
+            if (
+                (localField(item, "type") !== "stream" &&
+                    (localField(item, "source") !== "linked" ||
+                        localField(item, "size") !== 0)) ||
+                api.playbackTransport(url) !== "file"
+            )
+                return;
+            return function () {
+                return driver === w.__ottActiveProviderDriver && ownsDrop(drop);
+            };
+        },
         compatibilityFailure: function () {
             if (typeof w.showShift === "function")
                 w.showShift(w._("Local source unavailable"));
@@ -1529,6 +1555,22 @@ export function installLocalMedia(w: any): any {
                 return { id: source.id, kind: source.kind, name: source.name };
             });
         },
+        cycleDroppedRepeat: function (): boolean {
+            var mode = api.droppedRepeatMode();
+            if (!mode) return false;
+            var drop = currentDrop();
+            var draft = w.__ottPlayerSettingsHost?.store?.begin(true);
+            if (draft) {
+                draft.set(
+                    "droppedFileRepeat",
+                    (dropRepeatModes.indexOf(mode) + 1) % dropRepeatModes.length
+                );
+                draft.commit(undefined, function () {
+                    return currentDrop() === drop;
+                });
+            }
+            return true;
+        },
         deferQueueEnd: function (source: string, resume: () => void): boolean {
             var state =
                 typeof source === "string" && queueState(queueCatalog, source);
@@ -1540,6 +1582,14 @@ export function installLocalMedia(w: any): any {
             retireRemotePlayback();
             catalogRevision++;
             last = null;
+        },
+        droppedRepeatMode: function (): string | undefined {
+            if (
+                localField(w.__ottActiveProviderDriver, "id") !== "offline" ||
+                !currentDrop()
+            )
+                return undefined;
+            return dropRepeatModes[w.settings?.droppedFileRepeat] || "all";
         },
         failureMessage: failureMessage,
         favoriteSnapshot: function () {
@@ -1718,7 +1768,7 @@ export function installLocalMedia(w: any): any {
                     catalog.available === false ||
                     !Array.isArray(catalog.items) ||
                     !catalog.items.length ||
-                    catalog.items.length > 4096 ||
+                    catalog.items.length > 20000 ||
                     !Array.isArray(catalog.sources) ||
                     catalog.sources.length !== 1 ||
                     typeof release !== "function" ||
@@ -1738,7 +1788,6 @@ export function installLocalMedia(w: any): any {
                 )
                     throw new Error("Dropped video is unavailable");
                 var seen: any = Object.create(null);
-                var ids: string[] = [];
                 for (var i = 0; i < catalog.items.length; i++) {
                     var item = catalog.items[i];
                     if (
@@ -1754,10 +1803,20 @@ export function installLocalMedia(w: any): any {
                     )
                         throw new Error("Dropped video is unavailable");
                     seen[item.id] = true;
-                    ids.push(item.id);
                 }
                 drop.catalog = JSON.parse(JSON.stringify(catalog));
                 drop.catalog.persistent = false;
+                if (
+                    w.settings?.droppedFileShuffle === 1 &&
+                    catalog.items.length > 1
+                )
+                    drop.catalog.items = orderLocalItems(
+                        drop.catalog.items,
+                        Math.floor(Math.random() * 4294967295) + 1
+                    );
+                var ids = drop.catalog.items.map(function (item: any) {
+                    return item.id;
+                });
                 var previous = droppedPlayback;
                 // An unaccepted older request has no driver disposer.
                 if (previous && !previous.sessionCurrent) releaseDrop(previous);

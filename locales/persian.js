@@ -374,6 +374,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "تنظیمات Dragon Media PRO",
     "Drop one video file at a time":
         "هر بار یک فایل ویدئویی را بکشید و رها کنید",
+    "Dropped files": "فایل‌های کشیده و رهاشده",
     Duration: "مدت",
     Edit: "ویرایش",
     "Edit access key": "ویرایش کلید دسترسی",

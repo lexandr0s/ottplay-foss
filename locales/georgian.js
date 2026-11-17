@@ -386,6 +386,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO პარამეტრები",
     "Drop one video file at a time":
         "გადმოათრიეთ და ჩააგდეთ თითო ვიდეოფაილი ერთ ჯერზე",
+    "Dropped files": "ჩაგდებული ფაილები",
     Duration: "ხანგრძლივობა",
     Edit: "რედაქტირება",
     "Edit access key": "წვდომის გასაღების რედაქტირება",

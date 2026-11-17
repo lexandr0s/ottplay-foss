@@ -396,6 +396,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Igenamiterere rya Dragon Media PRO",
     "Drop one video file at a time":
         "Kurura dosiye imwe ya videwo uyirekure, imwe imwe",
+    "Dropped files": "Dosiye zakuruwe zikarekurwa",
     Duration: "Igihe bimara",
     Edit: "Hindura",
     "Edit access key": "Hindura urufunguzo rwo kwinjira",

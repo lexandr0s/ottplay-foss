@@ -387,6 +387,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Saitunan Dragon Media PRO",
     "Drop one video file at a time":
         "Ja ka sauke fayil ɗin bidiyo ɗaya a lokaci guda",
+    "Dropped files": "Fayilolin da aka ja aka sauke",
     Duration: "Tsawon lokaci",
     Edit: "Gyara",
     "Edit access key": "Gyara maɓallin shiga",

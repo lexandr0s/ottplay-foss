@@ -34,8 +34,8 @@ use tokio::{
 const MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 /// Maximum OS-selected input files and retained local originals per drop.
 pub const MAX_DROPPED_VIDEOS: usize = 128;
-/// Expanded remote playlist entries do not acquire local file descriptors.
-pub const MAX_DROPPED_ITEMS: usize = 4096;
+/// Maximum expanded playlist entries, including local members of mixed drops.
+pub const MAX_DROPPED_ITEMS: usize = 20_000;
 const MAX_TRANSIENT_BATCHES: usize = 2;
 pub const NATIVE_SOURCE_OVERLAP: &str =
     "Local folder overlaps an existing source; use the connected source or disconnect it before linking this folder";

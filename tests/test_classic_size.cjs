@@ -14,6 +14,8 @@ let {
     CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE,
     INTERFACE_NOTIFICATION_SETTINGS_ALLOWANCE,
     DESKTOP_DROP_ALLOWANCE,
+    DESKTOP_DROP_PREFERENCES_ALLOWANCE,
+    DESKTOP_DROP_RECOVERY_ALLOWANCE,
     DESKTOP_VIDEO_QUEUE_ALLOWANCE,
     DESKTOP_PLAYLIST_DROP_ALLOWANCE,
     DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE,
@@ -112,7 +114,13 @@ const latestCaps = Object.freeze({
     TOTAL_BUDGET,
 });
 const latestOptionalBundles = CLASSIC_OPTIONAL_BUNDLES;
-function projectCapsWithoutAllowances(names) {
+function projectCapsWithoutAllowances(names, preserveDropPreferences = false) {
+    if (!preserveDropPreferences)
+        names = [
+            "DESKTOP_DROP_PREFERENCES_ALLOWANCE",
+            "DESKTOP_DROP_RECOVERY_ALLOWANCE",
+            ...names,
+        ];
     assert.equal(new Set(names).size, names.length);
     const filename = require.resolve("../scripts/classic-size.cjs");
     let source = fs.readFileSync(filename, "utf8");
@@ -145,6 +153,7 @@ function projectCapsWithoutAllowances(names) {
               ? "Object.freeze({entry:Object.freeze({bytes:0,gzipBytes:0}),providerEdem:Object.freeze({bytes:0,gzipBytes:0}),appearance:Object.freeze({bytes:0,gzipBytes:0}),remoteSettingsLifecycle:Object.freeze({bytes:0,gzipBytes:0}),optional:Object.freeze({bytes:0,gzipBytes:0})})"
               : [
                       "TIMEZONE_LOCAL_STARTUP_ALLOWANCE",
+                      "DESKTOP_DROP_PREFERENCES_ALLOWANCE",
                       "CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE",
                       "INTERFACE_NOTIFICATION_SETTINGS_ALLOWANCE",
                   ].includes(name)
@@ -189,10 +198,82 @@ function capsWithoutAllowances(names) {
     ]);
 }
 {
+    const before = projectCapsWithoutAllowances(
+        ["DESKTOP_DROP_PREFERENCES_ALLOWANCE"],
+        true
+    );
+    const { entry, appearance } = DESKTOP_DROP_PREFERENCES_ALLOWANCE;
+    const evidence = require("../docs/evidence/desktop-drop-preferences-size.json");
+    for (const metric of ["bytes", "gzipBytes"]) {
+        const measuredDelta = (isEntry) =>
+            Math.max(
+                ...evidence.measurements.flatMap(({ measurements }) =>
+                    measurements
+                        .filter(
+                            ({ path }) => ARTIFACTS.includes(path) === isEntry
+                        )
+                        .map(
+                            ({ baseline, candidate }) =>
+                                candidate[metric] - baseline[metric]
+                        )
+                )
+            );
+        assert.equal(entry[metric], measuredDelta(true));
+        assert.equal(appearance[metric], measuredDelta(false));
+        for (const name of ["BUDGET", "LEGACY_TOTAL_BUDGET"])
+            assert.equal(
+                latestCaps[name][metric] - before[name][metric],
+                entry[metric]
+            );
+        for (const name of ["BASE_TOTAL_BUDGET", "TOTAL_BUDGET"])
+            assert.equal(
+                latestCaps[name][metric] - before[name][metric],
+                entry[metric] + appearance[metric]
+            );
+        assert.equal(
+            latestCaps.OPTIONAL_BUDGETS["subtitle-appearance"][metric] -
+                before.OPTIONAL_BUDGETS["subtitle-appearance"][metric],
+            appearance[metric]
+        );
+    }
+    for (const name of Object.keys(before.OPTIONAL_BUDGETS))
+        if (name !== "subtitle-appearance")
+            assert.deepEqual(
+                latestCaps.OPTIONAL_BUDGETS[name],
+                before.OPTIONAL_BUDGETS[name]
+            );
+}
+{
+    const before = projectCapsWithoutAllowances(
+        ["DESKTOP_DROP_RECOVERY_ALLOWANCE"],
+        true
+    );
+    const evidence = require("../docs/evidence/desktop-drop-recovery-size.json");
+    for (const metric of ["bytes", "gzipBytes"]) {
+        const actual = Math.max(
+            ...evidence.measurements.flatMap(({ measurements }) =>
+                measurements.map(
+                    ({ baseline, candidate }) =>
+                        candidate[metric] - baseline[metric]
+                )
+            )
+        );
+        assert.equal(DESKTOP_DROP_RECOVERY_ALLOWANCE[metric], actual);
+        for (const key of [
+            "BUDGET",
+            "LEGACY_TOTAL_BUDGET",
+            "BASE_TOTAL_BUDGET",
+            "TOTAL_BUDGET",
+        ])
+            assert.equal(latestCaps[key][metric] - before[key][metric], actual);
+    }
+    assert.deepEqual(latestCaps.OPTIONAL_BUDGETS, before.OPTIONAL_BUDGETS);
+}
+{
     const before = projectCapsWithoutAllowances([
         "DESKTOP_PLAYLIST_DROP_ALLOWANCE",
     ]);
-    const actual = require("../scripts/classic-size.cjs");
+    const actual = projectCapsWithoutAllowances([]);
     const evidence = require("../docs/evidence/desktop-playlist-drop-size.json");
     assert(Object.isFrozen(DESKTOP_PLAYLIST_DROP_ALLOWANCE));
     assert.deepEqual(DESKTOP_PLAYLIST_DROP_ALLOWANCE, evidence.addedAllowance);
@@ -357,7 +438,7 @@ function capsWithoutAllowances(names) {
     const before = projectCapsWithoutAllowances([
         "DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE",
     ]);
-    const actual = require("../scripts/classic-size.cjs");
+    const actual = projectCapsWithoutAllowances([]);
     const evidence = require("../docs/evidence/desktop-playlist-drop-size.json");
     assert(Object.isFrozen(DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE));
     assert.deepEqual(
@@ -6342,9 +6423,10 @@ try {
                 LOCAL_COMPATIBILITY_ALLOWANCE[key] +
                 LOCAL_SOURCE_DIAGNOSTICS_ALLOWANCE[key]
         );
-    const localDiagnosticsBaseline = projectCapsWithoutAllowances([
-        "LOCAL_SOURCE_DIAGNOSTICS_ALLOWANCE",
-    ]);
+    const localDiagnosticsBaseline = projectCapsWithoutAllowances(
+        ["LOCAL_SOURCE_DIAGNOSTICS_ALLOWANCE"],
+        true
+    );
     for (const name of [
         "BUDGET",
         "BASE_TOTAL_BUDGET",

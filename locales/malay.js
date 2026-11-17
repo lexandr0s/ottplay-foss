@@ -377,6 +377,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Tetapan Dragon Media PRO",
     "Drop one video file at a time":
         "Seret dan lepaskan satu fail video pada satu masa",
+    "Dropped files": "Fail yang diseret dan dilepaskan",
     Duration: "Tempoh",
     Edit: "Sunting",
     "Edit access key": "Sunting kunci akses",

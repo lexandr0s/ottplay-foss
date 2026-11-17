@@ -1326,6 +1326,41 @@ for (const mode of ["all", "one", "off"]) {
 console.log(
     "PASS Local finite-channel completion, repeat, kiosk and stale guards"
 );
+for (const mode of ["all", "one", "off"]) {
+    const { c, end } = setup("offline");
+    c.checkMedia = () => {};
+    c.channels = Object.fromEntries(
+        c.cats.All.map((id) => [id, { channel_name: "Drop " + id }])
+    );
+    while (c.__ottMedia.repeatMode() !== "one") c.__ottMedia.cycleRepeat();
+    let dropActive = true;
+    let actions = 0;
+    c.__ottLocalMedia = {
+        droppedRepeatMode: () => (dropActive ? mode : undefined),
+        cycleDroppedRepeat() {
+            actions++;
+            return dropActive;
+        },
+    };
+    assert.equal(c.__ottMedia.repeatMode(), mode);
+    c.__ottMedia.cycleRepeat();
+    assert.equal(actions, 1);
+    c._playChannel(0, 2);
+    const moves = [];
+    c.playChannel = (...args) => moves.push(args);
+    end();
+    end();
+    assert.deepEqual(
+        moves.map((args) => args[1]),
+        mode === "off" ? [] : [mode === "one" ? 2 : 0]
+    );
+    dropActive = false;
+    assert.equal(
+        c.__ottMedia.repeatMode(),
+        "one",
+        "normal Local keeps its own mode"
+    );
+}
 // Exercise the Local completion policy with a batch's ordered identities, not names.
 for (const mode of ["off", "all", "one"]) {
     const { c, end } = setup("offline");

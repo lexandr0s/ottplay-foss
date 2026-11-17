@@ -1,10 +1,10 @@
 import { createDroppedVideos } from "./dropped-video";
 
 var droppedPlaylistSerial = 0;
-var MAX_PLAYLIST_BYTES = 2 * 1024 * 1024;
-var MAX_PLAYLIST_TOTAL_BYTES = 8 * 1024 * 1024;
+var MAX_PLAYLIST_BYTES = 8 * 1024 * 1024;
+var MAX_PLAYLIST_TOTAL_BYTES = 16 * 1024 * 1024;
 var MAX_INPUT_FILES = 128;
-var MAX_RECORDS = 4096;
+var MAX_RECORDS = 20000;
 
 export type DroppedPlaylistRecord = {
     reference: string;

@@ -393,6 +393,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Cilësimet Dragon Media PRO",
     "Drop one video file at a time":
         "Tërhiqni dhe lëshoni vetëm një skedar video në të njëjtën kohë",
+    "Dropped files": "Skedarët e tërhequr dhe të lëshuar",
     Duration: "Kohëzgjatja",
     Edit: "Redakto",
     "Edit access key": "Redakto çelësin e hyrjes",

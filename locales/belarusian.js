@@ -382,6 +382,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Налады Dragon Media PRO",
     "Drop one video file at a time": "Перацягвайце па адным відэафайле",
+    "Dropped files": "Перацягнутыя файлы",
     Duration: "Працягласць",
     Edit: "Рэдагаваць",
     "Edit access key": "Змяніць ключ доступу",

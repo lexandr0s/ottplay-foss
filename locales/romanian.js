@@ -386,6 +386,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Setări Dragon Media PRO",
     "Drop one video file at a time":
         "Trageți și plasați câte un fișier video pe rând",
+    "Dropped files": "Fișiere trase și plasate",
     Duration: "Durată",
     Edit: "Editează",
     "Edit access key": "Editează cheia de acces",

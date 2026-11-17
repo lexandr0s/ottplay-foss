@@ -375,6 +375,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO அமைப்புகள்",
     "Drop one video file at a time":
         "ஒரு நேரத்தில் ஒரு வீடியோ கோப்பை இழுத்து விடுங்கள்",
+    "Dropped files": "இழுத்து விடப்பட்ட கோப்புகள்",
     Duration: "கால அளவு",
     Edit: "திருத்து",
     "Edit access key": "திருத்த அணுகல் விசை",

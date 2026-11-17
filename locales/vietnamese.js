@@ -374,6 +374,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Cài đặt Dragon Media PRO",
     "Drop one video file at a time": "Mỗi lần chỉ kéo và thả một tệp video",
+    "Dropped files": "Tệp đã kéo và thả",
     Duration: "Thời lượng",
     Edit: "Chỉnh sửa",
     "Edit access key": "Chỉnh sửa khóa truy cập",
