@@ -76,7 +76,7 @@ The completed arm sets `append-completed`. Both use the same prepared
 paths as ordinary acceptance. Do not loop or retry until green. A missed phase is
 an explicit diagnostic precondition failure, not a reason to change readiness.
 Do not set this variable across all 35 targets; a non-Firefox Video.js scenario
-is rejected. The manual Linux diagnostic has not yet been executed.
+is rejected. A pinned Linux execution is recorded below.
 
 ## Local proof boundary
 
@@ -106,3 +106,22 @@ These results establish that both observers are reachable in the full
 application on macOS. They do not reproduce Linux's crash, qualify the complete
 five-case Linux sequence, exercise native crash collection on a crash, or prove a
 production repair. Issue #1005 remains open.
+
+## Pinned Linux execution
+
+[Run 44004147748](https://github.com/open-ott-play/ottplay-foss/actions/runs/44004147748)
+used source `94caf33273517d36d49dc79aa9294b6c94e270e0`. Both Linux
+Firefox 153.0 / Playwright 1.62.1 phase arms passed all five original scenarios
+once, with zero retries. Both used the same candidate archive. Each selected
+Video.js scenario emitted exactly one requested phase marker and retained the
+original transition sequence. The ordinary five required browser targets also
+passed independently.
+
+The overall workflow failed in two separate Linux GStreamer packaging checks:
+the pinned compatibility baseline expected Ubuntu package revision `0.6`, while
+the signed distribution supplied security revision `0.7`. This does not turn the
+workflow green or qualify a later source revision.
+
+No Firefox crash occurred. Native crash-collector output reported no available
+dump, so these passes demonstrate phase reachability and completed scenarios,
+not capture of an actual crash or a causal repair for #1005.

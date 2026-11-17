@@ -1664,6 +1664,52 @@ fn segment_video_proof_checks_count_timing_and_sampling_domain() {
     let (video, mut frames) = report(10);
     frames[9]["pkt_duration"] = json!(31 * 90000);
     assert!(segment_video_proof(&video, &frames).is_none());
+
+    let audio = json!({
+        "sample_rate":"48000",
+        "channels":2,
+        "time_base":"1/90000"
+    });
+    let audio_frames = vec![
+        json!({"media_type":"audio","best_effort_timestamp":0,"pkt_duration":1920,"nb_samples":1024}),
+        json!({"media_type":"audio","best_effort_timestamp":1920,"duration":1920,"nb_samples":1024}),
+    ];
+    let audio_proof = segment_audio_diagnostic(&audio, &audio_frames);
+    assert_eq!(audio_proof["audio_decoded_frames"], 2);
+    assert_eq!(audio_proof["audio_nb_samples_total"], 2048);
+    assert_eq!(audio_proof["audio_first_pts"], 0);
+    assert_eq!(audio_proof["audio_last_end_pts"], 3840);
+    assert_eq!(audio_proof["audio_packet_duration_ticks_total"], 3840);
+    assert_eq!(audio_proof["audio_sample_rate"], 48000);
+    assert_eq!(audio_proof["audio_channels"], 2);
+    assert_eq!(audio_proof["audio_time_base_num"], 1);
+    assert_eq!(audio_proof["audio_time_base_den"], 90000);
+
+    let malformed = segment_audio_diagnostic(
+        &json!({"sample_rate":"N/A","channels":0,"time_base":"1/0"}),
+        &[
+            json!({"media_type":"audio","best_effort_timestamp":"bad","pkt_duration":-1,"nb_samples":"bad"}),
+        ],
+    );
+    assert!(malformed["audio_nb_samples_total"].is_null());
+    assert!(malformed["audio_first_pts"].is_null());
+    assert!(malformed["audio_last_end_pts"].is_null());
+    assert!(malformed["audio_packet_duration_ticks_total"].is_null());
+    assert!(malformed["audio_sample_rate"].is_null());
+    assert!(malformed["audio_channels"].is_null());
+    assert!(malformed["audio_time_base_num"].is_null());
+    assert!(malformed["audio_time_base_den"].is_null());
+
+    let overflow = segment_audio_diagnostic(
+        &audio,
+        &[
+            json!({"media_type":"audio","best_effort_timestamp":0,"pkt_duration":i64::MAX,"nb_samples":i64::MAX}),
+            json!({"media_type":"audio","best_effort_timestamp":1,"pkt_duration":i64::MAX,"nb_samples":i64::MAX}),
+            json!({"media_type":"audio","best_effort_timestamp":2,"pkt_duration":i64::MAX,"nb_samples":i64::MAX}),
+        ],
+    );
+    assert!(overflow["audio_nb_samples_total"].is_null());
+    assert!(overflow["audio_packet_duration_ticks_total"].is_null());
 }
 
 fn try_new_segment(
@@ -1782,6 +1828,98 @@ struct SegmentVideoProof {
     time_base: String,
 }
 
+fn diagnostic_integer(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+        .or_else(|| value.as_str()?.parse::<i64>().ok())
+}
+
+fn segment_audio_diagnostic(audio: &Value, frames: &[Value]) -> Value {
+    let audio_frames: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame["media_type"] == "audio")
+        .collect();
+    let sample_rate = diagnostic_integer(&audio["sample_rate"])
+        .filter(|value| *value > 0)
+        .and_then(|value| u64::try_from(value).ok());
+    let channels = diagnostic_integer(&audio["channels"])
+        .filter(|value| *value > 0)
+        .and_then(|value| u64::try_from(value).ok());
+    let sample_count = audio_frames.iter().try_fold(0u64, |sum, frame| {
+        let samples = diagnostic_integer(&frame["nb_samples"])?;
+        if samples < 0 {
+            return None;
+        }
+        sum.checked_add(u64::try_from(samples).ok()?)
+    });
+    let packet_duration_ticks = audio_frames.iter().try_fold(0i64, |sum, frame| {
+        let duration = diagnostic_integer(&frame["pkt_duration"])
+            .or_else(|| diagnostic_integer(&frame["duration"]))?;
+        if duration <= 0 {
+            return None;
+        }
+        sum.checked_add(duration)
+    });
+    let timestamps: Option<Vec<i64>> = audio_frames
+        .iter()
+        .map(|frame| diagnostic_integer(&frame["best_effort_timestamp"]))
+        .collect();
+    let timestamps = timestamps.filter(|values| values.windows(2).all(|pair| pair[0] < pair[1]));
+    let first_pts = timestamps
+        .as_ref()
+        .and_then(|values| values.first().copied());
+    let last_end_pts = audio_frames.last().and_then(|frame| {
+        let duration = diagnostic_integer(&frame["pkt_duration"])
+            .or_else(|| diagnostic_integer(&frame["duration"]))?;
+        if duration <= 0 {
+            return None;
+        }
+        diagnostic_integer(&frame["best_effort_timestamp"])?.checked_add(duration)
+    });
+    let (time_base_num, time_base_den) = audio["time_base"]
+        .as_str()
+        .and_then(|value| value.split_once('/'))
+        .and_then(|(numerator, denominator)| {
+            let numerator = numerator.parse::<u64>().ok()?;
+            let denominator = denominator.parse::<u64>().ok()?;
+            (numerator > 0 && denominator > 0).then_some((numerator, denominator))
+        })
+        .map_or((None, None), |(numerator, denominator)| {
+            (Some(numerator), Some(denominator))
+        });
+    json!({
+        "audio_channels": channels,
+        "audio_decoded_frames": audio_frames.len(),
+        "audio_first_pts": first_pts,
+        "audio_last_end_pts": last_end_pts,
+        "audio_nb_samples_total": sample_count,
+        "audio_packet_duration_ticks_total": packet_duration_ticks,
+        "audio_sample_rate": sample_rate,
+        "audio_time_base_den": time_base_den,
+        "audio_time_base_num": time_base_num,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum PcmProofRole {
+    Grid,
+    InitialSustained,
+    Replacement,
+    LateSustained,
+}
+
+impl PcmProofRole {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Grid => "grid",
+            Self::InitialSustained => "initial_sustained",
+            Self::Replacement => "replacement",
+            Self::LateSustained => "late_sustained",
+        }
+    }
+}
+
 fn segment_video_proof(video: &Value, frames: &[Value]) -> Option<SegmentVideoProof> {
     let raw_count = video["nb_read_frames"].as_str()?;
     if raw_count.is_empty() || !raw_count.bytes().all(|b| b.is_ascii_digit()) {
@@ -1852,7 +1990,7 @@ fn ffprobe_segment(ffprobe: &Path, bytes: &[u8]) -> SegmentVideoProof {
             "-count_frames",
             "-show_frames",
             "-show_entries",
-            "stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,nb_read_frames,time_base:frame=media_type,best_effort_timestamp,pkt_duration,duration",
+            "stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,nb_read_frames,time_base,sample_rate,channels:frame=media_type,best_effort_timestamp,pkt_duration,duration,nb_samples",
             "-of",
             "json",
             "-i",
@@ -1889,15 +2027,45 @@ fn ffprobe_segment(ffprobe: &Path, bytes: &[u8]) -> SegmentVideoProof {
         audio["codec_name"], "aac",
         "selected profile audio codec differs"
     );
-    let proof = segment_video_proof(
-        video,
-        report["frames"].as_array().expect("decoded frame proof"),
-    )
-    .expect("positive bounded decoded frame count, timestamps and duration required");
+    let frames = report["frames"].as_array().expect("decoded frame proof");
+    let proof = segment_video_proof(video, frames)
+        .expect("positive bounded decoded frame count, timestamps and duration required");
+    let (video_time_base_num, video_time_base_den) = proof
+        .time_base
+        .split_once('/')
+        .and_then(|(numerator, denominator)| {
+            Some((
+                numerator.parse::<u64>().ok()?,
+                denominator.parse::<u64>().ok()?,
+            ))
+        })
+        .map_or((None, None), |(numerator, denominator)| {
+            (Some(numerator), Some(denominator))
+        });
     // The segment is a borrowed immutable byte slice throughout probe and decode;
     // retain content identity, not an API URL or an output capability.
-    eprintln!("normal_segment_video_proof sha256={:x} bytes={} frames={} sample_index={} duration_ticks={} time_base={}",
-        Sha256::digest(bytes), bytes.len(), proof.count, proof.sample_index, proof.duration_ticks, proof.time_base);
+    eprintln!(
+        "normal_segment_video_proof sha256={:x} bytes={} frames={} sample_index={} duration_ticks={} time_base={}",
+        Sha256::digest(bytes),
+        bytes.len(),
+        proof.count,
+        proof.sample_index,
+        proof.duration_ticks,
+        proof.time_base
+    );
+    let audio_diagnostic = segment_audio_diagnostic(audio, frames);
+    eprintln!(
+        "normal_segment_audio_probe {}",
+        json!({
+            "input_bytes": bytes.len(),
+            "segment_sha256": format!("{:x}", Sha256::digest(bytes)),
+            "video_decoded_frames": proof.count,
+            "video_duration_ticks": proof.duration_ticks,
+            "video_time_base_den": video_time_base_den,
+            "video_time_base_num": video_time_base_num,
+            "audio": audio_diagnostic,
+        })
+    );
     SEGMENT_VIDEO_PROOFS.with(|rows| {
         let mut rows = rows.borrow_mut();
         assert!(rows.len() < 64, "bounded segment proof summary required");
@@ -1959,7 +2127,7 @@ fn decode_segment_rgb(ffmpeg: &Path, bytes: &[u8]) -> Vec<u8> {
     output
 }
 
-fn decode_segment_pcm(ffmpeg: &Path, bytes: &[u8]) -> Vec<i16> {
+fn decode_segment_pcm(ffmpeg: &Path, bytes: &[u8], role: PcmProofRole) -> Vec<i16> {
     assert!(
         bytes.len() >= 188 && bytes.len() <= 8 * 1024 * 1024,
         "bounded TS output segment required"
@@ -1985,6 +2153,36 @@ fn decode_segment_pcm(ffmpeg: &Path, bytes: &[u8]) -> Vec<i16> {
         bytes,
         512 * 1024,
         false,
+    );
+    let (video_time_base_num, video_time_base_den) = SEGMENT_VIDEO_PROOFS.with(|rows| {
+        rows.borrow()
+            .last()
+            .and_then(|row| row["time_base"].as_str())
+            .and_then(|value| value.split_once('/'))
+            .and_then(|(numerator, denominator)| {
+                Some((
+                    numerator.parse::<u64>().ok()?,
+                    denominator.parse::<u64>().ok()?,
+                ))
+            })
+            .map_or((None, None), |(numerator, denominator)| {
+                (Some(numerator), Some(denominator))
+            })
+    });
+    eprintln!(
+        "normal_segment_pcm_probe {}",
+        json!({
+            "max_pcm_bytes": 16_000 * 2 * 8,
+            "min_pcm_bytes": 16_000 * 2,
+            "pcm_bytes": output.len(),
+            "pcm_even_bytes": output.len() % 2 == 0,
+            "pcm_samples": output.len() / 2,
+            "role": role.label(),
+            "segment_input_bytes": bytes.len(),
+            "segment_sha256": format!("{:x}", Sha256::digest(bytes)),
+            "video_time_base_den": video_time_base_den,
+            "video_time_base_num": video_time_base_num,
+        })
     );
     assert!(
         output.len() >= 16_000 * 2 && output.len() <= 16_000 * 2 * 8,
@@ -2545,7 +2743,7 @@ fn run_normal_production(mode: ProductionMode) {
         let y = [60, 180, 300][slot_id / 3];
         assert_cell_color(&rgb, x, y, (slot_id % 3 + 1) as u8);
     }
-    let pcm = decode_segment_pcm(&ffmpeg, &grid_segment);
+    let pcm = decode_segment_pcm(&ffmpeg, &grid_segment, PcmProofRole::Grid);
     assert_audio_tone(&pcm, 330.0);
 
     // Stop and close every real slot before the separate sustained replacement
@@ -2707,7 +2905,10 @@ fn run_normal_production(mode: ProductionMode) {
                     let rgb = decode_segment_rgb(&ffmpeg, &bytes);
                     assert_cell_color(&rgb, 160, 180, 1);
                     assert_cell_color(&rgb, 480, 180, 2);
-                    assert_audio_tone(&decode_segment_pcm(&ffmpeg, &bytes), 330.0);
+                    assert_audio_tone(
+                        &decode_segment_pcm(&ffmpeg, &bytes, PcmProofRole::InitialSustained),
+                        330.0,
+                    );
                     output_checked = true;
                 }
             }
@@ -2767,7 +2968,7 @@ fn run_normal_production(mode: ProductionMode) {
                         let ffmpeg =
                             PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFMPEG").unwrap());
                         let rgb = decode_segment_rgb(&ffmpeg, &bytes);
-                        let pcm = decode_segment_pcm(&ffmpeg, &bytes);
+                        let pcm = decode_segment_pcm(&ffmpeg, &bytes, PcmProofRole::Replacement);
                         assert!(
                             !cell_matches_color(&rgb, 160, 180, 1),
                             "old source A appeared in a newly published post-replacement segment"
@@ -2851,7 +3052,7 @@ fn run_normal_production(mode: ProductionMode) {
     );
     let late_ffmpeg = PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFMPEG").unwrap());
     let late_rgb = decode_segment_rgb(&late_ffmpeg, &late_segment);
-    let late_pcm = decode_segment_pcm(&late_ffmpeg, &late_segment);
+    let late_pcm = decode_segment_pcm(&late_ffmpeg, &late_segment, PcmProofRole::LateSustained);
     assert!(
         !cell_matches_color(&late_rgb, 160, 180, 1),
         "old video source returned in late HLS output"
