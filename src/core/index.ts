@@ -1235,6 +1235,7 @@ interface CoreStreamAttempt {
         pending: boolean;
         terminal: boolean;
     };
+    wantsReconnect(): boolean;
 }
 var coreStreamAttempt: CoreStreamAttempt | null = null;
 // Retained for the whole engine lease: an internal retry must not erase history.
@@ -1500,6 +1501,14 @@ function createCoreStreamAttempt(
         },
         state: function () {
             return { pending: pending, terminal: ended };
+        },
+        wantsReconnect: function () {
+            return (
+                droppedNetworkFailure &&
+                !ended &&
+                (window as any).forcePlay !== false &&
+                active()
+            );
         },
     };
 }
@@ -2717,23 +2726,21 @@ export function stbContinue(): void {
     if (stbIsStandby()) return;
     var handle = getCoreMediaBackend().current();
     if (!handle) return;
-    if (
-        coreStreamAttempt?.droppedHttp()
-            ? (window as any).forcePlay === false
-            : video && video.paused
-    )
+    if (coreStreamAttempt?.droppedHttp() || (video && video.paused))
         handle.resume();
     else handle.pause();
 }
-export function stbIsPlaying(): boolean {
+export function stbIsPlaying(forToggle = false): boolean {
     // A diagnostic clip is not the live channel: do not enter its catch-up path.
     if (coreAvTest && coreAvTest.active()) return false;
     var handle = getCoreMediaBackend().current();
     return (
         !!handle &&
         !!video &&
-        !video.paused &&
-        (handle.snapshot().phase !== "loading" || video.readyState >= 2)
+        ((forToggle && coreStreamAttempt?.wantsReconnect() === true) ||
+            (!video.paused &&
+                (handle.snapshot().phase !== "loading" ||
+                    video.readyState >= 2)))
     );
 }
 /**

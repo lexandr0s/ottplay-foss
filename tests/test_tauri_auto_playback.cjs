@@ -476,6 +476,36 @@ test("dropped HTTP does not reload playable media held by autoplay policy", () =
     assert.equal(f.w.coreStreamAttempt.state().pending, false);
 });
 
+test("dropped HTTP playback controls can pause recovery and explicitly resume it", () => {
+    const f = droppedHttpFixture();
+    f.w.coreMediaBackend = {
+        current: () => ({
+            pause: f.lease.pause,
+            resume: f.lease.resume,
+            snapshot: () => ({ phase: "loading" }),
+        }),
+    };
+    ready(f.w.video, true);
+    f.w.video.currentTime = 240;
+    f.w.video.paused = true;
+    f.w.video.error = { code: 2 };
+    f.w.video.emit("error");
+    f.advance(0);
+    assert.equal(f.w.stbIsPlaying(), false, "decoder is not playing");
+    assert.equal(f.w.stbIsPlaying(true), true, "toggle can pause the retry");
+    f.w.stbPause();
+    assert.equal(f.w.stbIsPlaying(true), false);
+    f.advance(500);
+    assert.equal(f.w.video.sourceHistory.filter(Boolean).length, 1);
+    // Classic and Modern set playback intent before invoking Continue.
+    f.w.forcePlay = true;
+    f.w.stbContinue();
+    f.advance(500);
+    ready(f.w.video, true);
+    assert.equal(f.w.video.currentTime, 240);
+    assert.equal(f.w.video.sourceHistory.filter(Boolean).length, 2);
+});
+
 test("Local native startup stall retries twice at its retained position then stops", () => {
     const f = localStallFixture();
     for (let retry = 0; retry < 2; retry++) {

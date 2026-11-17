@@ -845,8 +845,8 @@ const DESKTOP_DROP_PREFERENCES_ALLOWANCE = Object.freeze({
 });
 // Shared entry cost only. See docs/evidence/desktop-drop-recovery-size.json.
 const DESKTOP_DROP_RECOVERY_ALLOWANCE = Object.freeze({
-    bytes: 1465,
-    gzipBytes: 470,
+    bytes: 1611,
+    gzipBytes: 501,
 });
 // Bounded recovery after relay failure adds 425 raw and at most 259 gzip bytes.
 // Existing raw caps cover the change. Count the measured gzip cost once per

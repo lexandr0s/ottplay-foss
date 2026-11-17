@@ -1513,6 +1513,30 @@ export function installLocalMedia(w: any): any {
             catalogRevision++;
             stopLocalRead();
         },
+        captureDroppedHttpFile: function (
+            url: string
+        ): (() => boolean) | undefined {
+            var drop = currentDrop();
+            var driver = w.__ottActiveProviderDriver;
+            if (
+                !drop ||
+                localField(driver, "id") !== "offline" ||
+                last !== drop.catalog ||
+                !/^https?:\/\//i.test(url)
+            )
+                return;
+            var item = playbackItem(url);
+            if (
+                (localField(item, "type") !== "stream" &&
+                    (localField(item, "source") !== "linked" ||
+                        localField(item, "size") !== 0)) ||
+                api.playbackTransport(url) !== "file"
+            )
+                return;
+            return function () {
+                return driver === w.__ottActiveProviderDriver && ownsDrop(drop);
+            };
+        },
         compatibilityFailure: function () {
             if (typeof w.showShift === "function")
                 w.showShift(w._("Local source unavailable"));
@@ -1531,6 +1555,22 @@ export function installLocalMedia(w: any): any {
                 return { id: source.id, kind: source.kind, name: source.name };
             });
         },
+        cycleDroppedRepeat: function (): boolean {
+            var mode = api.droppedRepeatMode();
+            if (!mode) return false;
+            var drop = currentDrop();
+            var draft = w.__ottPlayerSettingsHost?.store?.begin(true);
+            if (draft) {
+                draft.set(
+                    "droppedFileRepeat",
+                    (dropRepeatModes.indexOf(mode) + 1) % dropRepeatModes.length
+                );
+                draft.commit(undefined, function () {
+                    return currentDrop() === drop;
+                });
+            }
+            return true;
+        },
         deferQueueEnd: function (source: string, resume: () => void): boolean {
             var state =
                 typeof source === "string" && queueState(queueCatalog, source);
@@ -1542,6 +1582,14 @@ export function installLocalMedia(w: any): any {
             retireRemotePlayback();
             catalogRevision++;
             last = null;
+        },
+        droppedRepeatMode: function (): string | undefined {
+            if (
+                localField(w.__ottActiveProviderDriver, "id") !== "offline" ||
+                !currentDrop()
+            )
+                return undefined;
+            return dropRepeatModes[w.settings?.droppedFileRepeat] || "all";
         },
         failureMessage: failureMessage,
         favoriteSnapshot: function () {
@@ -1568,56 +1616,8 @@ export function installLocalMedia(w: any): any {
             };
         },
         finishSession: finishSession,
-        droppedRepeatMode: function (): string | undefined {
-            if (
-                localField(w.__ottActiveProviderDriver, "id") !== "offline" ||
-                !currentDrop()
-            )
-                return undefined;
-            return dropRepeatModes[w.settings?.droppedFileRepeat] || "all";
-        },
-        cycleDroppedRepeat: function (): boolean {
-            var mode = api.droppedRepeatMode();
-            if (!mode) return false;
-            var drop = currentDrop();
-            var draft = w.__ottPlayerSettingsHost?.store?.begin(true);
-            if (draft) {
-                draft.set(
-                    "droppedFileRepeat",
-                    (dropRepeatModes.indexOf(mode) + 1) % dropRepeatModes.length
-                );
-                draft.commit(undefined, function () {
-                    return currentDrop() === drop;
-                });
-            }
-            return true;
-        },
         hasDroppedVideo: function (): boolean {
             return ownsDrop(droppedPlayback);
-        },
-        captureDroppedHttpFile: function (
-            url: string
-        ): (() => boolean) | undefined {
-            var drop = currentDrop();
-            var driver = w.__ottActiveProviderDriver;
-            if (
-                !drop ||
-                localField(driver, "id") !== "offline" ||
-                last !== drop.catalog ||
-                !/^https?:\/\//i.test(url)
-            )
-                return;
-            var item = playbackItem(url);
-            if (
-                (localField(item, "type") !== "stream" &&
-                    (localField(item, "source") !== "linked" ||
-                        localField(item, "size") !== 0)) ||
-                api.playbackTransport(url) !== "file"
-            )
-                return;
-            return function () {
-                return driver === w.__ottActiveProviderDriver && ownsDrop(drop);
-            };
         },
         importFiles: importFiles,
         isDroppedCatalog: function (value: any): boolean {

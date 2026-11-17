@@ -177,7 +177,7 @@ public class MainActivity extends BridgeActivity {
                     script = dispatchKey("RETURN");
                     break;
                 case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
-                    script = "if(window.stbIsPlaying&&window.stbIsPlaying()){if(window.stbPause)window.stbPause();}else if(window.stbContinue)window.stbContinue();";
+                    script = "if(window.stbIsPlaying&&window.stbIsPlaying(true)){if(window.stbPause)window.stbPause();}else if(window.stbContinue)window.stbContinue();";
                     mediaAction = true;
                     break;
                 case KeyEvent.KEYCODE_MEDIA_PLAY:
