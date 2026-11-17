@@ -46,6 +46,7 @@ function fixture(managed = false) {
         },
     };
     const c = {
+        _coreNativeAttempt: 0,
         _corePendingSeekPosition: null,
         _corePipSession: 0,
         _inLiveRestart: false,
@@ -61,6 +62,7 @@ function fixture(managed = false) {
         coreDeviceEffects: {},
         coreLiveRecovery: null,
         coreMediaBackend: null,
+        coreStreamAttempt: null,
         curList: [101, 202],
         Date,
         document: { getElementById: () => null },
