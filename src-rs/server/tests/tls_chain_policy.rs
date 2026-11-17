@@ -217,6 +217,108 @@ fn read_prefix(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+// OpenSSL 3.5 apps_ssl_info_callback state labels, not evidence of bytes sent
+// or completed reads. A negative callback exit is not necessarily fatal.
+fn handshake_state_evidence(bytes: &[u8], truncated: bool) -> String {
+    const STATES: &[(&str, &str)] = &[
+        ("before SSL initialization", "BeforeInit"),
+        ("SSLv3/TLS write client hello", "AtClientHello"),
+        ("SSLv3/TLS read server hello", "AtServerHello"),
+        ("TLSv1.3 read encrypted extensions", "AtEncryptedExtensions"),
+        ("SSLv3/TLS read server certificate", "AtCertificate"),
+        (
+            "TLSv1.3 read server certificate verify",
+            "AtCertificateVerify",
+        ),
+        ("SSLv3/TLS read server key exchange", "AtServerKeyExchange"),
+        ("SSLv3/TLS read server done", "AtServerDone"),
+        ("SSLv3/TLS write client key exchange", "AtClientKeyExchange"),
+        ("SSLv3/TLS write change cipher spec", "AtWriteChangeCipher"),
+        ("SSLv3/TLS read change cipher spec", "AtReadChangeCipher"),
+        ("SSLv3/TLS write finished", "AtWriteFinished"),
+        ("SSLv3/TLS read finished", "AtReadFinished"),
+        ("SSL negotiation finished successfully", "AtNegotiated"),
+        ("SSLv3/TLS read server session ticket", "AtSessionTicket"),
+        ("error", "AtErrorState"),
+    ];
+    let complete = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |i| i + 1);
+    let (mut seen_state, mut last_state, mut unknown, mut exit_zero, mut exit_negative) =
+        (0u16, "Unobserved", 0usize, 0usize, 0usize);
+    for line in bytes[..complete]
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let Ok(line) = std::str::from_utf8(line) else {
+            unknown += 1;
+            continue;
+        };
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.starts_with("-----BEGIN ") {
+            break;
+        }
+        let Some(state) = line.strip_prefix("SSL_connect:") else {
+            unknown += 1;
+            continue;
+        };
+        let state = if let Some(state) = state.strip_prefix("error in ") {
+            exit_negative += 1;
+            state
+        } else if let Some(state) = state.strip_prefix("failed in ") {
+            exit_zero += 1;
+            state
+        } else {
+            state
+        };
+        if let Some((index, (_, name))) = STATES
+            .iter()
+            .enumerate()
+            .find(|(_, (raw, _))| *raw == state)
+        {
+            seen_state |= 1u16 << index;
+            last_state = name;
+        } else {
+            unknown += 1;
+        }
+    }
+    format!("seen_state={seen_state} last_state={last_state} callback_exit_zero={exit_zero} callback_exit_negative={exit_negative} unobserved_lines={unknown} partial={} truncated={truncated}", complete != bytes.len())
+}
+
+// None means not attempted; Some records only the API's success/failure.
+// A successful kill does not imply reap or cleanup of unrelated descendants.
+#[derive(Default)]
+struct ClientLifecycle {
+    spawn: Option<bool>,
+    stdin_written: Option<bool>,
+    exit_success: Option<bool>,
+    poll_error: bool,
+    kill: Option<bool>,
+    reap: Option<bool>,
+}
+fn stop_client(client: &mut Child, lifecycle: &mut ClientLifecycle) {
+    lifecycle.kill = Some(client.kill().is_ok());
+    let result = client.wait();
+    lifecycle.reap = Some(result.is_ok());
+    if let Ok(status) = result {
+        lifecycle.exit_success = Some(status.success());
+    }
+}
+fn attempt_diagnostics(
+    path: &Path,
+    case: &str,
+    lifecycle: &ClientLifecycle,
+    started: Instant,
+) -> String {
+    format!(
+        "spawn={:?} stdin_written={:?} exit_success={:?} poll_error={} kill={:?} reap={:?}; elapsed_ms={}; {}",
+        lifecycle.spawn, lifecycle.stdin_written, lifecycle.exit_success,
+        lifecycle.poll_error, lifecycle.kill, lifecycle.reap,
+        started.elapsed().as_millis(), client_diagnostics(path, case)
+    )
+}
+
 fn client_diagnostics(path: &Path, case: &str) -> String {
     let stdout_path = path.join("client.stdout.log");
     let stdout = match (fs::metadata(&stdout_path), read_prefix(&stdout_path, 12)) {
@@ -235,9 +337,13 @@ fn client_diagnostics(path: &Path, case: &str) -> String {
         }
         Err(error) => format!("unavailable: {error}"),
     };
+    let stderr_path = path.join("client.stderr.log");
+    let states = match (fs::metadata(&stderr_path), read_prefix(&stderr_path, 2048)) {
+        (Ok(metadata), Ok(bytes)) => handshake_state_evidence(&bytes, metadata.len() > 2048),
+        _ => "unobserved=stderr_read_error".to_owned(),
+    };
     format!(
-        "fixture: {case}\nclient stdout: {stdout}\nclient stderr (up to 2048 bytes, before any PEM):\n{}\nserver log (up to 8192 bytes, before any PEM):\n{}",
-        excerpt("client.stderr.log", 2048),
+        "fixture: {case}\nclient stdout: {stdout}\nclient TLS states (bounded prefix, unknown lines omitted):\n{states}\nserver log (up to 8192 bytes, before any PEM):\n{}",
         excerpt("server.log", 8192)
     )
 }
@@ -246,10 +352,13 @@ fn verified_health(path: &Path, port: u16, case: &str) {
     // Files cannot back up an unread pipe while the parent waits for exit.
     let stdout = fs::File::create(path.join("client.stdout.log")).unwrap();
     let stderr = fs::File::create(path.join("client.stderr.log")).unwrap();
-    let mut client = Command::new("openssl")
+    let started = Instant::now();
+    let mut lifecycle = ClientLifecycle::default();
+    let spawned = Command::new("openssl")
         .args([
             "s_client",
             "-quiet",
+            "-state",
             "-connect",
             &format!("127.0.0.1:{port}"),
             "-CAfile",
@@ -262,34 +371,68 @@ fn verified_health(path: &Path, port: u16, case: &str) {
         .stdin(Stdio::piped())
         .stdout(stdout)
         .stderr(stderr)
-        .spawn()
-        .unwrap();
-    client
+        .spawn();
+    lifecycle.spawn = Some(spawned.is_ok());
+    let mut client = spawned.unwrap_or_else(|_| {
+        panic!(
+            "HTTPS client spawn failed; {}",
+            attempt_diagnostics(path, case, &lifecycle, started)
+        )
+    });
+    let written = client
         .stdin
         .take()
         .unwrap()
-        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .unwrap();
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    lifecycle.stdin_written = Some(written.is_ok());
+    if written.is_err() {
+        stop_client(&mut client, &mut lifecycle);
+        panic!(
+            "HTTPS client stdin failed; {}",
+            attempt_diagnostics(path, case, &lifecycle, started)
+        );
+    }
     let deadline = Instant::now() + Duration::from_secs(5);
-    while client.try_wait().unwrap().is_none() {
+    while client
+        .try_wait()
+        .unwrap_or_else(|_| {
+            lifecycle.poll_error = true;
+            stop_client(&mut client, &mut lifecycle);
+            panic!(
+                "HTTPS client exit poll failed; {}",
+                attempt_diagnostics(path, case, &lifecycle, started)
+            )
+        })
+        .is_none()
+    {
         if Instant::now() >= deadline {
-            let _ = client.kill();
-            let _ = client.wait();
-            panic!("HTTPS client timeout; {}", client_diagnostics(path, case));
+            stop_client(&mut client, &mut lifecycle);
+            panic!(
+                "HTTPS client timeout; {}",
+                attempt_diagnostics(path, case, &lifecycle, started)
+            );
         }
         thread::sleep(Duration::from_millis(10));
     }
-    let status = client.wait().unwrap();
+    let reaped = client.wait();
+    lifecycle.reap = Some(reaped.is_ok());
+    let status = reaped.unwrap_or_else(|_| {
+        panic!(
+            "HTTPS client reap failed; {}",
+            attempt_diagnostics(path, case, &lifecycle, started)
+        )
+    });
+    lifecycle.exit_success = Some(status.success());
     let stdout = read_prefix(&path.join("client.stdout.log"), 12).unwrap();
     assert!(
         status.success(),
         "HTTPS verification failed: {status}\n{}",
-        client_diagnostics(path, case)
+        attempt_diagnostics(path, case, &lifecycle, started)
     );
     assert!(
         stdout.starts_with(b"HTTP/1.1 200"),
         "Unexpected HTTPS response: {}",
-        client_diagnostics(path, case)
+        attempt_diagnostics(path, case, &lifecycle, started)
     );
 }
 
@@ -319,8 +462,12 @@ fn client_diagnostics_are_useful_bounded_and_do_not_disclose_payloads() {
         assert!(report.contains("synthetic formatter case"));
         assert!(report.contains(&format!("{} bytes", stdout.len())));
         assert!(report.contains("HTTP 200 prefix: true"));
-        assert!(report.contains("before-pem"));
-        assert!(report.contains("ordinary diagnostic"));
+        if redacted_log == "server.log" {
+            assert!(report.contains("before-pem"));
+        } else {
+            assert!(report.contains("ordinary diagnostic"));
+        }
+        assert!(report.contains("last_state=Unobserved"));
         for hidden in [
             "PRIVATE_RESPONSE_BODY",
             "PEM_PAYLOAD_SENTINEL",
@@ -333,6 +480,50 @@ fn client_diagnostics_are_useful_bounded_and_do_not_disclose_payloads() {
             "failure diagnostics must stay bounded"
         );
     }
+    let evidence = handshake_state_evidence(
+        b"SSL_connect:SSLv3/TLS write client hello\r\nSSL_connect:error in SSLv3/TLS read server hello\nSSL_connect:failed in error\nCLIENT_CANARY_URL_SECRET\nSSL_connect:SSL negotiation finished successfully",
+        true,
+    );
+    assert!(evidence.contains("seen_state=32774"));
+    assert!(evidence.contains("last_state=AtErrorState"));
+    assert!(evidence.contains("callback_exit_zero=1 callback_exit_negative=1"));
+    assert!(!evidence
+        .split_whitespace()
+        .any(|field| field.starts_with("exit_zero=")));
+    assert!(!evidence
+        .split_whitespace()
+        .any(|field| field.starts_with("exit_negative=")));
+    assert!(evidence.contains("unobserved_lines=1 partial=true truncated=true"));
+    assert!(!evidence.contains("CLIENT_CANARY"));
+    assert!(!evidence.contains("AtNegotiated"));
+    let after_pem = handshake_state_evidence(
+        b"-----BEGIN SYNTHETIC DATA-----\nSSL_connect:SSL negotiation finished successfully\n",
+        false,
+    );
+    assert!(after_pem.contains("seen_state=0 last_state=Unobserved"));
+    fs::write(
+        fixture.0.join("client.stderr.log"),
+        b"CLIENT_CANARY_URL_SECRET\n",
+    )
+    .unwrap();
+    let lifecycle = ClientLifecycle {
+        spawn: Some(true),
+        stdin_written: Some(true),
+        exit_success: Some(false),
+        poll_error: false,
+        kill: Some(true),
+        reap: Some(true),
+    };
+    let report = attempt_diagnostics(
+        &fixture.0,
+        "synthetic lifecycle",
+        &lifecycle,
+        Instant::now(),
+    );
+    assert!(report.contains("spawn=Some(true)"));
+    assert!(report.contains("stdin_written=Some(true)"));
+    assert!(report.contains("kill=Some(true) reap=Some(true)"));
+    assert!(!report.contains("CLIENT_CANARY"));
 }
 
 #[test]

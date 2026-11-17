@@ -193,25 +193,53 @@ for (const viewport of [
         }
         const cards = page.locator(".remote-notify");
         await expect(cards).toHaveCount(3);
-        // Measure the resting layout, not an intermediate slide-in frame.
-        // Keep the real animation enabled and wait for its actual completion.
-        await cards.evaluateAll(async (nodes) => {
-            await Promise.all(
-                nodes.map((node) => {
-                    const entrance = node
-                        .getAnimations()
-                        .find(
-                            (animation) =>
-                                animation.animationName === "remoteNotifyIn"
-                        );
-                    if (!entrance)
-                        throw new Error(
-                            "Notification entrance animation missing"
-                        );
-                    return entrance.finished;
-                })
-            );
+        // Sample the real timelines inside their 480–980ms hold phase.
+        // Browser roundtrips must not move layout assertions into the fade.
+        const surfaces = await cards.evaluateAll((nodes) => {
+            const expectedNames = [
+                "remoteNotifyFade",
+                "remoteNotifyFade",
+                "remoteNotifyFade",
+                "remoteNotifyIn",
+                "remoteNotifySurfaceIn",
+                "remoteNotifySurfaceIn",
+                "remoteNotifySurfaceIn",
+            ];
+            return nodes.map((node) => {
+                const animations = node.getAnimations({ subtree: true });
+                const names = animations
+                    .map((animation) => animation.animationName)
+                    .filter(
+                        (name) =>
+                            ![
+                                "remoteNotifyActivity",
+                                "remoteNotifyFold",
+                                "remoteNotifyHeadingUp",
+                            ].includes(name)
+                    )
+                    .sort();
+                if (JSON.stringify(names) !== JSON.stringify(expectedNames))
+                    throw new Error(
+                        "Notification presentation animations missing or unexpected"
+                    );
+                for (const animation of animations) {
+                    animation.pause();
+                    animation.currentTime = 700;
+                }
+                return {
+                    content: getComputedStyle(
+                        node.querySelector(".remote-notify-content")
+                    ).opacity,
+                    icon: getComputedStyle(
+                        node.querySelector(".remote-notify-icon")
+                    ).opacity,
+                    surface: getComputedStyle(node, "::before").opacity,
+                };
+            });
         });
+        expect(surfaces).toEqual(
+            Array(3).fill({ content: "1", icon: "1", surface: "1" })
+        );
         await expect(cards.first()).toHaveCSS("opacity", "1");
         const geometry = await cards.evaluateAll((nodes) =>
             nodes.map((node) => {
