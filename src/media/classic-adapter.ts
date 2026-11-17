@@ -224,7 +224,11 @@ function classicMediaProgramme(): any {
                 : null;
             if (neighbour) channel = { id: neighbour.id, list: list };
         }
-        if (mediaClassicInstance?.active())
+        var dropMode = local
+            ? w.__ottLocalMedia?.droppedRepeatMode?.()
+            : undefined;
+        if (dropMode) mode = dropMode;
+        else if (mediaClassicInstance?.active())
             mode = mediaClassicInstance.repeatMode();
         else {
             var saved = w.providerGetItem?.(
@@ -831,7 +835,7 @@ function classicMediaRuntime(): any {
     }
     function decorate(view: any) {
         view.canFilter = !plexLibrary();
-        view.repeat = repeat;
+        view.repeat = api.repeatMode();
         view.shuffle = shuffleRequest
             ? "loading"
             : mediaClassicPlayback &&
@@ -1329,9 +1333,10 @@ function classicMediaRuntime(): any {
         var folderId = folderLoop
             ? w.__ottKiosk.folderNext(channel.id, members)
             : null;
+        var mode = api.repeatMode();
         if (
             natural &&
-            (folderLoop || (!pinned && repeat !== "one")) &&
+            (folderLoop || (!pinned && mode !== "one")) &&
             (index + direction >= members.length ||
                 (folderLoop && members.indexOf(folderId) <= index)) &&
             w.__ottLocalMedia?.deferQueueEnd?.(
@@ -1359,8 +1364,8 @@ function classicMediaRuntime(): any {
             return;
         }
         var next =
-            natural && (pinned || repeat === "one") ? index : index + direction;
-        if (natural && !pinned && repeat === "off" && next >= members.length)
+            natural && (pinned || mode === "one") ? index : index + direction;
+        if (natural && !pinned && mode === "off" && next >= members.length)
             return;
         next = ((next % members.length) + members.length) % members.length;
         var category = channel.list.category();
@@ -1734,6 +1739,10 @@ function classicMediaRuntime(): any {
             api.cancelAuto();
             if (!current() || !admitted() || automaticGeneration !== revision)
                 return;
+            if (w.__ottLocalMedia?.cycleDroppedRepeat?.()) {
+                if (current() && admitted()) updateControls();
+                return;
+            }
             repeat =
                 repeat === "all" ? "one" : repeat === "one" ? "off" : "all";
             if (mediaClassicPlayback && mediaClassicPlayback.runtime === api) {
@@ -2668,7 +2677,7 @@ function classicMediaRuntime(): any {
                 api.select(indexes[Math.floor(Math.random() * indexes.length)]);
         },
         repeatMode: function () {
-            return repeat;
+            return w.__ottLocalMedia?.droppedRepeatMode?.() || repeat;
         },
         restoreKiosk: function (selection: any, guard: () => boolean) {
             if (

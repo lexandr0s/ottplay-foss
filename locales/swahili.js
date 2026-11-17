@@ -386,6 +386,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO mipangilio",
     "Drop one video file at a time":
         "Buruta na udondoshe faili moja ya video kwa wakati mmoja",
+    "Dropped files": "Faili zilizoburutwa na kudondoshwa",
     Duration: "Muda",
     Edit: "Hariri",
     "Edit access key": "Badilisha ufunguo wa ufikiaji",

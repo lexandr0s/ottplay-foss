@@ -384,6 +384,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Issettjar ta’ Dragon Media PRO",
     "Drop one video file at a time":
         "Iddreggja u qiegħed fajl tal-vidjo wieħed kull darba",
+    "Dropped files": "Fajls miżjuda bit-tkaxkir",
     Duration: "Tul",
     Edit: "Editja",
     "Edit access key": "Editja ċ-ċavetta tal-aċċess",

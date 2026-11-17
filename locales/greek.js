@@ -398,6 +398,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Ρυθμίσεις Dragon Media PRO",
     "Drop one video file at a time":
         "Σύρετε και αποθέστε ένα αρχείο βίντεο κάθε φορά",
+    "Dropped files": "Αρχεία που έχουν αποτεθεί",
     Duration: "Διάρκεια",
     Edit: "Επεξεργασία",
     "Edit access key": "Επεξεργασία κλειδιού πρόσβασης",

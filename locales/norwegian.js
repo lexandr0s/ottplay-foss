@@ -376,6 +376,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Dragon Media PRO innstillinger",
     "Drop one video file at a time": "Dra og slipp én videofil om gangen",
+    "Dropped files": "Filer lagt til med dra og slipp",
     Duration: "Varighet",
     Edit: "Rediger",
     "Edit access key": "Rediger tilgangsnøkkel",

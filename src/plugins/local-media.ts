@@ -10,6 +10,7 @@ import {
 import {
     createLocalPlaybackSelection,
     localSourceScan,
+    orderLocalItems,
 } from "../offline/playback-selection";
 import { installOfflineProfiles } from "../offline/profiles";
 import { resolveNativePlugin, tauriInvoke } from "./native-bridge";
@@ -48,6 +49,7 @@ export function installLocalMedia(w: any): any {
     var remoteLinkSequence = 0;
     // The drop belongs to a playback session, never to the saved Local library.
     var droppedPlayback: any = null;
+    var dropRepeatModes = ["all", "one", "off"];
     function releaseDrop(drop: any): void {
         if (!drop || drop.released) return;
         drop.released = true;
@@ -1566,6 +1568,30 @@ export function installLocalMedia(w: any): any {
             };
         },
         finishSession: finishSession,
+        droppedRepeatMode: function (): string | undefined {
+            if (
+                localField(w.__ottActiveProviderDriver, "id") !== "offline" ||
+                !currentDrop()
+            )
+                return undefined;
+            return dropRepeatModes[w.settings?.droppedFileRepeat] || "all";
+        },
+        cycleDroppedRepeat: function (): boolean {
+            var mode = api.droppedRepeatMode();
+            if (!mode) return false;
+            var drop = currentDrop();
+            var draft = w.__ottPlayerSettingsHost?.store?.begin(true);
+            if (draft) {
+                draft.set(
+                    "droppedFileRepeat",
+                    (dropRepeatModes.indexOf(mode) + 1) % dropRepeatModes.length
+                );
+                draft.commit(undefined, function () {
+                    return currentDrop() === drop;
+                });
+            }
+            return true;
+        },
         hasDroppedVideo: function (): boolean {
             return ownsDrop(droppedPlayback);
         },
@@ -1738,7 +1764,6 @@ export function installLocalMedia(w: any): any {
                 )
                     throw new Error("Dropped video is unavailable");
                 var seen: any = Object.create(null);
-                var ids: string[] = [];
                 for (var i = 0; i < catalog.items.length; i++) {
                     var item = catalog.items[i];
                     if (
@@ -1754,10 +1779,20 @@ export function installLocalMedia(w: any): any {
                     )
                         throw new Error("Dropped video is unavailable");
                     seen[item.id] = true;
-                    ids.push(item.id);
                 }
                 drop.catalog = JSON.parse(JSON.stringify(catalog));
                 drop.catalog.persistent = false;
+                if (
+                    w.settings?.droppedFileShuffle === 1 &&
+                    catalog.items.length > 1
+                )
+                    drop.catalog.items = orderLocalItems(
+                        drop.catalog.items,
+                        Math.floor(Math.random() * 4294967295) + 1
+                    );
+                var ids = drop.catalog.items.map(function (item: any) {
+                    return item.id;
+                });
                 var previous = droppedPlayback;
                 // An unaccepted older request has no driver disposer.
                 if (previous && !previous.sessionCurrent) releaseDrop(previous);

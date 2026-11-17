@@ -376,6 +376,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Dragon Media PRO ဆက်တင်များ",
     "Drop one video file at a time": "တစ်ကြိမ်လျှင် ဗီဒီယိုဖိုင်တစ်ဖိုင်သာ ဆွဲယူပြီး ချပါ",
+    "Dropped files": "ဆွဲယူချထားသော ဖိုင်များ",
     Duration: "ကြာချိန်",
     Edit: "တည်းဖြတ်ပါ။",
     "Edit access key": "ဝင်ရောက်ခွင့်သော့ကို တည်းဖြတ်ပါ။",

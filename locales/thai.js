@@ -366,6 +366,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "การตั้งค่า Dragon Media PRO",
     "Drop one video file at a time": "ลากและวางไฟล์วิดีโอทีละหนึ่งไฟล์",
+    "Dropped files": "ไฟล์ที่ลากมาวาง",
     Duration: "ระยะเวลา",
     Edit: "แก้ไข",
     "Edit access key": "แก้ไขคีย์การเข้าถึง",

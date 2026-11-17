@@ -393,6 +393,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Fikirakirana Dragon Media PRO",
     "Drop one video file at a time":
         "Tariho ary alatsaho tsirairay ny rakitra horonan-tsary",
+    "Dropped files": "Rakitra notarihina sy nalatsaka",
     Duration: "Faharetana",
     Edit: "Ovao",
     "Edit access key": "Ovao ny fanalahidy fidirana",

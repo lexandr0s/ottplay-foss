@@ -358,6 +358,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "ການຕັ້ງຄ່າ Dragon Media PRO",
     "Drop one video file at a time": "ລາກແລ້ວວາງໄຟລ໌ວິດີໂອເທື່ອລະໜຶ່ງໄຟລ໌",
+    "Dropped files": "ໄຟລ໌ທີ່ລາກມາວາງ",
     Duration: "ໄລຍະເວລາ",
     Edit: "ແກ້ໄຂ",
     "Edit access key": "ແກ້ໄຂກະແຈເຂົ້າໃຊ້",

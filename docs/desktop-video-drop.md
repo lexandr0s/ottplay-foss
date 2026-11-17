@@ -28,6 +28,8 @@ An offer contains at most 128 selected files, at most 128 native local-video gra
 
 Each drop accepts 1–128 files in the order supplied by the operating system or browser. That order may differ from the order in which you clicked files in Finder or Explorer. The channel list displays the queue, and the normal previous/next controls and Repeat setting apply. Files with identical names remain separate queue entries.
 
+In **Settings → Interface settings**, **Dropped files · Shuffle** starts each new drop in a fresh random order. The queue then keeps that order. **Dropped files** selects **Repeat: All**, **Repeat: One**, or **Repeat: Off** for the dropped queue. These preferences are saved independently of the normal Local videos library. Repeat also applies to the current drop and can be changed under Actions. Repeat One replays the current file on completion; the previous and next controls can still choose a different file. Defaults are Shuffle Off and Repeat All.
+
 A new accepted drop replaces the previous temporary queue. It does not append to it. If any selected file is a directory, unsupported, empty, or unavailable during preparation, the whole new drop is rejected and the previous playback remains intact. A drag cursor may show a copy symbol; the player does not copy the original media into its library.
 
 The native player prepares one drop request at a time, including all files in that drop. Wait for preparation to finish before dropping or opening another selection; additional requests during validation or handoff are not queued.

@@ -366,6 +366,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Dragon Media PRO ਸੈਟਿੰਗਾਂ",
     "Drop one video file at a time": "ਇੱਕ ਵਾਰ ਵਿੱਚ ਇੱਕ ਵੀਡੀਓ ਫ਼ਾਈਲ ਖਿੱਚ ਕੇ ਛੱਡੋ",
+    "Dropped files": "ਖਿੱਚ ਕੇ ਛੱਡੀਆਂ ਫ਼ਾਈਲਾਂ",
     Duration: "ਮਿਆਦ",
     Edit: "ਸੰਪਾਦਿਤ ਕਰੋ",
     "Edit access key": "ਪਹੁੰਚ ਕੁੰਜੀ ਦਾ ਸੰਪਾਦਨ ਕਰੋ",

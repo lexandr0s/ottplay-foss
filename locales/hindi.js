@@ -374,6 +374,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Dragon Media PRO सेटिंग्स",
     "Drop one video file at a time": "एक बार में एक वीडियो फ़ाइल खींचकर छोड़ें",
+    "Dropped files": "खींचकर छोड़ी गई फ़ाइलें",
     Duration: "अवधि",
     Edit: "संपादित करें",
     "Edit access key": "एक्सेस कुंजी संपादित करें",

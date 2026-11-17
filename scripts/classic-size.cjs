@@ -837,6 +837,12 @@ const DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE = Object.freeze({
     bytes: 1000,
     gzipBytes: 400,
 });
+// Queue order/persistence lives in the entry, and the selectors remain lazy.
+// Evidence: docs/evidence/desktop-drop-preferences-size.json.
+const DESKTOP_DROP_PREFERENCES_ALLOWANCE = Object.freeze({
+    entry: Object.freeze({ bytes: 1327, gzipBytes: 381 }),
+    appearance: Object.freeze({ bytes: 330, gzipBytes: 127 }),
+});
 // Bounded recovery after relay failure adds 425 raw and at most 259 gzip bytes.
 // Existing raw caps cover the change. Count the measured gzip cost once per
 // entry and aggregate; preserve identity headroom and unrelated asset caps.
@@ -946,6 +952,7 @@ const BUDGET = Object.freeze({
         CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE.entry.bytes +
         DESKTOP_DROP_ALLOWANCE.entry.bytes +
         DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.bytes +
+        DESKTOP_DROP_PREFERENCES_ALLOWANCE.entry.bytes +
         NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE.bytes +
         FAVORITES_CATEGORY_PERSISTENCE_ALLOWANCE.entry.bytes +
         LOCAL_FAVORITE_WRITE_RECOVERY_ALLOWANCE.entry.bytes +
@@ -989,6 +996,7 @@ const BUDGET = Object.freeze({
         CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE.entry.gzipBytes +
         DESKTOP_DROP_ALLOWANCE.entry.gzipBytes +
         DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.gzipBytes +
+        DESKTOP_DROP_PREFERENCES_ALLOWANCE.entry.gzipBytes +
         VIDEO_FIT_LIFECYCLE_ENTRY_ALLOWANCE.gzipBytes +
         AUTO_RELAY_STALL_RECOVERY_ENTRY_ALLOWANCE.gzipBytes +
         NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE.gzipBytes +
@@ -1214,6 +1222,7 @@ const LEGACY_TOTAL_BUDGET = Object.freeze({
         CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE.entry.bytes +
         DESKTOP_DROP_ALLOWANCE.entry.bytes +
         DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.bytes +
+        DESKTOP_DROP_PREFERENCES_ALLOWANCE.entry.bytes +
         NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE.bytes +
         FAVORITES_CATEGORY_PERSISTENCE_ALLOWANCE.entry.bytes +
         LOCAL_FAVORITE_WRITE_RECOVERY_ALLOWANCE.entry.bytes +
@@ -1272,6 +1281,7 @@ const LEGACY_TOTAL_BUDGET = Object.freeze({
         CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE.entry.gzipBytes +
         DESKTOP_DROP_ALLOWANCE.entry.gzipBytes +
         DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.gzipBytes +
+        DESKTOP_DROP_PREFERENCES_ALLOWANCE.entry.gzipBytes +
         VIDEO_FIT_LIFECYCLE_ENTRY_ALLOWANCE.gzipBytes +
         AUTO_RELAY_STALL_RECOVERY_ENTRY_ALLOWANCE.gzipBytes +
         NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE.gzipBytes +
@@ -1474,6 +1484,7 @@ const OPTIONAL_BUDGETS = Object.freeze({
     "subtitle-appearance": Object.freeze({
         bytes:
             TIMEZONE_LOCAL_STARTUP_ALLOWANCE.appearance.bytes +
+            DESKTOP_DROP_PREFERENCES_ALLOWANCE.appearance.bytes +
             INTERFACE_FONT_CSP_ASSET_CORRECTION.bytes +
             PLAYBACK_NOTIFICATION_APPEARANCE_ALLOWANCE.bytes +
             CLIENT_INTERFACE_COLORS_ALLOWANCE.appearance.bytes +
@@ -1483,6 +1494,7 @@ const OPTIONAL_BUDGETS = Object.freeze({
             MODERN_INTERFACE_RELATED_ALLOWANCES["subtitle-appearance"].bytes,
         gzipBytes:
             TIMEZONE_LOCAL_STARTUP_ALLOWANCE.appearance.gzipBytes +
+            DESKTOP_DROP_PREFERENCES_ALLOWANCE.appearance.gzipBytes +
             INTERFACE_FONT_CSP_ASSET_CORRECTION.gzipBytes +
             PLAYBACK_NOTIFICATION_APPEARANCE_ALLOWANCE.gzipBytes +
             CLIENT_INTERFACE_COLORS_ALLOWANCE.appearance.gzipBytes +
@@ -1507,6 +1519,7 @@ const BASE_TOTAL_BUDGET = Object.freeze({
         SEEK_PREVIEW_ENTRY_ALLOWANCE.bytes +
         TIMEZONE_LOCAL_STARTUP_ALLOWANCE.entry.bytes +
         TIMEZONE_LOCAL_STARTUP_ALLOWANCE.appearance.bytes +
+        DESKTOP_DROP_PREFERENCES_ALLOWANCE.appearance.bytes +
         CLIENT_INTERFACE_COLORS_ALLOWANCE.entry.bytes +
         CLIENT_INTERFACE_COLORS_ALLOWANCE.providerEdem.bytes +
         CLIENT_INTERFACE_COLORS_ALLOWANCE.appearance.bytes +
@@ -1520,6 +1533,7 @@ const BASE_TOTAL_BUDGET = Object.freeze({
         CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE.appearance.bytes +
         DESKTOP_DROP_ALLOWANCE.entry.bytes +
         DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.bytes +
+        DESKTOP_DROP_PREFERENCES_ALLOWANCE.entry.bytes +
         DESKTOP_DROP_ALLOWANCE.optional.bytes +
         NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE.bytes +
         FAVORITES_CATEGORY_PERSISTENCE_ALLOWANCE.entry.bytes +
@@ -1612,6 +1626,7 @@ const BASE_TOTAL_BUDGET = Object.freeze({
         SEEK_PREVIEW_ENTRY_ALLOWANCE.gzipBytes +
         TIMEZONE_LOCAL_STARTUP_ALLOWANCE.entry.gzipBytes +
         TIMEZONE_LOCAL_STARTUP_ALLOWANCE.appearance.gzipBytes +
+        DESKTOP_DROP_PREFERENCES_ALLOWANCE.appearance.gzipBytes +
         CLIENT_INTERFACE_COLORS_ALLOWANCE.entry.gzipBytes +
         CLIENT_INTERFACE_COLORS_ALLOWANCE.providerEdem.gzipBytes +
         CLIENT_INTERFACE_COLORS_ALLOWANCE.appearance.gzipBytes +
@@ -1625,6 +1640,7 @@ const BASE_TOTAL_BUDGET = Object.freeze({
         CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE.appearance.gzipBytes +
         DESKTOP_DROP_ALLOWANCE.entry.gzipBytes +
         DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE.gzipBytes +
+        DESKTOP_DROP_PREFERENCES_ALLOWANCE.entry.gzipBytes +
         DESKTOP_DROP_ALLOWANCE.optional.gzipBytes +
         VIDEO_FIT_LIFECYCLE_ENTRY_ALLOWANCE.gzipBytes +
         AUTO_RELAY_STALL_RECOVERY_ENTRY_ALLOWANCE.gzipBytes +
@@ -2409,6 +2425,7 @@ module.exports = {
     clearBuildSizeReports,
     collectBundleMeasurement,
     DESKTOP_DROP_ALLOWANCE,
+    DESKTOP_DROP_PREFERENCES_ALLOWANCE,
     DESKTOP_FAVORITES_KEY_ALLOWANCE,
     DESKTOP_VIDEO_QUEUE_ALLOWANCE,
     DESKTOP_PLAYLIST_DROP_ALLOWANCE,

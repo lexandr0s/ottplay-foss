@@ -394,6 +394,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO ezarpenak",
     "Drop one video file at a time":
         "Arrastatu eta jaregin bideo-fitxategi bakarra aldi bakoitzean",
+    "Dropped files": "Arrastatu eta jaregindako fitxategiak",
     Duration: "Iraupena",
     Edit: "Editatu",
     "Edit access key": "Editatu sarbide-gakoa",

@@ -74,7 +74,7 @@ function queue(names) {
     }));
     return value;
 }
-function fixture() {
+function fixture(random = Math.random) {
     const saved = new Map([
         ["ottplayprov", "m3u"],
         ["m3uprimaryIndex", "4"],
@@ -139,24 +139,31 @@ function fixture() {
     w.stbGetItem = storageModule.stbGetItem;
     w.stbSetItem = storageModule.stbSetItem;
     w.stbDelItem = storageModule.stbDelItem;
-    const api = load("src/plugins/local-media.ts", {
-        "../commands/remote-feature": { loadRemoteFeature: forbidden },
-        "../offline/browser-local-media": {
-            installBrowserLocalMedia: () => ({ list: forbidden, suspend() {} }),
-            installOfflineShell() {},
+    const api = load(
+        "src/plugins/local-media.ts",
+        {
+            "../commands/remote-feature": { loadRemoteFeature: forbidden },
+            "../offline/browser-local-media": {
+                installBrowserLocalMedia: () => ({
+                    list: forbidden,
+                    suspend() {},
+                }),
+                installOfflineShell() {},
+            },
+            "../offline/local-media-progress": load(
+                "src/offline/local-media-progress.ts"
+            ),
+            "../offline/playback-selection": load(
+                "src/offline/playback-selection.ts"
+            ),
+            "../offline/profiles": { installOfflineProfiles() {} },
+            "./native-bridge": {
+                resolveNativePlugin: () => ({}),
+                tauriInvoke: forbidden,
+            },
         },
-        "../offline/local-media-progress": load(
-            "src/offline/local-media-progress.ts"
-        ),
-        "../offline/playback-selection": load(
-            "src/offline/playback-selection.ts"
-        ),
-        "../offline/profiles": { installOfflineProfiles() {} },
-        "./native-bridge": {
-            resolveNativePlugin: () => ({}),
-            tauriInvoke: forbidden,
-        },
-    }).installLocalMedia(w);
+        { Math: Object.assign(Object.create(Math), { random }) }
+    ).installLocalMedia(w);
     w.loadProv = (id, session) => {
         calls.push(["load", id]);
         w.__ottCommandChannelLoad = {};
@@ -264,6 +271,68 @@ test("a dropped queue preserves supplied order and every file without scanning o
     f.api.cancelDroppedVideo();
     f.api.cancelDroppedVideo();
     assert.deepEqual(f.releases, ["queue"]);
+    assert.deepEqual(f.saved, f.before);
+});
+
+test("shuffle changes the starting item and preserves one order for the accepted drop", async () => {
+    const f = fixture(() => 0);
+    f.w.settings = { droppedFileShuffle: 1 };
+    const input = queue(["same", "same", "other"]);
+    f.api.playDroppedVideo(
+        input,
+        () => true,
+        () => {}
+    );
+    const value = await f.api.playbackList();
+    assert.deepEqual(clone(value.items.map((item) => item.id)), [
+        "queue-item-1",
+        "queue-item-2",
+        "queue-item-0",
+    ]);
+    assert.deepEqual(
+        clone(f.api.playbackOrder()),
+        Array.from(value.items, (item) => "local-" + item.id)
+    );
+    assert.equal(input.items[0].id, "queue-item-0");
+    assert.deepEqual(f.saved, f.before);
+    f.w.settings.droppedFileShuffle = 0;
+    assert.equal((await f.api.playbackList()).items[0].id, "queue-item-1");
+    f.api.playDroppedVideo(
+        input,
+        () => true,
+        () => {}
+    );
+    assert.equal((await f.api.playbackList()).items[0].id, "queue-item-0");
+});
+
+test("Repeat in Actions targets the active drop and leaves the ordinary Local preference alone", () => {
+    const f = fixture();
+    f.w.settings = { droppedFileRepeat: 0 };
+    f.w.__ottPlayerSettingsHost = {
+        store: {
+            begin() {
+                let next;
+                return {
+                    set(key, value) {
+                        assert.equal(key, "droppedFileRepeat");
+                        next = value;
+                    },
+                    commit(_writes, admitted) {
+                        assert.equal(admitted(), true);
+                        f.w.settings.droppedFileRepeat = next;
+                    },
+                };
+            },
+        },
+    };
+    assert.equal(f.api.cycleDroppedRepeat(), false);
+    f.drop();
+    for (const mode of ["one", "off", "all"]) {
+        assert.equal(f.api.cycleDroppedRepeat(), true);
+        assert.equal(f.api.droppedRepeatMode(), mode);
+    }
+    f.api.cancelDroppedVideo();
+    assert.equal(f.api.droppedRepeatMode(), undefined);
     assert.deepEqual(f.saved, f.before);
 });
 

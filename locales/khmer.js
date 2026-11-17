@@ -375,6 +375,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "ការកំណត់ Dragon Media PRO",
     "Drop one video file at a time": "អូសហើយទម្លាក់ឯកសារវីដេអូម្តងមួយ",
+    "Dropped files": "ឯកសារដែលបានអូសទម្លាក់",
     Duration: "រយៈពេល",
     Edit: "កែសម្រួល",
     "Edit access key": "កែសម្រួលសោចូល",

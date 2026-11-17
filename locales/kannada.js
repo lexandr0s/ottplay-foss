@@ -373,6 +373,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Dragon Media PRO ಸೆಟ್ಟಿಂಗ್‌ಗಳು",
     "Drop one video file at a time": "ಒಂದು ಬಾರಿಗೆ ಒಂದು ವೀಡಿಯೊ ಫೈಲ್ ಅನ್ನು ಎಳೆದು ಬಿಡಿ",
+    "Dropped files": "ಎಳೆದು ಬಿಟ್ಟ ಫೈಲ್‌ಗಳು",
     Duration: "ಅವಧಿ",
     Edit: "ಸಂಪಾದಿಸಿ",
     "Edit access key": "ಎಡಿಟ್ ಪ್ರವೇಶ ಕೀ",

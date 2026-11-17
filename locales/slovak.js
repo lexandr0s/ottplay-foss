@@ -379,6 +379,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Dragon Media PRO nastavenia",
     "Drop one video file at a time": "Presuňte vždy iba jeden videosúbor",
+    "Dropped files": "Presunuté súbory",
     Duration: "Trvanie",
     Edit: "Upraviť",
     "Edit access key": "Upraviť prístupový kľúč",

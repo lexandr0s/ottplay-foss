@@ -197,6 +197,8 @@ export interface PlayerSettings {
     commandServerToken: string;
     companionEndpoint: string;
     deviceUuid: string;
+    droppedFileRepeat: number;
+    droppedFileShuffle: number;
     editor: number;
     eFun: number;
     epgArchiveLabel: number;
@@ -320,6 +322,8 @@ export function defaultSettings(): PlayerSettings {
         commandServerToken: "",
         companionEndpoint: "",
         deviceUuid: "",
+        droppedFileRepeat: 0,
+        droppedFileShuffle: 0,
         editor: 0,
         eFun: webos ? 1 : 0,
         epgArchiveLabel: 1,
@@ -690,6 +694,11 @@ export const settingsSchema: SettingDefinition[] = [
         { values: [10, 15, 20, 30] },
         ["configureLiveRecovery"]
     ),
+    defineSetting("droppedFileShuffle", "sDroppedFileShuffle"),
+    // 0 = all, 1 = one, 2 = off. Keep the existing default for new queues.
+    defineSetting("droppedFileRepeat", "sDroppedFileRepeat", {
+        range: [0, 2],
+    }),
     defineSetting(
         "subtitleFontFamily",
         "sSubtitleFontFamily",

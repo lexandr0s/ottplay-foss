@@ -389,6 +389,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Pengaturan Dragon Media PRO",
     "Drop one video file at a time":
         "Seret dan lepaskan satu berkas video setiap kali",
+    "Dropped files": "Berkas yang diseret dan dilepas",
     Duration: "Durasi",
     Edit: "Sunting",
     "Edit access key": "Edit kunci akses",

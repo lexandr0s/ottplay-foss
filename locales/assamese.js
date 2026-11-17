@@ -374,6 +374,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Dragon Media PRO ছেটিংছ",
     "Drop one video file at a time": "এবাৰত এটা ভিডিঅ' ফাইল টানি এৰি দিয়ক",
+    "Dropped files": "টানি এৰি দিয়া ফাইলসমূহ",
     Duration: "সময়কাল",
     Edit: "সম্পাদনা কৰক",
     "Edit access key": "প্ৰৱেশ চাবি সম্পাদনা কৰক",

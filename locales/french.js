@@ -400,6 +400,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Paramètres de Dragon Media PRO",
     "Drop one video file at a time":
         "Glissez-déposez un seul fichier vidéo à la fois",
+    "Dropped files": "Fichiers déposés",
     Duration: "Durée",
     Edit: "Modifier",
     "Edit access key": "Modifier la clé d'accès",

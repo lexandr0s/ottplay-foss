@@ -370,6 +370,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "הגדרות Dragon Media PRO",
     "Drop one video file at a time": "יש לגרור ולשחרר קובץ וידאו אחד בכל פעם",
+    "Dropped files": "קבצים שנגררו ושוחררו",
     Duration: "משך",
     Edit: "ערוך",
     "Edit access key": "ערוך מפתח גישה",
