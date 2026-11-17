@@ -4151,7 +4151,20 @@ mod runtime {
                 feed.publish(Arc::from(vec![9; 1]), fence(0), target),
                 Err(EncoderError::InvalidConfig)
             );
-            assert_eq!(failure().selection_age.unwrap(), rejected);
+            let after_length_rejection = failure().selection_age.unwrap();
+            let rejected_stage_age = rejected.compositor_progress.unwrap().stage_age_at_sample_ns;
+            let observed_stage_age = after_length_rejection
+                .compositor_progress
+                .unwrap()
+                .stage_age_at_sample_ns;
+            assert!(observed_stage_age >= rejected_stage_age);
+            let mut normalized_after_length_rejection = after_length_rejection;
+            normalized_after_length_rejection
+                .compositor_progress
+                .as_mut()
+                .unwrap()
+                .stage_age_at_sample_ns = rejected_stage_age;
+            assert_eq!(normalized_after_length_rejection, rejected);
             let state = feed.state.lock().unwrap();
             assert_eq!(state.sequence, 1);
             assert!(state.window.as_ref().unwrap().lease.is_none());
