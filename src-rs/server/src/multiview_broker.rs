@@ -32,7 +32,9 @@ use std::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
-use crate::media_connection::{ConnectionControl, MediaAuthority};
+use crate::media_connection::{
+    ConnectionControl, FailureRecorder, MediaAuthority, MediaFailureKind, MediaFailureSite,
+};
 use ottplay_core::multiview::broker::registry::{Registry, RegistryError, SourcePrincipal};
 
 #[path = "multiview_broker_live.rs"]
@@ -1643,19 +1645,34 @@ struct MediaCustody {
     broker: Broker,
     record: Arc<OutputRecord>,
     token: String,
+    failure: Arc<FailureRecorder>,
     _permit: OwnedSemaphorePermit,
+}
+impl MediaCustody {
+    fn failure_kind(error: BoundaryError) -> MediaFailureKind {
+        match error {
+            BoundaryError::TemporaryBusy => MediaFailureKind::TemporaryBusy,
+            BoundaryError::Unavailable => MediaFailureKind::Unavailable,
+            _ => MediaFailureKind::Denied,
+        }
+    }
 }
 impl MediaAuthority for MediaCustody {
     fn authorized(&self) -> bool {
-        if self.record.live.is_some() {
-            return self
-                .broker
-                .check_live_output(&self.record, &self.token)
-                .is_ok();
+        let result = if self.record.live.is_some() {
+            self.broker.check_live_output(&self.record, &self.token)
+        } else {
+            self.broker
+                .with_output_authority(&self.record, &self.token, || Ok(()))
+        };
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                self.failure
+                    .record(MediaFailureSite::Supervisor, Self::failure_kind(error));
+                false
+            }
         }
-        self.broker
-            .with_output_authority(&self.record, &self.token, || Ok(()))
-            .is_ok()
     }
 }
 
@@ -1673,12 +1690,14 @@ impl Stream for GuardedBody {
             return Poll::Ready(None);
         }
         if let Some(bytes) = self.live_bytes.as_ref() {
-            if self
+            if let Err(error) = self
                 .custody
                 .broker
                 .check_live_output(&self.custody.record, &self.custody.token)
-                .is_err()
             {
+                self.custody
+                    .failure
+                    .record(MediaFailureSite::Body, MediaCustody::failure_kind(error));
                 self.failed = true;
                 return Poll::Ready(Some(Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -1705,7 +1724,10 @@ impl Stream for GuardedBody {
                 Poll::Ready(Some(Ok(bytes)))
             }
             Ok(None) => Poll::Ready(None),
-            Err(_) => {
+            Err(error) => {
+                self.custody
+                    .failure
+                    .record(MediaFailureSite::Body, MediaCustody::failure_kind(error));
                 self.failed = true;
                 Poll::Ready(Some(Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -1765,6 +1787,7 @@ async fn media(
             return Err(BoundaryError::Unavailable);
         }
         let Extension(connection) = connection.ok_or(BoundaryError::Unavailable)?;
+        let failure = connection.failure_recorder();
         let permit = broker
             .0
             .streams
@@ -1793,6 +1816,7 @@ async fn media(
             broker: broker.clone(),
             record,
             token,
+            failure,
             _permit: permit,
         });
         let lease = connection.media_lease(custody.clone());

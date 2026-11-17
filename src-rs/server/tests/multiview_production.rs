@@ -671,12 +671,35 @@ impl FixtureReadStage {
     }
 }
 #[derive(Clone, Copy, Debug)]
+struct TransportErrorFlags {
+    timeout: bool,
+    connect: bool,
+    request: bool,
+    body: bool,
+    decode: bool,
+    builder: bool,
+}
+impl TransportErrorFlags {
+    fn capture(error: &reqwest::Error) -> Self {
+        Self {
+            timeout: error.is_timeout(),
+            connect: error.is_connect(),
+            request: error.is_request(),
+            body: error.is_body(),
+            decode: error.is_decode(),
+            builder: error.is_builder(),
+        }
+    }
+}
+#[derive(Clone, Copy, Debug)]
 struct FixtureReadFailure {
     stage: FixtureReadStage,
     status: Option<u16>,
     response_bytes: Option<usize>,
     response_sha256: Option<[u8; 32]>,
     temporary_busy: bool,
+    transport_error: Option<TransportErrorFlags>,
+    elapsed_ms: Option<u64>,
 }
 impl FixtureReadFailure {
     fn without_body(
@@ -690,6 +713,25 @@ impl FixtureReadFailure {
             response_bytes,
             response_sha256: None,
             temporary_busy: false,
+            transport_error: None,
+            elapsed_ms: None,
+        }
+    }
+    fn transport(
+        stage: FixtureReadStage,
+        error: &reqwest::Error,
+        elapsed: Duration,
+        status: Option<u16>,
+        response_bytes: Option<usize>,
+    ) -> Self {
+        Self {
+            stage,
+            status,
+            response_bytes,
+            response_sha256: None,
+            temporary_busy: false,
+            transport_error: Some(TransportErrorFlags::capture(error)),
+            elapsed_ms: Some(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)),
         }
     }
     fn response(stage: FixtureReadStage, status: u16, bytes: &[u8]) -> Self {
@@ -703,6 +745,8 @@ impl FixtureReadFailure {
             temporary_busy: stage == FixtureReadStage::HttpStatus
                 && status == 503
                 && bytes == br#"{"error":"temporary_busy","version":1}"#,
+            transport_error: None,
+            elapsed_ms: None,
         }
     }
 }
@@ -719,10 +763,14 @@ impl std::fmt::Display for FixtureReadFailure {
             for byte in digest {
                 write!(out, "{byte:02x}")?;
             }
-            Ok(())
         } else {
-            write!(out, "none")
+            write!(out, "none")?;
         }
+        if let (Some(flags), Some(elapsed_ms)) = (self.transport_error, self.elapsed_ms) {
+            write!(out, " elapsed_ms={elapsed_ms} transport_timeout={} transport_connect={} transport_request={} transport_body={} transport_decode={} transport_builder={}",
+                flags.timeout, flags.connect, flags.request, flags.body, flags.decode, flags.builder)?;
+        }
+        Ok(())
     }
 }
 
@@ -782,8 +830,15 @@ fn http_checked_with_timeout(
             if let Some(value) = body {
                 request = request.json(value);
             }
-            let mut response = request.send().await.map_err(|_| {
-                FixtureReadFailure::without_body(FixtureReadStage::HttpSend, None, None)
+            let request_started = Instant::now();
+            let mut response = request.send().await.map_err(|error| {
+                FixtureReadFailure::transport(
+                    FixtureReadStage::HttpSend,
+                    &error,
+                    request_started.elapsed(),
+                    None,
+                    None,
+                )
             })?;
             if response
                 .content_length()
@@ -797,9 +852,11 @@ fn http_checked_with_timeout(
                 let chunk = match response.chunk().await {
                     Ok(Some(chunk)) => chunk,
                     Ok(None) => break,
-                    Err(_) => {
-                        return Err(FixtureReadFailure::without_body(
+                    Err(error) => {
+                        return Err(FixtureReadFailure::transport(
                             FixtureReadStage::HttpBody,
+                            &error,
+                            request_started.elapsed(),
                             Some(status),
                             Some(bytes.len()),
                         ))
@@ -1577,6 +1634,32 @@ fn playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts() {
         let record = error.to_string();
         assert!(record.contains(stage.code()) && record.ends_with("response_sha256=none"));
     }
+    // Construct a builder error locally so this privacy check never initializes
+    // the shared fixture client or performs network/TLS work.
+    let reqwest_error = reqwest::Client::builder()
+        .user_agent("transport-secret-canary\n")
+        .build()
+        .unwrap_err()
+        .with_url(
+            reqwest::Url::parse(
+                "https://transport-secret-canary:secret@example.invalid/path?token=transport-secret-canary",
+            )
+            .unwrap(),
+        );
+    let error = FixtureReadFailure::transport(
+        FixtureReadStage::HttpSend,
+        &reqwest_error,
+        Duration::from_millis(7),
+        None,
+        None,
+    );
+    let flags = error.transport_error.expect("builder classification");
+    assert!(flags.builder);
+    assert_eq!(error.elapsed_ms, Some(7));
+    let record = error.to_string();
+    assert!(record.contains("transport_builder=true"));
+    assert!(!record.contains("transport-secret-canary"));
+    assert!(!record.contains("http://") && !record.contains("https://"));
     let escaped = std::panic::catch_unwind(|| {
         parse_playlist_snapshot_response(
             &path,
@@ -1630,6 +1713,16 @@ fn segment_video_proof_checks_count_timing_and_sampling_domain() {
         (json!({"nb_read_frames":count.to_string(),"time_base":"1/90000"}),
          (0..count).map(|n| json!({"media_type":"video","best_effort_timestamp":n*9000,"pkt_duration":9000})).collect())
     }
+    let one_video = json!({"codec_type":"video"});
+    let one_audio = json!({"codec_type":"audio"});
+    assert!(single_av_streams(&[]).is_none());
+    assert!(single_av_streams(&[one_video.clone(), one_audio.clone()]).is_some());
+    assert!(single_av_streams(std::slice::from_ref(&one_video)).is_none());
+    assert!(
+        single_av_streams(&[one_video.clone(), one_video.clone(), one_audio.clone()]).is_none()
+    );
+    assert!(single_av_streams(&[one_video, one_audio.clone(), one_audio]).is_none());
+
     for (count, expected) in [(1, 0), (10, 9), (11, 10), (12, 10)] {
         let (video, frames) = report(count);
         let proof = segment_video_proof(&video, &frames).unwrap();
@@ -1637,6 +1730,8 @@ fn segment_video_proof_checks_count_timing_and_sampling_domain() {
         assert_eq!(proof.time_base, "1/90000");
         assert_eq!(proof.sample_index, expected);
         assert_eq!(proof.duration_ticks, count as i64 * 9000);
+        assert_eq!(proof.first_pts, 0);
+        assert_eq!(proof.end_pts, count as i64 * 9000);
     }
     let (mut video, mut frames) = report(10);
     video["nb_read_frames"] = json!("0");
@@ -1664,6 +1759,213 @@ fn segment_video_proof_checks_count_timing_and_sampling_domain() {
     let (video, mut frames) = report(10);
     frames[9]["pkt_duration"] = json!(31 * 90000);
     assert!(segment_video_proof(&video, &frames).is_none());
+
+    let audio = json!({
+        "sample_rate":"48000",
+        "channels":2,
+        "time_base":"1/90000"
+    });
+    let audio_frames = vec![
+        json!({"media_type":"audio","best_effort_timestamp":0,"pkt_duration":1920,"nb_samples":1024}),
+        json!({"media_type":"audio","best_effort_timestamp":1920,"duration":1920,"nb_samples":1024}),
+    ];
+    let audio_proof = segment_audio_diagnostic(&audio, &audio_frames);
+    assert_eq!(audio_proof["audio_decoded_frames"], 2);
+    assert_eq!(audio_proof["audio_nb_samples_total"], 2048);
+    assert_eq!(audio_proof["audio_first_pts"], 0);
+    assert_eq!(audio_proof["audio_last_end_pts"], 3840);
+    assert_eq!(audio_proof["audio_packet_duration_ticks_total"], 3840);
+    assert_eq!(audio_proof["audio_sample_rate"], 48000);
+    assert_eq!(audio_proof["audio_channels"], 2);
+    assert_eq!(audio_proof["audio_time_base_num"], 1);
+    assert_eq!(audio_proof["audio_time_base_den"], 90000);
+
+    let malformed = segment_audio_diagnostic(
+        &json!({"sample_rate":"N/A","channels":0,"time_base":"1/0"}),
+        &[
+            json!({"media_type":"audio","best_effort_timestamp":"bad","pkt_duration":-1,"nb_samples":"bad"}),
+        ],
+    );
+    assert!(malformed["audio_nb_samples_total"].is_null());
+    assert!(malformed["audio_first_pts"].is_null());
+    assert!(malformed["audio_last_end_pts"].is_null());
+    assert!(malformed["audio_packet_duration_ticks_total"].is_null());
+    assert!(malformed["audio_sample_rate"].is_null());
+    assert!(malformed["audio_channels"].is_null());
+    assert!(malformed["audio_time_base_num"].is_null());
+    assert!(malformed["audio_time_base_den"].is_null());
+
+    let overflow = segment_audio_diagnostic(
+        &audio,
+        &[
+            json!({"media_type":"audio","best_effort_timestamp":0,"pkt_duration":i64::MAX,"nb_samples":i64::MAX}),
+            json!({"media_type":"audio","best_effort_timestamp":1,"pkt_duration":i64::MAX,"nb_samples":i64::MAX}),
+            json!({"media_type":"audio","best_effort_timestamp":2,"pkt_duration":i64::MAX,"nb_samples":i64::MAX}),
+        ],
+    );
+    assert!(overflow["audio_nb_samples_total"].is_null());
+    assert!(overflow["audio_packet_duration_ticks_total"].is_null());
+
+    fn audio_packets(count: usize, first_pts: i64) -> (Value, Vec<Value>) {
+        let audio = json!({
+            "codec_name":"aac",
+            "sample_rate":"48000",
+            "channels":2,
+            "time_base":"1/90000"
+        });
+        let frames = (0..count)
+            .map(|index| {
+                json!({"media_type":"audio",
+                    "best_effort_timestamp":first_pts + index as i64 * 1920,
+                    "pkt_duration":1920,"nb_samples":1024})
+            })
+            .collect();
+        (audio, frames)
+    }
+
+    let (video, video_frames) = report(10);
+    let video = segment_video_proof(&video, &video_frames).unwrap();
+    for (count, first_pts, floor, ceil) in [
+        (46, 1680, 15_701, 15_702),
+        (47, 240, 16_042, 16_043),
+        (48, -1920, 16_384, 16_384),
+    ] {
+        let (audio, frames) = audio_packets(count, first_pts);
+        let proof = segment_audio_proof(&audio, &frames).unwrap();
+        assert!(audio_matches_video_window(&video, &proof));
+        assert_eq!(
+            resampled_pcm_sample_range(proof.sample_count),
+            Some((floor, ceil))
+        );
+        assert!(pcm_matches_audio_sample_count(&proof, (floor * 2) as usize));
+        assert!(pcm_matches_audio_sample_count(&proof, (ceil * 2) as usize));
+    }
+
+    // The endpoint contract is relative: a common negative MPEG-TS timestamp
+    // origin is valid, while shifting only audio by half a second is not.
+    let (shifted_video, mut shifted_video_frames) = report(10);
+    for frame in &mut shifted_video_frames {
+        let timestamp = frame["best_effort_timestamp"].as_i64().unwrap() - 90_000;
+        frame["best_effort_timestamp"] = json!(timestamp);
+    }
+    let shifted_video = segment_video_proof(&shifted_video, &shifted_video_frames).unwrap();
+    let (audio, frames) = audio_packets(48, -90_000 - 1920);
+    let proof = segment_audio_proof(&audio, &frames).unwrap();
+    assert!(audio_matches_video_window(&shifted_video, &proof));
+    for shift in [-45_000, 45_000] {
+        let (audio, frames) = audio_packets(46, shift);
+        let proof = segment_audio_proof(&audio, &frames).unwrap();
+        assert!(!audio_matches_video_window(&video, &proof));
+    }
+
+    let (audio, frames) = audio_packets(1, 0);
+    let proof = segment_audio_proof(&audio, &frames).unwrap();
+    assert!(
+        !audio_matches_video_window(&video, &proof),
+        "tiny audio span must fail"
+    );
+    let (short_video, short_video_frames) = report(1);
+    let short_video = segment_video_proof(&short_video, &short_video_frames).unwrap();
+    let (audio, frames) = audio_packets(5, 0);
+    let proof = segment_audio_proof(&audio, &frames).unwrap();
+    assert!(
+        !audio_matches_video_window(&short_video, &proof),
+        "short paired A/V startup fragment must fail the fixed live-window oracle"
+    );
+
+    let (audio, mut frames) = audio_packets(46, 0);
+    frames[1]["best_effort_timestamp"] = json!(1921);
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "audio PTS gap must fail"
+    );
+    frames[1]["best_effort_timestamp"] = json!(1919);
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "audio PTS overlap must fail"
+    );
+    frames[1]["best_effort_timestamp"] = json!(1920);
+    frames[0]["nb_samples"] = json!(1023);
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "wrong AAC frame size must fail"
+    );
+    frames[0]["nb_samples"] = json!(1024);
+    frames[0]["pkt_duration"] = json!(1919);
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "sample duration mismatch must fail"
+    );
+
+    let (mut audio, frames) = audio_packets(46, 0);
+    audio["codec_name"] = json!("mp3");
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "wrong codec must fail"
+    );
+    audio["codec_name"] = json!("aac");
+    audio["sample_rate"] = json!(44100);
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "wrong sample rate must fail"
+    );
+    audio["sample_rate"] = json!(48000);
+    audio["channels"] = json!(1);
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "wrong channel count must fail"
+    );
+    audio["channels"] = json!(2);
+    audio["time_base"] = json!("1/0");
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "invalid time base must fail"
+    );
+    audio["time_base"] = json!("1/90000");
+    assert!(
+        segment_audio_proof(&audio, &[]).is_none(),
+        "missing audio frames must fail"
+    );
+    let (audio, frames) = audio_packets(1, i64::MAX - 1000);
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "PTS overflow must fail"
+    );
+
+    let (audio, frames) = audio_packets(46, 0);
+    let proof = segment_audio_proof(&audio, &frames).unwrap();
+    assert!(pcm_matches_audio_sample_count(&proof, 31_402));
+    assert!(pcm_matches_audio_sample_count(&proof, 31_404));
+    assert!(
+        !pcm_matches_audio_sample_count(&proof, 31_400),
+        "material PCM truncation must fail"
+    );
+    assert!(
+        !pcm_matches_audio_sample_count(&proof, 31_403),
+        "odd PCM byte count must fail"
+    );
+    assert!(
+        !pcm_matches_audio_sample_count(&proof, 0),
+        "empty PCM must fail"
+    );
+    assert!(
+        !pcm_matches_audio_sample_count(&proof, (MAX_PCM_SAMPLES as usize + 1) * 2),
+        "PCM cap must remain"
+    );
+    let exact_cap = SegmentAudioProof {
+        sample_count: AAC_SAMPLE_RATE * 8,
+        sample_rate: AAC_SAMPLE_RATE,
+        channels: 2,
+        first_pts: 0,
+        end_pts: 8 * 90_000,
+        time_base_num: 1,
+        time_base_den: 90_000,
+    };
+    assert!(pcm_matches_audio_sample_count(
+        &exact_cap,
+        (MAX_PCM_SAMPLES * 2) as usize
+    ));
+    assert_eq!(resampled_pcm_sample_range(u64::MAX), None);
 }
 
 fn try_new_segment(
@@ -1778,8 +2080,305 @@ fn run_bounded_filter(
 struct SegmentVideoProof {
     count: u64,
     sample_index: u64,
+    first_pts: i64,
+    end_pts: i64,
     duration_ticks: i64,
+    time_base_num: u64,
+    time_base_den: u64,
     time_base: String,
+}
+
+struct SegmentAudioProof {
+    sample_count: u64,
+    sample_rate: u64,
+    channels: u64,
+    first_pts: i64,
+    end_pts: i64,
+    time_base_num: u64,
+    time_base_den: u64,
+}
+
+struct SegmentMediaProof {
+    video: SegmentVideoProof,
+    audio: SegmentAudioProof,
+    segment_sha256: String,
+}
+
+const AAC_SAMPLES_PER_FRAME: u64 = 1024;
+const AAC_SAMPLE_RATE: u64 = 48_000;
+const PCM_SAMPLE_RATE: u64 = 16_000;
+const MAX_PCM_SAMPLES: u64 = PCM_SAMPLE_RATE * 8;
+
+fn stream_time_base(stream: &Value) -> Option<(u64, u64)> {
+    let value = stream["time_base"].as_str()?;
+    let (numerator, denominator) = value.split_once('/')?;
+    if numerator.is_empty()
+        || denominator.is_empty()
+        || !numerator.bytes().all(|byte| byte.is_ascii_digit())
+        || !denominator.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let numerator = numerator.parse::<u64>().ok()?;
+    let denominator = denominator.parse::<u64>().ok()?;
+    (numerator > 0 && denominator > 0).then_some((numerator, denominator))
+}
+
+fn frame_duration_ticks(frame: &Value) -> Option<i64> {
+    diagnostic_integer(&frame["pkt_duration"])
+        .or_else(|| diagnostic_integer(&frame["duration"]))
+        .filter(|duration| *duration > 0)
+}
+
+fn single_av_streams(streams: &[Value]) -> Option<(&Value, &Value)> {
+    let mut video: Option<&Value> = None;
+    let mut audio: Option<&Value> = None;
+    for stream in streams {
+        match stream.get("codec_type").and_then(Value::as_str) {
+            Some("video") if video.is_none() => video = Some(stream),
+            Some("audio") if audio.is_none() => audio = Some(stream),
+            Some("video" | "audio") => return None,
+            _ => {}
+        }
+    }
+    Some((video?, audio?))
+}
+
+fn segment_audio_proof(audio: &Value, frames: &[Value]) -> Option<SegmentAudioProof> {
+    if audio["codec_name"] != "aac"
+        || diagnostic_integer(&audio["sample_rate"]) != Some(AAC_SAMPLE_RATE as i64)
+        || diagnostic_integer(&audio["channels"]) != Some(2)
+    {
+        return None;
+    }
+    let (time_base_num, time_base_den) = stream_time_base(audio)?;
+    let audio_frames: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame["media_type"] == "audio")
+        .collect();
+    if audio_frames.is_empty() {
+        return None;
+    }
+    let mut sample_count = 0u64;
+    let mut previous_end = None;
+    let mut first_pts = None;
+    let mut end_pts = None;
+    for frame in audio_frames {
+        let timestamp = diagnostic_integer(&frame["best_effort_timestamp"])?;
+        let duration = frame_duration_ticks(frame)?;
+        let samples = diagnostic_integer(&frame["nb_samples"])?;
+        if samples != AAC_SAMPLES_PER_FRAME as i64
+            || previous_end.is_some_and(|end| end != timestamp)
+        {
+            return None;
+        }
+        // In the selected 48 kHz AAC profile each coded frame must occupy
+        // exactly its reported sample duration in the stream time base.
+        let duration_scaled = i128::from(duration)
+            .checked_mul(i128::from(time_base_num))?
+            .checked_mul(i128::from(AAC_SAMPLE_RATE))?;
+        let samples_scaled = i128::from(samples).checked_mul(i128::from(time_base_den))?;
+        if duration_scaled != samples_scaled {
+            return None;
+        }
+        let frame_end = timestamp.checked_add(duration)?;
+        first_pts.get_or_insert(timestamp);
+        end_pts = Some(frame_end);
+        previous_end = Some(frame_end);
+        sample_count = sample_count.checked_add(u64::try_from(samples).ok()?)?;
+    }
+    Some(SegmentAudioProof {
+        sample_count,
+        sample_rate: AAC_SAMPLE_RATE,
+        channels: 2,
+        first_pts: first_pts?,
+        end_pts: end_pts?,
+        time_base_num,
+        time_base_den,
+    })
+}
+
+fn endpoint_within_aac_frame(
+    audio_pts: i64,
+    audio_time_base: (u64, u64),
+    video_pts: i64,
+    video_time_base: (u64, u64),
+) -> bool {
+    let Some(audio_scaled) = i128::from(audio_pts)
+        .checked_mul(i128::from(audio_time_base.0))
+        .and_then(|value| value.checked_mul(i128::from(video_time_base.1)))
+    else {
+        return false;
+    };
+    let Some(video_scaled) = i128::from(video_pts)
+        .checked_mul(i128::from(video_time_base.0))
+        .and_then(|value| value.checked_mul(i128::from(audio_time_base.1)))
+    else {
+        return false;
+    };
+    let Some(difference) = audio_scaled
+        .checked_sub(video_scaled)
+        .and_then(|value| value.checked_abs())
+    else {
+        return false;
+    };
+    let Some(actual_scaled) = difference.checked_mul(i128::from(AAC_SAMPLE_RATE)) else {
+        return false;
+    };
+    let Some(allowed_scaled) = i128::from(AAC_SAMPLES_PER_FRAME)
+        .checked_mul(i128::from(audio_time_base.1))
+        .and_then(|value| value.checked_mul(i128::from(video_time_base.1)))
+    else {
+        return false;
+    };
+    actual_scaled <= allowed_scaled
+}
+
+fn audio_matches_video_window(video: &SegmentVideoProof, audio: &SegmentAudioProof) -> bool {
+    // Fixed live profile only: HLS targets 1s and the 10fps GOP is 10 frames.
+    // Requiring a complete video window avoids treating a short startup/EOF
+    // fragment as a healthy sample. One AAC access unit at each endpoint
+    // covers packet-boundary quantization and AAC priming; this is not a universal HLS
+    // continuity or loss-free guarantee.
+    let Some(video_duration_scaled) = u128::try_from(video.duration_ticks)
+        .ok()
+        .and_then(|ticks| ticks.checked_mul(u128::from(video.time_base_num)))
+    else {
+        return false;
+    };
+    if video.count < 10 || video_duration_scaled < u128::from(video.time_base_den) {
+        return false;
+    }
+    endpoint_within_aac_frame(
+        audio.first_pts,
+        (audio.time_base_num, audio.time_base_den),
+        video.first_pts,
+        (video.time_base_num, video.time_base_den),
+    ) && endpoint_within_aac_frame(
+        audio.end_pts,
+        (audio.time_base_num, audio.time_base_den),
+        video.end_pts,
+        (video.time_base_num, video.time_base_den),
+    )
+}
+
+fn resampled_pcm_sample_range(aac_samples: u64) -> Option<(u64, u64)> {
+    // Mono 16 kHz output from this 48 kHz AAC profile is exactly N/3 samples;
+    // only integer resampler rounding permits either adjacent sample count.
+    let scaled = aac_samples.checked_mul(PCM_SAMPLE_RATE)?;
+    let floor = scaled / AAC_SAMPLE_RATE;
+    let ceil = floor.checked_add(if scaled % AAC_SAMPLE_RATE != 0 { 1 } else { 0 })?;
+    Some((floor, ceil))
+}
+
+fn pcm_matches_audio_sample_count(audio: &SegmentAudioProof, pcm_bytes: usize) -> bool {
+    if audio.sample_rate != AAC_SAMPLE_RATE
+        || audio.channels != 2
+        || pcm_bytes == 0
+        || pcm_bytes % 2 != 0
+        || pcm_bytes > (MAX_PCM_SAMPLES * 2) as usize
+    {
+        return false;
+    }
+    let Some((floor, ceil)) = resampled_pcm_sample_range(audio.sample_count) else {
+        return false;
+    };
+    let Ok(actual) = u64::try_from(pcm_bytes / 2) else {
+        return false;
+    };
+    (actual == floor || actual == ceil) && actual <= MAX_PCM_SAMPLES
+}
+
+fn diagnostic_integer(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+        .or_else(|| value.as_str()?.parse::<i64>().ok())
+}
+
+fn segment_audio_diagnostic(audio: &Value, frames: &[Value]) -> Value {
+    let audio_frames: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame["media_type"] == "audio")
+        .collect();
+    let sample_rate = diagnostic_integer(&audio["sample_rate"])
+        .filter(|value| *value > 0)
+        .and_then(|value| u64::try_from(value).ok());
+    let channels = diagnostic_integer(&audio["channels"])
+        .filter(|value| *value > 0)
+        .and_then(|value| u64::try_from(value).ok());
+    let sample_count = audio_frames.iter().try_fold(0u64, |sum, frame| {
+        let samples = diagnostic_integer(&frame["nb_samples"])?;
+        if samples < 0 {
+            return None;
+        }
+        sum.checked_add(u64::try_from(samples).ok()?)
+    });
+    let packet_duration_ticks = audio_frames.iter().try_fold(0i64, |sum, frame| {
+        let duration = diagnostic_integer(&frame["pkt_duration"])
+            .or_else(|| diagnostic_integer(&frame["duration"]))?;
+        if duration <= 0 {
+            return None;
+        }
+        sum.checked_add(duration)
+    });
+    let timestamps: Option<Vec<i64>> = audio_frames
+        .iter()
+        .map(|frame| diagnostic_integer(&frame["best_effort_timestamp"]))
+        .collect();
+    let timestamps = timestamps.filter(|values| values.windows(2).all(|pair| pair[0] < pair[1]));
+    let first_pts = timestamps
+        .as_ref()
+        .and_then(|values| values.first().copied());
+    let last_end_pts = audio_frames.last().and_then(|frame| {
+        let duration = diagnostic_integer(&frame["pkt_duration"])
+            .or_else(|| diagnostic_integer(&frame["duration"]))?;
+        if duration <= 0 {
+            return None;
+        }
+        diagnostic_integer(&frame["best_effort_timestamp"])?.checked_add(duration)
+    });
+    let (time_base_num, time_base_den) = audio["time_base"]
+        .as_str()
+        .and_then(|value| value.split_once('/'))
+        .and_then(|(numerator, denominator)| {
+            let numerator = numerator.parse::<u64>().ok()?;
+            let denominator = denominator.parse::<u64>().ok()?;
+            (numerator > 0 && denominator > 0).then_some((numerator, denominator))
+        })
+        .map_or((None, None), |(numerator, denominator)| {
+            (Some(numerator), Some(denominator))
+        });
+    json!({
+        "audio_channels": channels,
+        "audio_decoded_frames": audio_frames.len(),
+        "audio_first_pts": first_pts,
+        "audio_last_end_pts": last_end_pts,
+        "audio_nb_samples_total": sample_count,
+        "audio_packet_duration_ticks_total": packet_duration_ticks,
+        "audio_sample_rate": sample_rate,
+        "audio_time_base_den": time_base_den,
+        "audio_time_base_num": time_base_num,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum PcmProofRole {
+    Grid,
+    InitialSustained,
+    Replacement,
+    LateSustained,
+}
+
+impl PcmProofRole {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Grid => "grid",
+            Self::InitialSustained => "initial_sustained",
+            Self::Replacement => "replacement",
+            Self::LateSustained => "late_sustained",
+        }
+    }
 }
 
 fn segment_video_proof(video: &Value, frames: &[Value]) -> Option<SegmentVideoProof> {
@@ -1821,10 +2420,10 @@ fn segment_video_proof(video: &Value, frames: &[Value]) -> Option<SegmentVideoPr
     if last_duration <= 0 {
         return None;
     }
-    let duration_ticks = last["best_effort_timestamp"]
+    let end_pts = last["best_effort_timestamp"]
         .as_i64()?
-        .checked_add(last_duration)?
-        .checked_sub(first)?;
+        .checked_add(last_duration)?;
+    let duration_ticks = end_pts.checked_sub(first)?;
     let scaled = u128::try_from(duration_ticks)
         .ok()?
         .checked_mul(u128::from(numerator))?;
@@ -1834,12 +2433,16 @@ fn segment_video_proof(video: &Value, frames: &[Value]) -> Option<SegmentVideoPr
     Some(SegmentVideoProof {
         count,
         sample_index: 10.min(count - 1),
+        first_pts: first,
+        end_pts,
         duration_ticks,
+        time_base_num: numerator,
+        time_base_den: denominator,
         time_base: time_base.to_owned(),
     })
 }
 
-fn ffprobe_segment(ffprobe: &Path, bytes: &[u8]) -> SegmentVideoProof {
+fn ffprobe_segment(ffprobe: &Path, bytes: &[u8]) -> SegmentMediaProof {
     assert!(
         bytes.len() >= 188 && bytes.len() <= 8 * 1024 * 1024,
         "bounded TS output segment required"
@@ -1852,7 +2455,7 @@ fn ffprobe_segment(ffprobe: &Path, bytes: &[u8]) -> SegmentVideoProof {
             "-count_frames",
             "-show_frames",
             "-show_entries",
-            "stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,nb_read_frames,time_base:frame=media_type,best_effort_timestamp,pkt_duration,duration",
+            "stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,nb_read_frames,time_base,sample_rate,channels:frame=media_type,best_effort_timestamp,pkt_duration,duration,nb_samples",
             "-of",
             "json",
             "-i",
@@ -1889,32 +2492,64 @@ fn ffprobe_segment(ffprobe: &Path, bytes: &[u8]) -> SegmentVideoProof {
         audio["codec_name"], "aac",
         "selected profile audio codec differs"
     );
-    let proof = segment_video_proof(
-        video,
-        report["frames"].as_array().expect("decoded frame proof"),
-    )
-    .expect("positive bounded decoded frame count, timestamps and duration required");
+    let frames = report["frames"].as_array().expect("decoded frame proof");
+    let video_proof = segment_video_proof(video, frames)
+        .expect("positive bounded decoded frame count, timestamps and duration required");
     // The segment is a borrowed immutable byte slice throughout probe and decode;
     // retain content identity, not an API URL or an output capability.
-    eprintln!("normal_segment_video_proof sha256={:x} bytes={} frames={} sample_index={} duration_ticks={} time_base={}",
-        Sha256::digest(bytes), bytes.len(), proof.count, proof.sample_index, proof.duration_ticks, proof.time_base);
+    eprintln!(
+        "normal_segment_video_proof sha256={:x} bytes={} frames={} sample_index={} duration_ticks={} time_base={}",
+        Sha256::digest(bytes),
+        bytes.len(),
+        video_proof.count,
+        video_proof.sample_index,
+        video_proof.duration_ticks,
+        video_proof.time_base
+    );
+    let audio_diagnostic = segment_audio_diagnostic(audio, frames);
+    eprintln!(
+        "normal_segment_audio_probe {}",
+        json!({
+            "input_bytes": bytes.len(),
+            "segment_sha256": format!("{:x}", Sha256::digest(bytes)),
+            "video_decoded_frames": video_proof.count,
+            "video_duration_ticks": video_proof.duration_ticks,
+            "video_time_base_den": Some(video_proof.time_base_den),
+            "video_time_base_num": Some(video_proof.time_base_num),
+            "audio": audio_diagnostic,
+        })
+    );
+    // Emit the bounded metadata above before new AAC timing assertions so a
+    // failed proof retains useful numeric evidence without exception strings.
+    let (_, audio) = single_av_streams(streams)
+        .expect("exactly one video and one audio stream required by fixed live profile");
+    let audio_proof =
+        segment_audio_proof(audio, frames).expect("selected profile AAC packet proof required");
+    assert!(
+        audio_matches_video_window(&video_proof, &audio_proof),
+        "AAC audio endpoints do not match the video window within one AAC frame"
+    );
     SEGMENT_VIDEO_PROOFS.with(|rows| {
         let mut rows = rows.borrow_mut();
         assert!(rows.len() < 64, "bounded segment proof summary required");
         rows.push(
             json!({"sha256":format!("{:x}", Sha256::digest(bytes)), "bytes":bytes.len(),
-            "decoded_video_frames":proof.count,"sample_index":proof.sample_index,
-            "duration_ticks":proof.duration_ticks,"time_base":proof.time_base}),
+            "decoded_video_frames":video_proof.count,"sample_index":video_proof.sample_index,
+            "duration_ticks":video_proof.duration_ticks,"time_base":video_proof.time_base}),
         );
     });
-    proof
+    SegmentMediaProof {
+        video: video_proof,
+        audio: audio_proof,
+        segment_sha256: format!("{:x}", Sha256::digest(bytes)),
+    }
 }
 
-fn decode_segment_rgb(ffmpeg: &Path, bytes: &[u8]) -> Vec<u8> {
+fn decode_segment_rgb(ffmpeg: &Path, bytes: &[u8]) -> (Vec<u8>, SegmentMediaProof) {
     let identity = Sha256::digest(bytes);
     let ffprobe = PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFPROBE").unwrap());
     let proof = ffprobe_segment(&ffprobe, bytes);
-    let select = format!(r"select=eq(n\,{})", proof.sample_index);
+    let select = format!(r"select=eq(n\,{})", proof.video.sample_index);
     assert!(
         bytes.len() >= 188 && bytes.len() <= 8 * 1024 * 1024,
         "bounded TS output segment required"
@@ -1956,13 +2591,23 @@ fn decode_segment_rgb(ffmpeg: &Path, bytes: &[u8]) -> Vec<u8> {
         rows.borrow_mut().last_mut().expect("owned segment proof")["source_identity_unchanged"] =
             json!(true);
     });
-    output
+    (output, proof)
 }
 
-fn decode_segment_pcm(ffmpeg: &Path, bytes: &[u8]) -> Vec<i16> {
+fn decode_segment_pcm(
+    ffmpeg: &Path,
+    bytes: &[u8],
+    role: PcmProofRole,
+    proof: &SegmentMediaProof,
+) -> Vec<i16> {
     assert!(
         bytes.len() >= 188 && bytes.len() <= 8 * 1024 * 1024,
         "bounded TS output segment required"
+    );
+    assert_eq!(
+        format!("{:x}", Sha256::digest(bytes)),
+        proof.segment_sha256,
+        "PCM decode must use the segment bytes covered by the A/V proof"
     );
     let (_, output) = run_bounded_filter(
         ffmpeg,
@@ -1986,9 +2631,28 @@ fn decode_segment_pcm(ffmpeg: &Path, bytes: &[u8]) -> Vec<i16> {
         512 * 1024,
         false,
     );
+    let pcm_range = resampled_pcm_sample_range(proof.audio.sample_count)
+        .expect("bounded selected-profile AAC sample count");
+    eprintln!(
+        "normal_segment_pcm_probe {}",
+        json!({
+            "max_pcm_bytes": 16_000 * 2 * 8,
+            "resampled_pcm_samples_floor": pcm_range.0,
+            "resampled_pcm_samples_ceil": pcm_range.1,
+            "pcm_bytes": output.len(),
+            "pcm_even_bytes": output.len() % 2 == 0,
+            "pcm_samples": output.len() / 2,
+            "role": role.label(),
+            "segment_input_bytes": bytes.len(),
+            "segment_sha256": proof.segment_sha256,
+            "video_time_base_den": proof.video.time_base_den,
+            "video_time_base_num": proof.video.time_base_num,
+            "audio_sample_count": proof.audio.sample_count,
+        })
+    );
     assert!(
-        output.len() >= 16_000 * 2 && output.len() <= 16_000 * 2 * 8,
-        "decoded HLS PCM length outside bounded interval"
+        pcm_matches_audio_sample_count(&proof.audio, output.len()),
+        "decoded HLS PCM does not match bounded AAC samples after resampling"
     );
     output
         .chunks_exact(2)
@@ -2539,13 +3203,13 @@ fn run_normal_production(mode: ProductionMode) {
     let _ = wait_new_segment(&api_origin, playlist, &mut grid_seen, grid_end);
     let (_, _, grid_segment) = wait_new_segment(&api_origin, playlist, &mut grid_seen, grid_end);
     let ffmpeg = PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFMPEG").unwrap());
-    let rgb = decode_segment_rgb(&ffmpeg, &grid_segment);
+    let (rgb, grid_proof) = decode_segment_rgb(&ffmpeg, &grid_segment);
     for slot_id in 0..9usize {
         let x = [107, 320, 533][slot_id % 3];
         let y = [60, 180, 300][slot_id / 3];
         assert_cell_color(&rgb, x, y, (slot_id % 3 + 1) as u8);
     }
-    let pcm = decode_segment_pcm(&ffmpeg, &grid_segment);
+    let pcm = decode_segment_pcm(&ffmpeg, &grid_segment, PcmProofRole::Grid, &grid_proof);
     assert_audio_tone(&pcm, 330.0);
 
     // Stop and close every real slot before the separate sustained replacement
@@ -2704,10 +3368,18 @@ fn run_normal_production(mode: ProductionMode) {
             if let Some(path) = last_status["output"]["playlist_path"].as_str() {
                 if let Some((_, _, bytes)) = try_new_segment(&api_origin, path, &mut main_seen) {
                     let ffmpeg = PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFMPEG").unwrap());
-                    let rgb = decode_segment_rgb(&ffmpeg, &bytes);
+                    let (rgb, proof) = decode_segment_rgb(&ffmpeg, &bytes);
                     assert_cell_color(&rgb, 160, 180, 1);
                     assert_cell_color(&rgb, 480, 180, 2);
-                    assert_audio_tone(&decode_segment_pcm(&ffmpeg, &bytes), 330.0);
+                    assert_audio_tone(
+                        &decode_segment_pcm(
+                            &ffmpeg,
+                            &bytes,
+                            PcmProofRole::InitialSustained,
+                            &proof,
+                        ),
+                        330.0,
+                    );
                     output_checked = true;
                 }
             }
@@ -2766,8 +3438,9 @@ fn run_normal_production(mode: ProductionMode) {
                     {
                         let ffmpeg =
                             PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFMPEG").unwrap());
-                        let rgb = decode_segment_rgb(&ffmpeg, &bytes);
-                        let pcm = decode_segment_pcm(&ffmpeg, &bytes);
+                        let (rgb, proof) = decode_segment_rgb(&ffmpeg, &bytes);
+                        let pcm =
+                            decode_segment_pcm(&ffmpeg, &bytes, PcmProofRole::Replacement, &proof);
                         assert!(
                             !cell_matches_color(&rgb, 160, 180, 1),
                             "old source A appeared in a newly published post-replacement segment"
@@ -2850,8 +3523,13 @@ fn run_normal_production(mode: ProductionMode) {
         "late replacement output did not advance beyond the first confirmed new-source segment"
     );
     let late_ffmpeg = PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFMPEG").unwrap());
-    let late_rgb = decode_segment_rgb(&late_ffmpeg, &late_segment);
-    let late_pcm = decode_segment_pcm(&late_ffmpeg, &late_segment);
+    let (late_rgb, late_proof) = decode_segment_rgb(&late_ffmpeg, &late_segment);
+    let late_pcm = decode_segment_pcm(
+        &late_ffmpeg,
+        &late_segment,
+        PcmProofRole::LateSustained,
+        &late_proof,
+    );
     assert!(
         !cell_matches_color(&late_rgb, 160, 180, 1),
         "old video source returned in late HLS output"

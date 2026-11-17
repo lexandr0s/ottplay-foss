@@ -5825,7 +5825,7 @@ mod tests {
             .start_link_folder_path_tracked(movies, current.clone())
             .await
             .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 let scan = library.scan.lock().await;
                 if scan
@@ -5842,8 +5842,36 @@ mod tests {
                 tokio::task::yield_now().await;
             }
         })
-        .await
-        .expect("new source must complete while the old source worker is held");
+        .await;
+        if completed.is_err() {
+            // Failure-only, nonblocking observation; do not extend the deadline
+            // or release the old worker to make the selected source complete.
+            let observed = library.scan.try_lock().ok().map(|scan| {
+                let source = scan.source_scans.get(&selected.id);
+                let state = match source.map(|source| source.state) {
+                    None => "missing",
+                    Some("pending") => "pending",
+                    Some("scanning") => "scanning",
+                    Some("complete") => "complete",
+                    Some("error") => "error",
+                    Some(_) => "unknown",
+                };
+                (
+                    state,
+                    scan.work_epoch == Some(current.epoch()),
+                    scan.jobs,
+                    scan.cached,
+                    scan.error.is_some(),
+                    source.is_some_and(|source| source.error.is_some()),
+                    source.and_then(|source| source.available),
+                    scan.scanned,
+                )
+            });
+            panic!(
+                "new source must complete while the old source worker is held; \
+                 observed(state,current_epoch,jobs,cached,scan_error,source_error,available,scanned)={observed:?}"
+            );
+        }
         drop(held_worker);
         drop(current);
         wait_for_drain(&background).await;

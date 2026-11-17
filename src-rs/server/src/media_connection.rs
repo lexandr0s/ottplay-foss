@@ -8,7 +8,10 @@ use std::{
     future::Future,
     io::{self, IoSlice},
     pin::Pin,
-    sync::{Arc, Mutex, MutexGuard, Weak},
+    sync::{
+        atomic::{AtomicU64, AtomicU8, Ordering},
+        Arc, Mutex, MutexGuard, Weak,
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -20,6 +23,76 @@ use tokio::{
 
 const WRITE_IDLE: Duration = Duration::from_secs(30);
 const AUTHORITY_CHECK: Duration = Duration::from_millis(100);
+static NEXT_DIAGNOSTIC_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MediaFailureSite {
+    Body,
+    Supervisor,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MediaFailureKind {
+    TemporaryBusy,
+    Unavailable,
+    Denied,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MediaFailure {
+    pub(crate) site: MediaFailureSite,
+    pub(crate) kind: MediaFailureKind,
+}
+
+/// First closed authority failure for one accepted connection. This contains no
+/// request, credential, URL, or source identifiers and performs no I/O.
+pub(crate) struct FailureRecorder {
+    id: u64,
+    first: AtomicU8,
+}
+
+impl FailureRecorder {
+    fn new() -> Self {
+        Self {
+            id: NEXT_DIAGNOSTIC_ID.fetch_add(1, Ordering::Relaxed),
+            first: AtomicU8::new(0),
+        }
+    }
+
+    pub(crate) fn record(&self, site: MediaFailureSite, kind: MediaFailureKind) {
+        let code = match (site, kind) {
+            (MediaFailureSite::Body, MediaFailureKind::TemporaryBusy) => 1,
+            (MediaFailureSite::Body, MediaFailureKind::Unavailable) => 2,
+            (MediaFailureSite::Body, MediaFailureKind::Denied) => 3,
+            (MediaFailureSite::Supervisor, MediaFailureKind::TemporaryBusy) => 4,
+            (MediaFailureSite::Supervisor, MediaFailureKind::Unavailable) => 5,
+            (MediaFailureSite::Supervisor, MediaFailureKind::Denied) => 6,
+        };
+        let _ = self
+            .first
+            .compare_exchange(0, code, Ordering::Relaxed, Ordering::Relaxed);
+    }
+
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub(crate) fn first(&self) -> Option<MediaFailure> {
+        let (site, kind) = match self.first.load(Ordering::Relaxed) {
+            1 => (MediaFailureSite::Body, MediaFailureKind::TemporaryBusy),
+            2 => (MediaFailureSite::Body, MediaFailureKind::Unavailable),
+            3 => (MediaFailureSite::Body, MediaFailureKind::Denied),
+            4 => (
+                MediaFailureSite::Supervisor,
+                MediaFailureKind::TemporaryBusy,
+            ),
+            5 => (MediaFailureSite::Supervisor, MediaFailureKind::Unavailable),
+            6 => (MediaFailureSite::Supervisor, MediaFailureKind::Denied),
+            _ => return None,
+        };
+        Some(MediaFailure { site, kind })
+    }
+}
 
 /// Implemented by broker custody, using existing authority checks only.
 /// The implementation must be bounded, synchronous and perform no media I/O.
@@ -64,6 +137,7 @@ struct Inner {
     changed: Notify,
     write_idle: Duration,
     authority_check: Duration,
+    failure: Arc<FailureRecorder>,
 }
 
 /// One owner per accepted connection. No timer runs until prepare_response
@@ -89,6 +163,10 @@ impl ConnectionControl {
         }
     }
 
+    pub(crate) fn failure_recorder(&self) -> Arc<FailureRecorder> {
+        self.0.failure.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn with_test_budgets(write_idle: Duration, authority_check: Duration) -> Self {
         Self::with_budgets(write_idle, authority_check)
@@ -106,6 +184,7 @@ impl ConnectionControl {
             changed: Notify::new(),
             write_idle,
             authority_check,
+            failure: Arc::new(FailureRecorder::new()),
         }))
     }
 
