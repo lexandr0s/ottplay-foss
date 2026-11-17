@@ -428,7 +428,7 @@ for (const format of ["JSON", "XML"]) {
 }
 
 // Exercise the actual channel-style provider UI, including production routing.
-async function openPlexChannels(page, engine) {
+async function openPlexChannels(page, engine, diagnosticPhase) {
     await page.waitForFunction(
         () =>
             window.__ottActiveProviderDriver?.libraryReady() &&
@@ -442,7 +442,7 @@ async function openPlexChannels(page, engine) {
         try {
             const record = JSON.parse(text.slice(prefix.length));
             if (
-                record.mode === firefoxVideojsPhase &&
+                record.mode === diagnosticPhase &&
                 record.attempts === 1 &&
                 record.phaseObserved === true &&
                 Object.keys(record).sort().join(",") ===
@@ -453,7 +453,7 @@ async function openPlexChannels(page, engine) {
             // Never forward arbitrary page output or native errors.
         }
     };
-    const observePhase = engine === "video.js" && !!firefoxVideojsPhase;
+    const observePhase = engine === "video.js" && !!diagnosticPhase;
     if (observePhase) page.on("console", onPhase);
     try {
         await observeAspectReadiness(
@@ -1652,7 +1652,7 @@ for (const { engine, strict } of [
             await page.setViewportSize({ height: 720, width: 960 });
             await page.goto(engine === "video.js" ? "/f/pc2/" : "/f/pc/");
             await page.keyboard.press("Shift");
-            await openPlexChannels(page, engine);
+            await openPlexChannels(page, engine, firefoxVideojsPhase);
             await selectPlexChannel(page, films[0].title);
             let previousReadySource = null;
             async function ready(id, phase) {

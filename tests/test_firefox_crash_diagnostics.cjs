@@ -712,10 +712,12 @@ test("ordinary Plex transition remains synchronous with its original four calls"
 });
 
 test("phase diagnostics use a separate manual-only pinned caller and closed phase matrix", () => {
-    const workflow = fs.readFileSync(
-        path.join(__dirname, "../.github/workflows/ci.yml"),
-        "utf8"
-    );
+    const workflow = fs
+        .readFileSync(
+            path.join(__dirname, "../.github/workflows/ci.yml"),
+            "utf8"
+        )
+        .replace(/\r\n/g, "\n");
     const job = workflow.split("\n  firefox-phase-diagnostic:\n")[1];
     assert.ok(job);
     assert.match(
