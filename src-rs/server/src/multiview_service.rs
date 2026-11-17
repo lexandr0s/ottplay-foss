@@ -3,7 +3,7 @@
 //! Media admission requires a validated protected operator plan; no listener is
 //! created by this module. Unconfigured operation retains zero media capacity.
 use crate::{
-    multiview_broker::{Broker, OperatorConfig, SystemClock},
+    multiview_broker::{Broker, Clock, OperatorConfig, SystemClock},
     multiview_operator::{LoadedOperatorConfig, MediaConfig, MediaPlan},
 };
 use anyhow::{ensure, Result};
@@ -15,6 +15,7 @@ use axum::{
     Router,
 };
 use std::{
+    io::Write,
     net::{IpAddr, SocketAddr},
     sync::Arc,
 };
@@ -133,6 +134,12 @@ impl Service {
         // Validate and enroll all source authority before any listener binds.
         // No source URL or credential is accepted from the private wire API.
         let clock = Arc::new(SystemClock::default());
+        // One closed sample of the exact authority clock, before media owners or listeners.
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "multiview_clock version=1 now_ms={}",
+            clock.now_ms()
+        );
         let broker = if let Some(media) = media {
             let mut plan: MediaPlan = media.prepare(&config)?;
             let registry = plan.registry();

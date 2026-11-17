@@ -1406,6 +1406,42 @@ def run_production_fixture(driver, budget, command, executable, tools, result, o
     result.update(staged)
 
 
+def require_credential_clock(value):
+    message = 'Production credential clock evidence malformed or out of bound'
+    keys = {'startup_sample_ms', 'observation_elapsed_ms', 'probe_elapsed_ms',
+            'lower_bound_ms', 'short_expires_ms'}
+    require(type(value) is dict and set(value) == keys
+            and all(type(number) is int and 0 <= number < 2**64 for number in value.values()), message)
+    require(value['startup_sample_ms'] > 0 and value['short_expires_ms'] > 0
+            and value['observation_elapsed_ms'] + value['probe_elapsed_ms'] < 600_000
+            and value['lower_bound_ms'] == value['startup_sample_ms'] + value['probe_elapsed_ms']
+            and value['lower_bound_ms'] >= value['short_expires_ms'], message)
+
+
+def require_seed_refusal_summaries(value):
+    message = 'Production seed refusal summaries malformed or incomplete'
+    require(type(value) is list and len(value) == 3, message)
+    keys = {'seed', 'body_first_count', 'body_later_count', 'supervisor_count', 'last', 'completed'}
+    sites = ('body_first', 'body_later', 'supervisor')
+    for seed, row in zip(('grid', 'main', 'replacement'), value, strict=True):
+        require(type(row) is dict and set(row) == keys and row['seed'] == seed
+                and row['completed'] is True, message)
+        counts = [row[site + '_count'] for site in sites]
+        require(all(type(count) is int and 0 <= count <= 2**64 - 1 for count in counts), message)
+        last = row['last']
+        if not any(counts):
+            require(last is None, message)
+            continue
+        require(type(last) is dict and set(last) == {
+            'site', 'marker', 'stderr_bytes', 'stderr_sha256', 'status', 'response_bytes'}, message)
+        require(last['site'] in sites and counts[sites.index(last['site'])] > 0
+                and type(last['marker']) is int and 1 <= last['marker'] < 2**64
+                and type(last['stderr_bytes']) is int and 1 <= last['stderr_bytes'] <= 65536
+                and type(last['stderr_sha256']) is str
+                and re.fullmatch(r'[0-9a-f]{64}', last['stderr_sha256']) is not None
+                and last['status'] is None and last['response_bytes'] is None, message)
+
+
 def require_segment_video_proofs(rows):
     require(type(rows) is list and 1 <= len(rows) <= 64,
             'Normal output segment proof collection is missing or unbounded')
@@ -1531,6 +1567,8 @@ def _run_production_mode(driver, budget, command, executable, tools, result, out
                 and type(observed.get('upstream_request_counts')) is dict,
                 'Normal production-server adapter receipt did not qualify its bounded contract')
         require_segment_video_proofs(observed.get('output_segment_video_proofs'))
+        require_seed_refusal_summaries(observed.get('seed_refusal_summaries'))
+        require_credential_clock(observed.get('credential_clock'))
         input_rows = ([{'id': row['id'], 'sha256': row['original_sha256'], 'bytes': row['original_bytes'], 'path': row['original_path']}
                        for row in manifest['sources']] if hls else manifest['inputs'])
         expected = {row['id']: row for row in input_rows}
@@ -1657,7 +1695,7 @@ def main(argv=None):
                  'src-rs/server/tests/multiview_production.rs',
                  'src-rs/server/tests/support/multiview_production_tls.rs',
                  'src-rs/server/tests/support/multiview_production_config.rs',
-                 'src-rs/server/src/multiview_operator.rs',
+                 'src-rs/server/src/multiview_operator.rs', 'src-rs/server/src/multiview_service.rs',
                  'src-rs/server/tests/support/hls_production.rs',
                  'src-rs/server/tests/multiview_broker_boundary.rs',
                  'src-rs/server/src/multiview_broker.rs', 'src-rs/server/src/multiview_broker_live.rs',

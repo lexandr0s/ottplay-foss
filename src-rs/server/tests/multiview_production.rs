@@ -43,6 +43,8 @@ use production_config::ProductionMode;
 thread_local! {
     // Bounded summaries only; raw segments, URLs and ffprobe JSON are never retained.
     static SEGMENT_VIDEO_PROOFS: std::cell::RefCell<Vec<Value>> = const { std::cell::RefCell::new(Vec::new()) };
+    // Three existing seed calls only; fixed-size Copy evidence, no raw stderr or URLs.
+    static SEED_REFUSAL_SUMMARIES: std::cell::RefCell<[Option<SeedCallSummary>; 3]> = const { std::cell::RefCell::new([None; 3]) };
     // Bound only this test thread's owned normal-server stderr, never an arbitrary file.
     static FAILURE_STDERR_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
@@ -263,6 +265,79 @@ fn startup_diagnostic_tail_is_bounded_and_redacts_fixture_secrets_and_urls() {
     assert!(!format!("{redacted:?}").contains('\u{1b}'));
     let long = vec![b'x'; 65536];
     assert_eq!(redacted_startup_tail(&long, root).len(), 8192);
+
+    let line = b"multiview_clock version=1 now_ms=1100\n";
+    assert_eq!(startup_clock_sample(line), Some(1100));
+    assert_eq!(
+        startup_clock_sample(b"other closed event\nmultiview_clock version=1 now_ms=1100\n"),
+        Some(1100)
+    );
+    for invalid in [
+        b"".as_slice(),
+        b"other closed event\n",
+        b"multiview_clock version=1 now_ms=1100",
+        b"multiview_clock version=1 now_ms=1100\npartial tail",
+        b"multiview_clock version=1 now_ms=1100\nmultiview_clock version=1 now_ms=1100\n",
+        b"multiview_clock version=2 now_ms=1100\n",
+        b"multiview_clock version=1 now_ms=\n",
+        b"multiview_clock version=1 now_ms=0\n",
+        b"multiview_clock version=1 now_ms=01100\n",
+        b"multiview_clock version=1 now_ms=+1100\n",
+        b"multiview_clock version=1 now_ms=-1\n",
+        b"multiview_clock version=1 now_ms=1100 extra=1\n",
+        b"multiview_clock version=1 now_ms=1100\r\n",
+        b"multiview_clock version=1 now_ms=18446744073709551616\n",
+        b"multiview_clock version=1 now_ms=\xff\n",
+    ] {
+        assert_eq!(startup_clock_sample(invalid), None);
+    }
+    assert_eq!(startup_clock_sample(&vec![b'\n'; 65537]), None);
+    assert_eq!(
+        startup_clock_sample(b"multiview_clock version=1 now_ms=18446744073709551615\n"),
+        Some(u64::MAX)
+    );
+
+    // A steady wall clock already at E need not imply broker Clock >= E:
+    // its separate startup-wall and elapsed floors can lose a millisecond.
+    let wall_anchor_us = 1_100_750_u64;
+    let monotonic_anchor_us = 1_101_000_u64;
+    let wall_now_us = 61_000_100_u64;
+    let expiry_ms = 61_000_u64;
+    let authority_now = wall_anchor_us / 1000 + (wall_now_us - monotonic_anchor_us) / 1000;
+    assert!(wall_now_us / 1000 >= expiry_ms);
+    assert_eq!(authority_now, expiry_ms - 1);
+    assert_eq!(
+        broker_clock_lower_bound(authority_now, Duration::ZERO),
+        Some(expiry_ms - 1)
+    );
+    assert_eq!(
+        broker_clock_lower_bound(authority_now, Duration::from_micros(999)),
+        Some(expiry_ms - 1)
+    );
+    assert_eq!(
+        broker_clock_lower_bound(authority_now, Duration::from_millis(1)),
+        Some(expiry_ms)
+    );
+
+    // Delayed observation remains conservative across fractional floor carries.
+    for delay_us in [0_u64, 250, 999, 1000, 125_750] {
+        for elapsed_us in [0_u64, 1, 999, 1000, 59_999_999] {
+            let sample_us = 12_750_u64;
+            let sample_ms = 1100 + sample_us / 1000;
+            let current_ms = 1100 + (sample_us + delay_us + elapsed_us) / 1000;
+            let bound =
+                broker_clock_lower_bound(sample_ms, Duration::from_micros(elapsed_us)).unwrap();
+            assert!(bound <= current_ms);
+        }
+    }
+    assert_eq!(
+        broker_clock_lower_bound(u64::MAX, Duration::from_millis(1)),
+        None
+    );
+    assert_eq!(
+        broker_clock_lower_bound(1, Duration::from_secs(u64::MAX)),
+        None
+    );
 }
 
 struct FixtureHttp {
@@ -324,6 +399,39 @@ fn fixture_http() -> &'static FixtureHttp {
             https_media_requests: std::sync::atomic::AtomicUsize::new(0),
         }
     })
+}
+
+// The sample is from the same server Clock that authenticates credentials.
+// Only a complete unique canonical record in the owned bounded file qualifies.
+fn startup_clock_sample(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty() || bytes.len() > 65536 || bytes.last() != Some(&b'\n') {
+        return None;
+    }
+    let mut sample = None;
+    for line in bytes.split(|byte| *byte == b'\n') {
+        if !line.starts_with(b"multiview_clock") {
+            continue;
+        }
+        let value = line.strip_prefix(b"multiview_clock version=1 now_ms=")?;
+        if sample.is_some()
+            || value.is_empty()
+            || value.len() > 20
+            || value[0] == b'0'
+            || !value.iter().all(u8::is_ascii_digit)
+        {
+            return None;
+        }
+        sample = Some(std::str::from_utf8(value).ok()?.parse::<u64>().ok()?);
+    }
+    sample
+}
+
+// Observation follows sampling on the same host's monotonic clock. Therefore
+// sample + floor(elapsed_since_observation) <= current broker Clock, including
+// fractional milliseconds and delayed observation. This is not a wall-clock
+// expiry or exact physical cleanup-latency measurement.
+fn broker_clock_lower_bound(sample_ms: u64, elapsed: Duration) -> Option<u64> {
+    sample_ms.checked_add(u64::try_from(elapsed.as_millis()).ok()?)
 }
 
 fn now_ms() -> u64 {
@@ -1577,7 +1685,7 @@ fn seed_site(site: media_attempt::Site) -> (&'static str, usize) {
         media_attempt::Site::Supervisor => ("supervisor", 2),
     }
 }
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct SeedRefusalSummary {
     counts: [u64; 3],
     last: Option<SeedRefusal>,
@@ -1588,6 +1696,37 @@ impl SeedRefusalSummary {
         self.counts[index] = self.counts[index].saturating_add(1);
         self.last = Some(proof);
     }
+}
+#[derive(Clone, Copy)]
+struct SeedCallSummary {
+    summary: SeedRefusalSummary,
+    completed: bool,
+}
+fn retain_seed_summary(summary: SeedRefusalSummary, completed: bool) {
+    SEED_REFUSAL_SUMMARIES.with(|rows| {
+        let mut rows = rows.borrow_mut();
+        let slot = rows
+            .iter_mut()
+            .find(|row| row.is_none())
+            .expect("only the three existing seed calls may retain summaries");
+        *slot = Some(SeedCallSummary { summary, completed });
+    });
+}
+fn seed_refusal_receipt() -> Value {
+    SEED_REFUSAL_SUMMARIES.with(|rows| {
+        Value::Array(rows.borrow().iter().enumerate().map(|(index, row)| {
+            let call = row.expect("all three seed summaries required");
+            let last = call.summary.last.map(|proof| json!({
+                "site":seed_site(proof.site).0,"marker":proof.marker.get(),
+                "stderr_bytes":proof.stderr_bytes,
+                "stderr_sha256":proof.stderr_sha256.iter().map(|byte|format!("{byte:02x}")).collect::<String>(),
+                "status":null,"response_bytes":null,
+            }));
+            json!({"seed":["grid","main","replacement"][index],
+                "body_first_count":call.summary.counts[0],"body_later_count":call.summary.counts[1],
+                "supervisor_count":call.summary.counts[2],"last":last,"completed":call.completed})
+        }).collect())
+    })
 }
 impl std::fmt::Display for SeedRefusalSummary {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1879,6 +2018,8 @@ fn playlist_snapshot_seed_until(
             }
         }
     };
+    // Persist classifications (not necessarily retries) even when libtest hides successful stderr.
+    retain_seed_summary(summary, result.is_ok());
     // One closed summary per seed call, only after its requests have completed.
     // Preserve the original status=None: this is not a fabricated HTTP 503.
     if summary.last.is_some() {
@@ -2149,6 +2290,45 @@ fn playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts() {
     let printed = summary.to_string();
     assert!(printed.contains("body_first_count=1 body_later_count=1 supervisor_count=1"));
     assert!(printed.contains("last_site=supervisor last_marker=41 status=None response_bytes=None"));
+    SEED_REFUSAL_SUMMARIES.with(|rows| *rows.borrow_mut() = [None; 3]);
+    retain_seed_summary(SeedRefusalSummary::default(), true);
+    retain_seed_summary(summary, true);
+    retain_seed_summary(SeedRefusalSummary::default(), false);
+    let retained = seed_refusal_receipt();
+    let last_line = format!(
+        "{}\n",
+        media_attempt::Terminal {
+            site: media_attempt::Site::Supervisor,
+            ..event
+        }
+    );
+    let last_snapshot = [old.as_slice(), last_line.as_bytes()].concat();
+    assert_eq!(retained.as_array().unwrap().len(), 3);
+    assert_eq!(retained[0]["seed"], "grid");
+    assert_eq!(retained[0]["body_first_count"], 0);
+    assert_eq!(retained[0]["body_later_count"], 0);
+    assert_eq!(retained[0]["supervisor_count"], 0);
+    assert!(retained[0]["last"].is_null());
+    assert_eq!(retained[0]["completed"], true);
+    assert_eq!(retained[1]["seed"], "main");
+    assert_eq!(retained[1]["body_first_count"], 1);
+    assert_eq!(retained[1]["body_later_count"], 1);
+    assert_eq!(retained[1]["supervisor_count"], 1);
+    assert_eq!(retained[1]["last"]["site"], "supervisor");
+    assert_eq!(retained[1]["last"]["marker"], 41);
+    assert_eq!(retained[1]["last"]["stderr_bytes"], last_snapshot.len());
+    assert_eq!(
+        retained[1]["last"]["stderr_sha256"],
+        format!("{:x}", Sha256::digest(&last_snapshot))
+    );
+    assert!(retained[1]["last"]["status"].is_null());
+    assert!(retained[1]["last"]["response_bytes"].is_null());
+    assert_eq!(retained[2]["seed"], "replacement");
+    assert_eq!(retained[2]["completed"], false);
+    assert!(std::panic::catch_unwind(|| retain_seed_summary(summary, true)).is_err());
+    assert_eq!(seed_refusal_receipt(), retained);
+    SEED_REFUSAL_SUMMARIES.with(|rows| *rows.borrow_mut() = [None; 3]);
+    assert!(std::panic::catch_unwind(seed_refusal_receipt).is_err());
     let checked_hash: [u8; 32] = Sha256::digest(&bytes).into();
     for (tail, outcome) in [
         (Vec::new(), SeedEvaluationOutcome::MissingRecord),
@@ -3484,6 +3664,7 @@ fn normal_server_private_http_hls_renew_replace_and_cleanup() {
 }
 fn run_normal_production(mode: ProductionMode) {
     let started = Instant::now();
+    SEED_REFUSAL_SUMMARIES.with(|rows| *rows.borrow_mut() = [None; 3]);
     let mut root = OwnedRoot::new();
     let _failure_stderr = FailureStderrGuard::install(&root.0);
     let mut tls = production_tls::SyntheticTls::generate(&root.0);
@@ -3591,6 +3772,8 @@ fn run_normal_production(mode: ProductionMode) {
     );
     let startup_deadline = Instant::now() + STARTUP_LIMIT;
     let server_epoch;
+    let clock_sample_ms;
+    let clock_observed;
     loop {
         if let Some(status) = server.0.try_wait().expect("server process status") {
             panic!(
@@ -3605,6 +3788,17 @@ fn run_normal_production(mode: ProductionMode) {
             256 * 1024,
         );
         if code == 200 {
+            let (_, _, startup_bytes) =
+                owned_stderr_snapshot().expect("owned bounded startup clock snapshot");
+            clock_sample_ms =
+                startup_clock_sample(&startup_bytes).expect("unique complete startup clock sample");
+            // Capture only AFTER the complete record was observed, before the
+            // potentially expensive TLS rejection probes below.
+            clock_observed = Instant::now();
+            assert!(
+                clock_observed < startup_deadline,
+                "startup clock observation exceeded unchanged startup bound"
+            );
             let capabilities: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(capabilities["max_inputs"], 9);
             assert_eq!(
@@ -3722,9 +3916,28 @@ fn run_normal_production(mode: ProductionMode) {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    while now_ms() < short_expires {
+    // Keep the one-shot 401 oracle, but wait on a conservative lower bound of
+    // its authority clock. Cleanup below is measured after observed expiry,
+    // not from an inferred physical wall-clock boundary.
+    let credential_clock = loop {
+        let probe_observed = Instant::now();
+        assert!(
+            probe_observed.duration_since(started) < RUN_LIMIT,
+            "credential expiry observation exceeded unchanged run bound"
+        );
+        let probe_elapsed = probe_observed.duration_since(clock_observed);
+        let lower_bound = broker_clock_lower_bound(clock_sample_ms, probe_elapsed)
+            .expect("startup clock lower bound overflow");
+        if lower_bound >= short_expires {
+            break json!({
+                "startup_sample_ms":clock_sample_ms,
+                "observation_elapsed_ms":u64::try_from(clock_observed.duration_since(started).as_millis()).expect("clock observation duration bound"),
+                "probe_elapsed_ms":u64::try_from(probe_elapsed.as_millis()).expect("clock probe duration bound"),
+                "lower_bound_ms":lower_bound,"short_expires_ms":short_expires,
+            });
+        }
         thread::sleep(Duration::from_millis(50));
-    }
+    };
     let (expired_code, _) = get(
         &api_origin,
         "/multiview/v1/capabilities",
@@ -3733,7 +3946,7 @@ fn run_normal_production(mode: ProductionMode) {
     );
     assert_eq!(
         expired_code, 401,
-        "expired control credential remained usable"
+        "expired control credential remained usable; credential_clock={credential_clock}"
     );
     let mut expired = false;
     for _ in 0..30 {
@@ -4378,6 +4591,7 @@ fn run_normal_production(mode: ProductionMode) {
     let receipt = json!({
         "schema":"ottplay.multiview.production-binary.v1","pass":true,
         "output_segment_video_proofs":SEGMENT_VIDEO_PROOFS.with(|rows| rows.borrow().clone()),
+        "seed_refusal_summaries":seed_refusal_receipt(),
         "input_adapter":mode.adapter(),"sequential_contexts":sequential_sessions.len(),
         "sequential_output_generations":sequential_outputs.len(),"active_sigterm":true,"hls_source":hls_source_evidence,
         "tls":tls.receipt(),
@@ -4385,6 +4599,7 @@ fn run_normal_production(mode: ProductionMode) {
         "scope":if mode == ProductionMode::RawMpegTs { "Normal production HTTPS control/HLS with a private RFC1918 HTTP MPEG-TS adapter, all nine advertised slots and private HLS output; no native-player or physical-television qualification" } else { "Normal production HTTPS control/HLS with a private RFC1918 live HLS MPEG-TS adapter, one master level and sliding media windows; no native-player or physical-television qualification" },
         "elapsed_seconds":started.elapsed().as_secs(),"sustained_seconds":sustained_started.elapsed().as_secs(),
         "credential_expiry_rejected":expired,
+        "credential_clock":credential_clock,
         "expiry_output_was_active":true,"expired_source_connections_closed":true,
         "expired_output_cleanup":true,"graceful_shutdown":true,"shutdown_signal":"SIGTERM",
         "output_directory_empty":true,
