@@ -12,9 +12,10 @@ use archive_v2::{sha256, Archive};
 use ottplay_core::multiview::{
     decoder::{self, BoundContext, DecoderError, GrantedStream, PublicationAuthority},
     encoder::{
-        EncoderError, EncoderFailureDetail, EncoderFailureLane, EncoderFailureSite,
-        EncoderPublicationOutcome, EncoderSelectionAge, EncoderState, EncoderWriteFailure,
-        EncoderWritePhase, EncoderWriteScope,
+        CompositorOutcome, CompositorProgressSnapshot, CompositorStage, EncoderError,
+        EncoderFailureDetail, EncoderFailureLane, EncoderFailureSite, EncoderPublicationOutcome,
+        EncoderSelectionAge, EncoderState, EncoderWriteFailure, EncoderWritePhase,
+        EncoderWriteScope,
     },
     frames::FrameSpec,
     geometry::{CanvasSpec, ImportedRect, OverlapPolicy, ValidatedGeometry},
@@ -318,6 +319,30 @@ fn selection_age_json(selection: EncoderSelectionAge) -> Value {
             "capture_to_target_ns":attempt.capture_to_target_ns,
             "eligible_mask":attempt.eligible_mask,"outcome":outcome})
     });
+    let compositor_progress = selection.compositor_progress.map(|progress| {
+        let stage = match progress.stage {
+            CompositorStage::NotStarted => "NotStarted",
+            CompositorStage::WaitingDeadline => "WaitingDeadline",
+            CompositorStage::BeforeSnapshotState => "BeforeSnapshotState",
+            CompositorStage::SnapshotStateAcquired => "SnapshotStateAcquired",
+            CompositorStage::FramesFrozen => "FramesFrozen",
+            CompositorStage::Composing => "Composing",
+            CompositorStage::BeforePublishState => "BeforePublishState",
+            CompositorStage::PublishStateAcquired => "PublishStateAcquired",
+            CompositorStage::PreFeedRejected => "PreFeedRejected",
+            CompositorStage::BeforeFeedCall => "BeforeFeedCall",
+            CompositorStage::FeedReturned => "FeedReturned",
+            CompositorStage::Completed => "Completed",
+        };
+        let outcome = match progress.outcome {
+            CompositorOutcome::None => "None",
+            CompositorOutcome::PreFeedRejected => "PreFeedRejected",
+            CompositorOutcome::FeedDeclined => "FeedDeclined",
+            CompositorOutcome::FeedAccepted => "FeedAccepted",
+            CompositorOutcome::FeedError => "FeedError",
+        };
+        compositor_progress_json(progress, stage, outcome)
+    });
     json!({"window_index":selection.window_index,
         "candidate_age_ns":selection.candidate_age_ns,"limit_ns":selection.limit_ns,
         "candidate_sequence":selection.candidate_sequence,
@@ -325,7 +350,20 @@ fn selection_age_json(selection: EncoderSelectionAge) -> Value {
         "bucket_sequences":selection.bucket_sequences,
         "bucket_capture_to_target_ns":selection.bucket_capture_to_target_ns,
         "last_capture_to_target_ns":selection.last_capture_to_target_ns,
-        "last_publication":last_publication})
+        "last_publication":last_publication,
+        "compositor_progress":compositor_progress})
+}
+
+fn compositor_progress_json(
+    progress: CompositorProgressSnapshot,
+    stage: &str,
+    outcome: &str,
+) -> Value {
+    json!({"output_generation":progress.output_generation,
+        "attempt_tick":progress.attempt_tick,
+        "completed_attempt_tick":progress.completed_attempt_tick,
+        "stage":stage,"outcome":outcome,"elapsed_ns":progress.elapsed_ns,
+        "stage_age_at_sample_ns":progress.stage_age_at_sample_ns})
 }
 fn write_failure_json(write: EncoderWriteFailure) -> Value {
     let phase = match write.phase {
@@ -1126,6 +1164,7 @@ mod output_failure_tests {
                     outcome: EncoderPublicationOutcome::NoEligible,
                 },
             ),
+            compositor_progress: None,
         }
     }
 
@@ -1411,7 +1450,8 @@ mod output_failure_tests {
                 "bucket_capture_to_target_ns":[-201,null,1],
                 "last_capture_to_target_ns":0,
                 "last_publication":{"window_index":0,"capture_to_target_ns":0,
-                    "eligible_mask":0,"outcome":"NoEligible"}
+                    "eligible_mask":0,"outcome":"NoEligible"},
+                "compositor_progress":null
             })
         );
         let absent = selection_age_json(EncoderSelectionAge {
@@ -1429,6 +1469,27 @@ mod output_failure_tests {
         );
         assert!(absent["last_publication"].is_null());
         assert_eq!(absent["candidate_sequence"].as_u64(), Some(0));
+        let progress = CompositorProgressSnapshot {
+            output_generation: 9,
+            attempt_tick: 12,
+            completed_attempt_tick: 11,
+            stage: CompositorStage::WaitingDeadline,
+            outcome: CompositorOutcome::FeedAccepted,
+            elapsed_ns: 23,
+            stage_age_at_sample_ns: 29,
+        };
+        let encoded = selection_age_json(EncoderSelectionAge {
+            compositor_progress: Some(progress),
+            ..selection_age()
+        });
+        assert_eq!(
+            encoded["compositor_progress"],
+            json!({
+                "output_generation":9,"attempt_tick":12,"completed_attempt_tick":11,
+                "stage":"WaitingDeadline","outcome":"FeedAccepted","elapsed_ns":23,
+                "stage_age_at_sample_ns":29
+            })
+        );
         assert!(failure_detail_json(Some(detail(EncoderError::Stalled)))
             .get("selection_age")
             .is_none());
