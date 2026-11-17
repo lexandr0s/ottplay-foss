@@ -302,6 +302,7 @@ fn media_checks_and_reporting_never_renew_and_held_body_loses_authority() {
         broker: broker.clone(),
         record: record.clone(),
         token: record.token.clone(),
+        failure: ConnectionControl::new().failure_recorder(),
         _permit: broker.0.streams.clone().try_acquire_owned().unwrap(),
     });
     let output = Output {

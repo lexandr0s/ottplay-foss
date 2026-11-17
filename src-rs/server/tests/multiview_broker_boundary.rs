@@ -1029,6 +1029,141 @@ impl Drop for TestConnection {
     }
 }
 
+// Unlike TestConnection::begin, this one holds the real authority mutex after
+// the route has admitted a response but before Hyper receives that response.
+struct PreHeaderTestConnection {
+    client: Option<DuplexStream>,
+    task: Option<
+        tokio::task::JoinHandle<Result<Result<(), hyper::Error>, media_connection::MediaStop>>,
+    >,
+    control: media_connection::ConnectionControl,
+    admitted: Option<tokio::sync::oneshot::Receiver<bool>>,
+    release: Option<tokio::sync::oneshot::Sender<()>>,
+}
+impl PreHeaderTestConnection {
+    fn new(app: axum::Router) -> Self {
+        let (client, server) = tokio::io::duplex(1_024);
+        let control = media_connection::ConnectionControl::with_test_budgets(
+            Duration::from_secs(30),
+            Duration::from_millis(10),
+        );
+        let owner = control.clone();
+        let requests = control.clone();
+        let (admitted_tx, admitted_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let response_barrier = Arc::new(std::sync::Mutex::new(Some((admitted_tx, release_rx))));
+        let task = tokio::spawn(async move {
+            let io = hyper_util::rt::TokioIo::new(owner.watch_io(server));
+            owner
+                .supervise(hyper::server::conn::http1::Builder::new().serve_connection(
+                    io,
+                    hyper::service::service_fn(
+                        move |mut request: Request<hyper::body::Incoming>| {
+                            let mut app = app.clone();
+                            let requests = requests.clone();
+                            let version = request.version();
+                            request.extensions_mut().insert(requests.clone());
+                            let response_barrier = response_barrier.clone();
+                            async move {
+                                let response = app.call(request).await.unwrap();
+                                let admitted = response
+                                    .extensions()
+                                    .get::<media_connection::MediaLease>()
+                                    .is_some();
+                                let barrier = response_barrier.lock().unwrap().take();
+                                if let Some((admitted_tx, release_rx)) = barrier {
+                                    let _ = admitted_tx.send(admitted);
+                                    let _ = release_rx.await;
+                                }
+                                let response = requests
+                                    .prepare_response(response, version)
+                                    .unwrap_or_else(|_| {
+                                        Response::builder()
+                                            .status(StatusCode::SERVICE_UNAVAILABLE)
+                                            .header("content-type", "application/json")
+                                            .body(Body::from(
+                                                r#"{"version":1,"error":"backend_unavailable"}"#,
+                                            ))
+                                            .unwrap()
+                                    });
+                                Ok::<_, std::convert::Infallible>(response)
+                            }
+                        },
+                    ),
+                ))
+                .await
+        });
+        Self {
+            client: Some(client),
+            task: Some(task),
+            control,
+            admitted: Some(admitted_rx),
+            release: Some(release_tx),
+        }
+    }
+
+    async fn admit(&mut self, path: &str) {
+        self.client
+            .as_mut()
+            .unwrap()
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), self.admitted.take().unwrap())
+                .await
+                .expect("route admission did not complete")
+                .expect("route task stopped before admission")
+        );
+    }
+
+    fn release_response(&mut self) {
+        self.release
+            .take()
+            .unwrap()
+            .send(())
+            .expect("response barrier receiver disappeared");
+    }
+
+    async fn finished(&mut self) -> Result<Result<(), hyper::Error>, media_connection::MediaStop> {
+        let task = self.task.as_mut().unwrap();
+        match tokio::time::timeout(Duration::from_secs(2), &mut *task).await {
+            Ok(result) => {
+                self.task.take();
+                result.expect("owned pre-header connection task panicked")
+            }
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                self.task.take();
+                panic!("owned pre-header connection did not terminate within fixture bound");
+            }
+        }
+    }
+
+    async fn response_bytes(&mut self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            self.client.as_mut().unwrap().read_to_end(&mut bytes),
+        )
+        .await
+        .expect("pre-header response did not close within fixture bound")
+        .expect("duplex read failed");
+        bytes
+    }
+}
+impl Drop for PreHeaderTestConnection {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
 #[tokio::test]
 async fn media_missing_connection_and_http2_fail_before_stream_admission() {
     let fixture = Fixture::new();
@@ -1548,6 +1683,7 @@ impl Drop for HeldMediaMutex {
 }
 
 async fn media_mutex_contention_fails_closed_then_recovers(registry_lock: bool) {
+    preheader_media_mutex_contention_fails_closed_then_recovers(registry_lock).await;
     // Fixture and router retain their broker while the worker holds its mutex;
     // this test never asks a last-owner shutdown to run under that lock.
     let fixture = Fixture::new();
@@ -1649,6 +1785,49 @@ async fn media_mutex_contention_fails_closed_then_recovers(registry_lock: bool) 
         Err(BoundaryError::Conflict)
     );
     drop(admitted);
+    fixture
+        .broker
+        .acknowledge_reaped(&output.session_id, &output.output_generation)
+        .unwrap();
+}
+
+async fn preheader_media_mutex_contention_fails_closed_then_recovers(registry_lock: bool) {
+    let fixture = Fixture::new();
+    let output = fixture.output(131_072, 10_000);
+    let segment = output
+        .playlist_path
+        .replace("index.m3u8", "segment-000000.ts");
+    let mut connection = PreHeaderTestConnection::new(fixture.broker.router());
+    connection.admit(&segment).await;
+    let held = HeldMediaMutex::new(&fixture, registry_lock);
+    connection.release_response();
+
+    assert!(matches!(
+        connection.finished().await,
+        Err(media_connection::MediaStop::AuthorityRevoked) | Ok(Err(_))
+    ));
+    assert!(held.is_held());
+    assert!(!connection.control.is_armed_for_test());
+    assert!(connection.response_bytes().await.is_empty());
+    let recorder = connection.control.failure_recorder();
+    let failure = recorder
+        .first()
+        .expect("closed authority failure must be recorded");
+    assert_eq!(
+        failure.kind,
+        media_connection::MediaFailureKind::TemporaryBusy
+    );
+    recorder.record(
+        media_connection::MediaFailureSite::Supervisor,
+        media_connection::MediaFailureKind::Unavailable,
+    );
+    assert_eq!(recorder.first(), Some(failure));
+    held.release();
+
+    let recovered = get(&fixture.broker, &segment).await;
+    assert_eq!(recovered.status(), StatusCode::OK);
+    drop(recovered);
+    fixture.broker.revoke_output(&output.session_id).unwrap();
     fixture
         .broker
         .acknowledge_reaped(&output.session_id, &output.output_generation)

@@ -196,3 +196,93 @@ requests capped at 5 ms and checks cancellation between requests. This improves
 cancellation responsiveness and avoids requesting a whole output period in one
 sleep; it does not guarantee an operating-system wakeup deadline, change capture
 frequency or relax the capture-age and output-debt limits.
+
+A server-side decode-open failure can also retain a close observation from that
+specific Play operation before retiring its source. The `decode_open_failure`
+record uses `try_lock` on its control mutex and copies only the first-close record and
+scalar session flags. It never calls the full Core snapshot, reads a cancellation
+token, waits for the session mutex, or retains a source/resource handle. A busy or
+poisoned mutex produces `observation_present=false`.
+
+`observation_mode=retained_only` means no fresh Core state was sampled;
+`session_cancelled=not_observed` is unknown, not evidence that cancellation was
+false. A stored first-close record remains historical evidence for this session,
+not necessarily the first event by wall-clock time. Source cleanup and reservation
+retirement retain their original result; diagnostic output is deferred until
+Pending/done and the operation receipt are complete. Do not attribute a nearby
+untagged watchdog line from another session to the failed Play operation.
+
+Normal-server fixture transport failures retain only closed error-category flags
+and elapsed request milliseconds, alongside the existing status/count/digest
+fields. They never retain a reqwest error, URL, headers or response body. These
+flags are evidence, not permission to retry or a diagnosis of the native cause;
+request deadlines and exact temporary-busy handling are unchanged.
+
+The normal-server audio health oracle applies only to completed live segments of
+this fixed 10 fps, one-second-GOP, 48 kHz stereo AAC output profile. It requires a
+complete video window (at least ten decoded frames and at least one second of
+actual timestamp duration), exactly one audio and one video stream, 1024-sample AAC
+frames and exact internal audio timestamp continuity. Both audio endpoints must
+be within one AAC quantum, `1024/48000` seconds, of the corresponding video
+endpoints, using checked rational arithmetic. A common timestamp-origin shift is
+allowed; an audio-only shift is not.
+
+Probe, RGB and PCM checks share the same immutable TS identity. If the actual AAC
+frames contain `N` samples per channel, mono 16 kHz PCM must contain either
+`floor(N/3)` or `ceil(N/3)` samples and an even byte count. The existing eight-second
+PCM maximum, process/byte budgets, and all tone, replacement, freshness and
+cleanup assertions remain mandatory. This replaces the invalid one-second PCM minimum: a complete
+one-second video segment can legitimately contain 46 AAC frames, or 47104 source
+samples, yielding 15701/15702 mono samples rather than 16000.
+
+This is a fixed-profile health contract, not a universal HLS validator. Endpoint
+quantization and AAC priming are distinct from integer resampler rounding. The
+one-sample rounding ambiguity and possible boundary-packet ambiguity remain;
+loss-free edge claims require adjacent-segment coverage. Neither these checks nor
+a passing diagnostic identify the cause of an earlier native timing failure.
+
+Private-media authority contention is intentionally fail-closed. A request can
+pass admission and then lose a nonblocking authority check before the first body
+chunk. Hyper may encounter that body error before flushing its buffered response
+headers; the client then reports a request-execution error without an HTTP status.
+That error category alone does not establish contention as the cause.
+
+A connection-local, resource-free atomic recorder retains only the first closed
+authority failure code and its call site. It performs no logging, waiting, extra
+authorization checks or media I/O in body/authority callbacks. The terminal
+connection diagnostic is emitted only after supervision has released its actual
+connection future, body and armed custody. It contains a local diagnostic ID and
+closed failure classes, never URLs, credentials, headers, response bodies or raw
+error strings. The ID is for correlation within that server process, not a
+credential or a globally unique identifier. Concurrent first-failure selection is
+atomic order, not proof of the earliest event by wall-clock time.
+
+The existing held-mutex regression keeps its post-header terminal-body and real
+connection-close assertions. Its pre-header arm uses a test-only service barrier
+after admission, the actual held authority mutex and a real Hyper duplex. It
+checks that no status/header bytes escape, the recorded cause is temporary busy,
+custody is released and a new request works after unlocking. This controlled
+interleaving does not prove that a past hosted or physical-device failure took
+the same path. No retry, authorization, freshness or deadline policy is relaxed.
+
+A timed decoder also retains its first observed failure before the existing
+`fail_owned` side effects. The record has an immutable source generation and
+one packed atomic byte containing only closed phase/reason codes. A single CAS
+selects the first recorded observation; losing that CAS or rejecting an obsolete
+generation never suppresses the original failure action. There is no diagnostic
+mutex, retry loop, logging or media I/O in that capture.
+
+`Session::source_failure_detail` is separate from `snapshot()` and uses a
+nonblocking worker lookup. A busy/poisoned worker mutex or a mismatched source
+revision returns unavailable. The streamed fixture reads failed-source details
+before session/producers cleanup, so a later ReaderClosed receipt cannot replace
+the earlier recorded phase. This instruments the timed Unix decoder paths; the
+legacy untimed path can still report unavailable. Atomic order identifies the
+first recorded observation, not the physical cause of a scheduler, pipe or PCM
+publication delay. Source URLs, payloads and raw errors are not retained.
+
+The local-media wake regression keeps its original two-second timeout, polling
+loop, held old-worker guard and success assertions. On timeout only, `try_lock`
+copies closed source state and scalar counters before the original failure. No
+worker is unlocked to obtain a passing result, and no extra wait or retry is
+introduced. This is failure evidence, not a claimed wake/liveness repair.
