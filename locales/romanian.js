@@ -659,6 +659,8 @@ var keyStrings = {
     "Loading via proxy...": "Se încarcă prin proxy…",
     "Loading. Please wait...": "Se încarcă… așteptați…",
     "Loading...": "Se încarcă…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Manifeste HLS locale nu sunt acceptate; folosiți URL-ul HTTP(S) al manifestului",
     "Local HTTP remote control": "Control HTTP local",
     "Local source did not respond": "Sursa locală nu a răspuns",
     "Local source unavailable": "Sursa locală nu este disponibilă",
@@ -794,9 +796,16 @@ var keyStrings = {
     "Player info:": "Informații despre player:",
     "Playing: %1": "Se redă: %1",
     Playlist: "Lista de redare",
+    "Playlist contains unsupported sources":
+        "Lista de redare conține surse neacceptate",
     "Playlist file": "Fișier playlist",
+    "Playlist is empty or invalid": "Lista de redare este goală sau nevalidă",
     "Playlist is not loading directly...Loading via server...":
         "Playlistul nu se încarcă direct...Se încarcă prin server...",
+    "Playlist is too large": "Lista de redare este prea mare",
+    "Playlist local files must be dropped together with the playlist":
+        "Fișierele locale din lista de redare trebuie adăugate împreună cu lista",
+    "Playlist must use UTF-8": "Lista de redare trebuie să folosească UTF-8",
     "Playlist Name": "Nume playlist",
     "Playlist URL": "URL playlist",
     Plex: "Plex",

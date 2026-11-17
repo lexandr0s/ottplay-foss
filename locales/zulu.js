@@ -663,6 +663,8 @@ var keyStrings = {
     "Loading via proxy...": "Kulayishwa nge-proxy…",
     "Loading. Please wait...": "Kuyalayishwa… sicela ulinde…",
     "Loading...": "Kuyalayishwa…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Ama-manifest e-HLS asendaweni awasekelwa; sebenzisa i-URL ye-manifest ye-HTTP(S)",
     "Local HTTP remote control": "Ukulawula ukude nge-HTTP yendawo",
     "Local source did not respond": "Umthombo wendawo awuphendulanga",
     "Local source unavailable": "Umthombo wendawo awutholakali",
@@ -797,9 +799,17 @@ var keyStrings = {
     "Player info:": "Ulwazi lwesidlali:",
     "Playing: %1": "Kuyadlalwa: %1",
     Playlist: "Uhlu lokudlala",
+    "Playlist contains unsupported sources":
+        "Uhlu lokudlala luqukethe imithombo engasekelwe",
     "Playlist file": "Ifayela lohlu lokudlala",
+    "Playlist is empty or invalid":
+        "Uhlu lokudlala alunalutho noma aluvumelekile",
     "Playlist is not loading directly...Loading via server...":
         "Uhlu lokudlala alukwazanga ukulayishwa ngokuqondile. Kulayishwa ngeseva…",
+    "Playlist is too large": "Uhlu lokudlala lukhulu kakhulu",
+    "Playlist local files must be dropped together with the playlist":
+        "Amafayela asendaweni ohlu lokudlala kufanele adonswe kanye nohlu lokudlala",
+    "Playlist must use UTF-8": "Uhlu lokudlala kufanele lusebenzise i-UTF-8",
     "Playlist Name": "Igama lohlu lokudlala",
     "Playlist URL": "I-URL yohlu lokudlala",
     Plex: "Plex",

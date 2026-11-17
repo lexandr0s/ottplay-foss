@@ -27,7 +27,6 @@ PRODUCTION_ORDINARY_TESTS = frozenset({
     'unwind_stderr_capture_preserves_original_panic_and_clears_registration',
     'owned_stderr_drops_incomplete_secret_line_before_bounded_redaction',
     'playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts',
-    'request_transport_diagnostics_classify_actual_error_without_authority',
     'segment_video_proof_checks_count_timing_and_sampling_domain',
     'two_slot_fixture_geometry_passes_actual_core_validation',
     'nine_slot_fixture_geometry_passes_actual_core_and_old_odd_grid_is_rejected',
@@ -148,6 +147,11 @@ BROKER_SHUTDOWN_TESTS = frozenset({
     'broker::live::tests::shutdown_waits_for_owned_operation_after_http_waiter_drops',
 })
 BROKER_HLS_TESTS = frozenset({'broker::live::tests::production_adapter_set_is_unique_explicit_and_keeps_other_guards'})
+PLAYLIST_DROP_PREFIX = 'offline_media::drop_playlist::tests::'
+PLAYLIST_DROP_REQUIRED_TESTS = frozenset(PLAYLIST_DROP_PREFIX + name for name in (
+    'playlist_relative_members_keep_verified_canonical_parent_after_alias_rebind',
+    'playlist_and_referenced_file_symlinks_are_rejected_without_retained_grants',
+))
 CORE_REQUIRED_TESTS = frozenset({
     'multiview::broker::registry::pending_grant_retention_tests::attachment_promotion_keeps_only_exact_unchanged_sibling_binding_grants',
     'multiview::broker::registry::pending_grant_retention_tests::binding_updates_retain_exact_siblings_but_global_source_and_session_revokes_fail_closed',
@@ -1402,6 +1406,42 @@ def run_production_fixture(driver, budget, command, executable, tools, result, o
     result.update(staged)
 
 
+def require_credential_clock(value):
+    message = 'Production credential clock evidence malformed or out of bound'
+    keys = {'startup_sample_ms', 'observation_elapsed_ms', 'probe_elapsed_ms',
+            'lower_bound_ms', 'short_expires_ms'}
+    require(type(value) is dict and set(value) == keys
+            and all(type(number) is int and 0 <= number < 2**64 for number in value.values()), message)
+    require(value['startup_sample_ms'] > 0 and value['short_expires_ms'] > 0
+            and value['observation_elapsed_ms'] + value['probe_elapsed_ms'] < 600_000
+            and value['lower_bound_ms'] == value['startup_sample_ms'] + value['probe_elapsed_ms']
+            and value['lower_bound_ms'] >= value['short_expires_ms'], message)
+
+
+def require_seed_refusal_summaries(value):
+    message = 'Production seed refusal summaries malformed or incomplete'
+    require(type(value) is list and len(value) == 3, message)
+    keys = {'seed', 'body_first_count', 'body_later_count', 'supervisor_count', 'last', 'completed'}
+    sites = ('body_first', 'body_later', 'supervisor')
+    for seed, row in zip(('grid', 'main', 'replacement'), value, strict=True):
+        require(type(row) is dict and set(row) == keys and row['seed'] == seed
+                and row['completed'] is True, message)
+        counts = [row[site + '_count'] for site in sites]
+        require(all(type(count) is int and 0 <= count <= 2**64 - 1 for count in counts), message)
+        last = row['last']
+        if not any(counts):
+            require(last is None, message)
+            continue
+        require(type(last) is dict and set(last) == {
+            'site', 'marker', 'stderr_bytes', 'stderr_sha256', 'status', 'response_bytes'}, message)
+        require(last['site'] in sites and counts[sites.index(last['site'])] > 0
+                and type(last['marker']) is int and 1 <= last['marker'] < 2**64
+                and type(last['stderr_bytes']) is int and 1 <= last['stderr_bytes'] <= 65536
+                and type(last['stderr_sha256']) is str
+                and re.fullmatch(r'[0-9a-f]{64}', last['stderr_sha256']) is not None
+                and last['status'] is None and last['response_bytes'] is None, message)
+
+
 def require_segment_video_proofs(rows):
     require(type(rows) is list and 1 <= len(rows) <= 64,
             'Normal output segment proof collection is missing or unbounded')
@@ -1527,6 +1567,8 @@ def _run_production_mode(driver, budget, command, executable, tools, result, out
                 and type(observed.get('upstream_request_counts')) is dict,
                 'Normal production-server adapter receipt did not qualify its bounded contract')
         require_segment_video_proofs(observed.get('output_segment_video_proofs'))
+        require_seed_refusal_summaries(observed.get('seed_refusal_summaries'))
+        require_credential_clock(observed.get('credential_clock'))
         input_rows = ([{'id': row['id'], 'sha256': row['original_sha256'], 'bytes': row['original_bytes'], 'path': row['original_path']}
                        for row in manifest['sources']] if hls else manifest['inputs'])
         expected = {row['id']: row for row in input_rows}
@@ -1639,6 +1681,7 @@ def main(argv=None):
         require(not command(label + '-status', ['git', 'status', '--porcelain=v1', '--untracked-files=all']).strip(),
                 'Source checkout is dirty')
         paths = ('Cargo.toml', 'Cargo.lock', 'src-rs/core/Cargo.toml', 'src-rs/server/Cargo.toml',
+                 'src-rs/core/src/offline_media.rs', 'src-rs/core/src/offline_media/drop_playlist.rs',
                  'src-rs/core/src/multiview/broker/registry.rs',
                  'src-rs/core/src/multiview/broker/network.rs',
                  'src-rs/core/src/multiview/broker/network_tests.rs',
@@ -1652,11 +1695,12 @@ def main(argv=None):
                  'src-rs/server/tests/multiview_production.rs',
                  'src-rs/server/tests/support/multiview_production_tls.rs',
                  'src-rs/server/tests/support/multiview_production_config.rs',
-                 'src-rs/server/src/multiview_operator.rs',
+                 'src-rs/server/src/multiview_operator.rs', 'src-rs/server/src/multiview_service.rs',
                  'src-rs/server/tests/support/hls_production.rs',
                  'src-rs/server/tests/multiview_broker_boundary.rs',
                  'src-rs/server/src/multiview_broker.rs', 'src-rs/server/src/multiview_broker_live.rs',
                  'src-rs/server/src/multiview_broker_live_output_tests.rs', 'src-rs/server/src/media_connection.rs',
+                 'src-rs/server/src/private_media_attempt.rs',
                  'src-rs/server/tests/support/streamed_session.rs', 'src-rs/server/tests/support/streamed_transport.rs',
                  'src-rs/server/tests/support/streamed_archive.rs',
                  'src-rs/server/tests/support/streamed_decoder.rs',
@@ -1755,6 +1799,17 @@ def main(argv=None):
             'production_test_sha256': production_sha256,
             'normal_server_identity': normal_server_identity,
             'source_commit': before['commit'], 'root_lock_sha256': before['sha256']['Cargo.lock']})
+        playlist_all = listed_names(command('core-playlist-inventory',
+            [str(core_executable), PLAYLIST_DROP_PREFIX, '--list', '--format', 'terse']))
+        playlist_ignored = listed_names(command('core-playlist-ignored-inventory',
+            [str(core_executable), PLAYLIST_DROP_PREFIX, '--list', '--ignored', '--format', 'terse']))
+        require(playlist_all and all(name.startswith(PLAYLIST_DROP_PREFIX) for name in playlist_all),
+                'Core playlist test inventory is empty or outside its namespace')
+        require(not playlist_ignored and PLAYLIST_DROP_REQUIRED_TESTS <= playlist_all,
+                'Required Unix playlist regressions are missing or playlist tests are ignored')
+        playlist_text = command('core-playlist-ordinary', [str(core_executable), PLAYLIST_DROP_PREFIX,
+                                '--test-threads=1', '--color=never'], 60)
+        require_suite_pass(playlist_text, playlist_all, set())
         core_all = listed_names(command('core-multiview-inventory',
             [str(core_executable), 'multiview::', '--list', '--format', 'terse']))
         core_ignored = listed_names(command('core-multiview-ignored-inventory',
@@ -1906,6 +1961,7 @@ def main(argv=None):
                       activation_scope='Actual owned HTTP/TLS normal server; zero-capacity control shell only',
                       activation_fixture_parent=activation_home, activation_fixture_cleanup_confirmed=True,
                       ordinary_core_tests=sorted(ordinary_core),
+                      ordinary_playlist_drop_tests=sorted(playlist_all),
                       executed_core_ignored_tests=core_ignored_executed,
                       ordinary_server_tests=sorted(ordinary_server),
                       production_test_binary_sha256=production_sha256,

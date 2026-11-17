@@ -196,12 +196,14 @@ fn remember_first_close(
 #[derive(Clone, Copy)]
 enum CloseObservationStage {
     ProbeFailure,
+    DecodeOpenFailure,
     WatchdogClosed,
 }
 impl CloseObservationStage {
     fn code(self) -> &'static str {
         match self {
             Self::ProbeFailure => "probe_failure",
+            Self::DecodeOpenFailure => "decode_open_failure",
             Self::WatchdogClosed => "watchdog_closed",
         }
     }
@@ -210,7 +212,7 @@ impl CloseObservationStage {
 struct CloseObservation {
     first: Option<FirstCloseRecord>,
     output: Option<OutputObservation>,
-    session_cancelled: bool,
+    session_cancelled: Option<bool>,
     closing: bool,
     closed: bool,
     cleanup_failed: bool,
@@ -227,14 +229,25 @@ impl std::fmt::Display for CloseDiagnostic {
         let first = observed.and_then(|value| value.first);
         let current = observed.and_then(|value| value.output);
         let prior = first.and_then(|value| value.output);
+        let session_cancelled = match observed.and_then(|value| value.session_cancelled) {
+            Some(true) => "true",
+            Some(false) => "false",
+            None if matches!(self.stage, CloseObservationStage::DecodeOpenFailure) => {
+                "not_observed"
+            }
+            None => "false",
+        };
         write!(out, "multiview_close stage={} observation_present={} first_reason={} session_cancelled={} closing={} closed={} cleanup_failed={} cleanup_scope={} cleanup_confirmed={}",
             self.stage.code(), observed.is_some(), first.map_or("none", |value| value.reason.code()),
-            observed.is_some_and(|value| value.session_cancelled), observed.is_some_and(|value| value.closing),
+            session_cancelled, observed.is_some_and(|value| value.closing),
             observed.is_some_and(|value| value.closed), observed.is_some_and(|value| value.cleanup_failed),
             match self.stage {
-                CloseObservationStage::ProbeFailure => "source",
+                CloseObservationStage::ProbeFailure | CloseObservationStage::DecodeOpenFailure => "source",
                 CloseObservationStage::WatchdogClosed => "session",
             }, self.cleanup_confirmed)?;
+        if matches!(self.stage, CloseObservationStage::DecodeOpenFailure) {
+            write!(out, " observation_mode=retained_only")?;
+        }
         // These Debug values are exclusively closed enums and bounded numeric
         // structs; never format Session, Snapshot, a request or an OS error.
         for (prefix, output) in [("first", prior), ("observed", current)] {
@@ -372,7 +385,19 @@ fn observe_close(session: &LiveSession) -> Option<CloseObservation> {
     Some(CloseObservation {
         first: control.first_close,
         output: control.core.as_ref().map(OutputObservation::capture),
-        session_cancelled: session.cancel.is_cancelled(),
+        session_cancelled: Some(session.cancel.is_cancelled()),
+        closing: control.closing,
+        closed: control.closed,
+        cleanup_failed: control.cleanup_failed,
+    })
+}
+
+fn observe_close_retained(control: &Mutex<Control>) -> Option<CloseObservation> {
+    let control = control.try_lock().ok()?;
+    Some(CloseObservation {
+        first: control.first_close,
+        output: None,
+        session_cancelled: None,
         closing: control.closing,
         closed: control.closed,
         cleanup_failed: control.cleanup_failed,
@@ -2172,8 +2197,19 @@ impl LiveBackend {
                     started,
                     None,
                 );
+                // Capture only retained scalar state before cleanup; never wait
+                // on the session/Core locks while source cleanup is pending.
+                let observation = observe_close_retained(&session.control);
                 let cleaned = factory.finish().await.is_ok();
                 self.finish_reservation(session, &reservation, cleaned, true);
+                record_diagnostic(
+                    diagnostic,
+                    OperationDiagnostic::Close(CloseDiagnostic {
+                        stage: CloseObservationStage::DecodeOpenFailure,
+                        observation,
+                        cleanup_confirmed: cleaned,
+                    }),
+                );
                 return Err(BoundaryError::Unavailable);
             }
         };
@@ -3712,6 +3748,44 @@ mod close_diagnostic_tests {
             }),
         }
     }
+    fn test_control(first_close: Option<FirstCloseRecord>) -> Control {
+        Control {
+            core: None,
+            snapshot: snapshot(EncoderState::Playing),
+            geometry: wire::Geometry {
+                canvas: wire::Canvas {
+                    width: 2,
+                    height: 2,
+                    fps: 10,
+                },
+                revision: 2,
+                mode: wire::GeometryMode::Disjoint,
+                rects: vec![wire::Rect {
+                    slot_id: 0,
+                    x: 0,
+                    y: 0,
+                    width: 2,
+                    height: 2,
+                    z: 0,
+                }],
+            },
+            bindings: BTreeMap::new(),
+            sources: BTreeMap::new(),
+            pending: BTreeMap::new(),
+            failures: BTreeMap::new(),
+            uncertain: Vec::new(),
+            output_removed: false,
+            output: None,
+            retired_output: Vec::new(),
+            retired_output_removed: false,
+            output_fence: None,
+            awaiting_clean_output: false,
+            closing: false,
+            closed: false,
+            cleanup_failed: false,
+            first_close,
+        }
+    }
 
     #[test]
     fn first_close_record_preserves_initiator_and_output_across_retirement() {
@@ -3736,7 +3810,7 @@ mod close_diagnostic_tests {
             observation: Some(CloseObservation {
                 first,
                 output: None,
-                session_cancelled: true,
+                session_cancelled: Some(true),
                 closing: false,
                 closed: true,
                 cleanup_failed: false,
@@ -3760,7 +3834,7 @@ mod close_diagnostic_tests {
                 &snapshot(EncoderState::Playing),
                 None,
             )),
-            session_cancelled: false,
+            session_cancelled: Some(false),
             closing: false,
             closed: false,
             cleanup_failed: false,
@@ -3782,6 +3856,67 @@ mod close_diagnostic_tests {
         .to_string();
         assert!(absent.contains("observation_present=false"));
         assert!(absent.contains("observed_core_present=false observed_state=None"));
+
+        let first = FirstCloseRecord {
+            reason: CloseReason::CoreOutput,
+            output: Some(OutputObservation::from_snapshot(
+                &snapshot(EncoderState::Failed),
+                Some(write_failure()),
+            )),
+        };
+        let control_mutex = Arc::new(Mutex::new(test_control(Some(first))));
+        let held = control_mutex.lock().unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker_control = control_mutex.clone();
+        let worker = std::thread::spawn(move || {
+            sent.send(observe_close_retained(&worker_control)).unwrap();
+        });
+        let while_held = received.recv_timeout(Duration::from_secs(5));
+        drop(held);
+        worker.join().unwrap();
+        assert!(while_held
+            .expect("retained observation must not wait for Control")
+            .is_none());
+
+        let retained = observe_close_retained(&control_mutex).unwrap();
+        let retained_first = retained.first.unwrap();
+        assert_eq!(retained_first.reason, first.reason);
+        assert_eq!(
+            retained_first.output.unwrap().frames,
+            first.output.unwrap().frames
+        );
+        assert!(retained.output.is_none());
+        assert!(retained.session_cancelled.is_none());
+        assert!(!retained.closing && !retained.closed && !retained.cleanup_failed);
+        {
+            let mut state = control_mutex.lock().unwrap();
+            state.first_close = None;
+            state.closed = true;
+            state.cleanup_failed = true;
+        }
+        assert_eq!(retained.first.unwrap().reason, first.reason);
+        let retained_text = CloseDiagnostic {
+            stage: CloseObservationStage::DecodeOpenFailure,
+            observation: Some(retained),
+            cleanup_confirmed: true,
+        }
+        .to_string();
+        assert!(retained_text.contains("stage=decode_open_failure"));
+        assert!(retained_text.contains("observation_mode=retained_only"));
+        assert!(retained_text.contains("session_cancelled=not_observed"));
+        assert!(retained_text.contains("first_reason=core_output"));
+        assert!(retained_text.contains("first_core_present=true"));
+        assert!(retained_text.contains("observed_core_present=false"));
+        assert!(retained_text.contains("cleanup_scope=source cleanup_confirmed=true"));
+        assert!(!retained_text.contains("54321") && !retained_text.contains("67890"));
+
+        let poisoned = Arc::new(Mutex::new(test_control(Some(first))));
+        let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned.lock().unwrap();
+            panic!("poison fixture Control mutex");
+        }));
+        assert!(poison.is_err());
+        assert!(observe_close_retained(&poisoned).is_none());
         let reasons = [
             CloseReason::HardDeadline,
             CloseReason::SoftDeadline,
@@ -3827,7 +3962,10 @@ mod close_diagnostic_tests {
 
     #[test]
     fn operation_receipts_and_sink_release_precede_a_blocked_diagnostic_writer() {
-        use std::sync::mpsc;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
         let diagnostic = Arc::new(Mutex::new(DiagnosticQueue::default()));
         record_diagnostic(
             &diagnostic,
@@ -3846,6 +3984,14 @@ mod close_diagnostic_tests {
                 cleanup_confirmed: false,
             }),
         );
+        record_diagnostic(
+            &diagnostic,
+            OperationDiagnostic::Close(CloseDiagnostic {
+                stage: CloseObservationStage::DecodeOpenFailure,
+                observation: None,
+                cleanup_confirmed: true,
+            }),
+        );
         let observer = diagnostic.clone();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let observed = seen.clone();
@@ -3855,8 +4001,11 @@ mod close_diagnostic_tests {
         let (release, wait_release) = mpsc::channel();
         let pending = Arc::new(Mutex::new(Some(())));
         let observe_pending = pending.clone();
+        let source_cleanup_returned = Arc::new(AtomicBool::new(false));
+        let observe_source_cleanup_returned = source_cleanup_returned.clone();
         let worker = std::thread::spawn(move || {
             // Model the awaited Play future's existing pending/done sequence.
+            source_cleanup_returned.store(true, Ordering::Release);
             assert!(pending.lock().unwrap().take().is_some());
             done.send(()).unwrap();
             drop(done);
@@ -3874,7 +4023,24 @@ mod close_diagnostic_tests {
                         entered.send(()).unwrap();
                         wait_release.recv_timeout(Duration::from_secs(2)).unwrap();
                     }
-                    OperationDiagnostic::Close(_) => seen.lock().unwrap().push("close"),
+                    OperationDiagnostic::Close(record) => {
+                        assert!(observe_source_cleanup_returned.load(Ordering::Acquire));
+                        let text = record.to_string();
+                        match record.stage {
+                            CloseObservationStage::ProbeFailure => {
+                                assert!(!record.cleanup_confirmed);
+                                assert!(!text.contains("observation_mode=retained_only"));
+                            }
+                            CloseObservationStage::DecodeOpenFailure => {
+                                assert!(record.cleanup_confirmed);
+                                assert!(text.contains("observation_mode=retained_only"));
+                            }
+                            CloseObservationStage::WatchdogClosed => {
+                                panic!("unexpected close diagnostic stage")
+                            }
+                        }
+                        seen.lock().unwrap().push("close");
+                    }
                     _ => panic!("unexpected diagnostic variant"),
                 },
             );
@@ -3894,7 +4060,7 @@ mod close_diagnostic_tests {
         assert_eq!(Arc::strong_count(&observer), 1);
         release.send(()).unwrap();
         worker.join().unwrap();
-        assert_eq!(*observed.lock().unwrap(), vec!["play", "close"]);
+        assert_eq!(*observed.lock().unwrap(), vec!["play", "close", "close"]);
     }
 
     #[test]

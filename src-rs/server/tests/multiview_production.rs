@@ -10,6 +10,9 @@ mod production_config;
 #[path = "support/multiview_production_tls.rs"]
 mod production_tls;
 
+#[path = "../src/private_media_attempt.rs"]
+mod media_attempt;
+
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -22,7 +25,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::OnceLock,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -40,6 +43,8 @@ use production_config::ProductionMode;
 thread_local! {
     // Bounded summaries only; raw segments, URLs and ffprobe JSON are never retained.
     static SEGMENT_VIDEO_PROOFS: std::cell::RefCell<Vec<Value>> = const { std::cell::RefCell::new(Vec::new()) };
+    // Three existing seed calls only; fixed-size Copy evidence, no raw stderr or URLs.
+    static SEED_REFUSAL_SUMMARIES: std::cell::RefCell<[Option<SeedCallSummary>; 3]> = const { std::cell::RefCell::new([None; 3]) };
     // Bound only this test thread's owned normal-server stderr, never an arbitrary file.
     static FAILURE_STDERR_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
@@ -260,6 +265,79 @@ fn startup_diagnostic_tail_is_bounded_and_redacts_fixture_secrets_and_urls() {
     assert!(!format!("{redacted:?}").contains('\u{1b}'));
     let long = vec![b'x'; 65536];
     assert_eq!(redacted_startup_tail(&long, root).len(), 8192);
+
+    let line = b"multiview_clock version=1 now_ms=1100\n";
+    assert_eq!(startup_clock_sample(line), Some(1100));
+    assert_eq!(
+        startup_clock_sample(b"other closed event\nmultiview_clock version=1 now_ms=1100\n"),
+        Some(1100)
+    );
+    for invalid in [
+        b"".as_slice(),
+        b"other closed event\n",
+        b"multiview_clock version=1 now_ms=1100",
+        b"multiview_clock version=1 now_ms=1100\npartial tail",
+        b"multiview_clock version=1 now_ms=1100\nmultiview_clock version=1 now_ms=1100\n",
+        b"multiview_clock version=2 now_ms=1100\n",
+        b"multiview_clock version=1 now_ms=\n",
+        b"multiview_clock version=1 now_ms=0\n",
+        b"multiview_clock version=1 now_ms=01100\n",
+        b"multiview_clock version=1 now_ms=+1100\n",
+        b"multiview_clock version=1 now_ms=-1\n",
+        b"multiview_clock version=1 now_ms=1100 extra=1\n",
+        b"multiview_clock version=1 now_ms=1100\r\n",
+        b"multiview_clock version=1 now_ms=18446744073709551616\n",
+        b"multiview_clock version=1 now_ms=\xff\n",
+    ] {
+        assert_eq!(startup_clock_sample(invalid), None);
+    }
+    assert_eq!(startup_clock_sample(&vec![b'\n'; 65537]), None);
+    assert_eq!(
+        startup_clock_sample(b"multiview_clock version=1 now_ms=18446744073709551615\n"),
+        Some(u64::MAX)
+    );
+
+    // A steady wall clock already at E need not imply broker Clock >= E:
+    // its separate startup-wall and elapsed floors can lose a millisecond.
+    let wall_anchor_us = 1_100_750_u64;
+    let monotonic_anchor_us = 1_101_000_u64;
+    let wall_now_us = 61_000_100_u64;
+    let expiry_ms = 61_000_u64;
+    let authority_now = wall_anchor_us / 1000 + (wall_now_us - monotonic_anchor_us) / 1000;
+    assert!(wall_now_us / 1000 >= expiry_ms);
+    assert_eq!(authority_now, expiry_ms - 1);
+    assert_eq!(
+        broker_clock_lower_bound(authority_now, Duration::ZERO),
+        Some(expiry_ms - 1)
+    );
+    assert_eq!(
+        broker_clock_lower_bound(authority_now, Duration::from_micros(999)),
+        Some(expiry_ms - 1)
+    );
+    assert_eq!(
+        broker_clock_lower_bound(authority_now, Duration::from_millis(1)),
+        Some(expiry_ms)
+    );
+
+    // Delayed observation remains conservative across fractional floor carries.
+    for delay_us in [0_u64, 250, 999, 1000, 125_750] {
+        for elapsed_us in [0_u64, 1, 999, 1000, 59_999_999] {
+            let sample_us = 12_750_u64;
+            let sample_ms = 1100 + sample_us / 1000;
+            let current_ms = 1100 + (sample_us + delay_us + elapsed_us) / 1000;
+            let bound =
+                broker_clock_lower_bound(sample_ms, Duration::from_micros(elapsed_us)).unwrap();
+            assert!(bound <= current_ms);
+        }
+    }
+    assert_eq!(
+        broker_clock_lower_bound(u64::MAX, Duration::from_millis(1)),
+        None
+    );
+    assert_eq!(
+        broker_clock_lower_bound(1, Duration::from_secs(u64::MAX)),
+        None
+    );
 }
 
 struct FixtureHttp {
@@ -321,6 +399,39 @@ fn fixture_http() -> &'static FixtureHttp {
             https_media_requests: std::sync::atomic::AtomicUsize::new(0),
         }
     })
+}
+
+// The sample is from the same server Clock that authenticates credentials.
+// Only a complete unique canonical record in the owned bounded file qualifies.
+fn startup_clock_sample(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty() || bytes.len() > 65536 || bytes.last() != Some(&b'\n') {
+        return None;
+    }
+    let mut sample = None;
+    for line in bytes.split(|byte| *byte == b'\n') {
+        if !line.starts_with(b"multiview_clock") {
+            continue;
+        }
+        let value = line.strip_prefix(b"multiview_clock version=1 now_ms=")?;
+        if sample.is_some()
+            || value.is_empty()
+            || value.len() > 20
+            || value[0] == b'0'
+            || !value.iter().all(u8::is_ascii_digit)
+        {
+            return None;
+        }
+        sample = Some(std::str::from_utf8(value).ok()?.parse::<u64>().ok()?);
+    }
+    sample
+}
+
+// Observation follows sampling on the same host's monotonic clock. Therefore
+// sample + floor(elapsed_since_observation) <= current broker Clock, including
+// fractional milliseconds and delayed observation. This is not a wall-clock
+// expiry or exact physical cleanup-latency measurement.
+fn broker_clock_lower_bound(sample_ms: u64, elapsed: Duration) -> Option<u64> {
+    sample_ms.checked_add(u64::try_from(elapsed.as_millis()).ok()?)
 }
 
 fn now_ms() -> u64 {
@@ -671,29 +782,26 @@ impl FixtureReadStage {
     }
 }
 #[derive(Clone, Copy, Debug)]
-struct FixtureTransportClass {
+struct TransportErrorFlags {
     timeout: bool,
     connect: bool,
     request: bool,
     body: bool,
-    builder: bool,
     decode: bool,
-    redirect: bool,
+    builder: bool,
 }
-impl FixtureTransportClass {
-    fn from_error(error: &reqwest::Error) -> Self {
+impl TransportErrorFlags {
+    fn capture(error: &reqwest::Error) -> Self {
         Self {
             timeout: error.is_timeout(),
             connect: error.is_connect(),
             request: error.is_request(),
             body: error.is_body(),
-            builder: error.is_builder(),
             decode: error.is_decode(),
-            redirect: error.is_redirect(),
+            builder: error.is_builder(),
         }
     }
 }
-
 #[derive(Clone, Copy, Debug)]
 struct FixtureReadFailure {
     stage: FixtureReadStage,
@@ -701,7 +809,10 @@ struct FixtureReadFailure {
     response_bytes: Option<usize>,
     response_sha256: Option<[u8; 32]>,
     temporary_busy: bool,
-    transport: Option<FixtureTransportClass>,
+    transport_error: Option<TransportErrorFlags>,
+    elapsed_ms: Option<u64>,
+    seed_refusal: Option<SeedRefusal>,
+    seed_evaluation: Option<SeedEvaluation>,
 }
 impl FixtureReadFailure {
     fn without_body(
@@ -715,18 +826,30 @@ impl FixtureReadFailure {
             response_bytes,
             response_sha256: None,
             temporary_busy: false,
-            transport: None,
+            transport_error: None,
+            elapsed_ms: None,
+            seed_refusal: None,
+            seed_evaluation: None,
         }
     }
-    fn transport_error(
+    fn transport(
         stage: FixtureReadStage,
+        error: &reqwest::Error,
+        elapsed: Duration,
         status: Option<u16>,
         response_bytes: Option<usize>,
-        error: &reqwest::Error,
     ) -> Self {
-        let mut failure = Self::without_body(stage, status, response_bytes);
-        failure.transport = Some(FixtureTransportClass::from_error(error));
-        failure
+        Self {
+            stage,
+            status,
+            response_bytes,
+            response_sha256: None,
+            temporary_busy: false,
+            transport_error: Some(TransportErrorFlags::capture(error)),
+            elapsed_ms: Some(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)),
+            seed_refusal: None,
+            seed_evaluation: None,
+        }
     }
     fn response(stage: FixtureReadStage, status: u16, bytes: &[u8]) -> Self {
         Self {
@@ -734,12 +857,15 @@ impl FixtureReadFailure {
             status: Some(status),
             response_bytes: Some(bytes.len()),
             response_sha256: Some(Sha256::digest(bytes).into()),
-            transport: None,
             // Retry only the exact closed media-admission response. Do not
             // parse or retain arbitrary server error bodies as retry signals.
             temporary_busy: stage == FixtureReadStage::HttpStatus
                 && status == 503
                 && bytes == br#"{"error":"temporary_busy","version":1}"#,
+            transport_error: None,
+            elapsed_ms: None,
+            seed_refusal: None,
+            seed_evaluation: None,
         }
     }
 }
@@ -747,25 +873,39 @@ impl std::fmt::Display for FixtureReadFailure {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             out,
-            "stage={} status={:?} response_bytes={:?} ",
+            "stage={} status={:?} response_bytes={:?} response_sha256=",
             self.stage.code(),
             self.status,
             self.response_bytes
         )?;
-        if let Some(class) = self.transport {
-            write!(out, "transport_timeout={} transport_connect={} transport_request={} transport_body={} transport_builder={} transport_decode={} transport_redirect={} ",
-                class.timeout, class.connect, class.request, class.body,
-                class.builder, class.decode, class.redirect)?;
-        }
-        write!(out, "response_sha256=")?;
         if let Some(digest) = self.response_sha256 {
             for byte in digest {
                 write!(out, "{byte:02x}")?;
             }
-            Ok(())
         } else {
-            write!(out, "none")
+            write!(out, "none")?;
         }
+        if let (Some(flags), Some(elapsed_ms)) = (self.transport_error, self.elapsed_ms) {
+            write!(out, " elapsed_ms={elapsed_ms} transport_timeout={} transport_connect={} transport_request={} transport_body={} transport_decode={} transport_builder={}",
+                flags.timeout, flags.connect, flags.request, flags.body, flags.decode, flags.builder)?;
+        }
+        if let Some(evaluation) = self.seed_evaluation {
+            write!(
+                out,
+                " seed_evaluation_marker={} seed_evaluation={}",
+                evaluation.marker.get(),
+                evaluation.outcome.code()
+            )?;
+            if let Some((length, digest)) = evaluation.snapshot {
+                write!(out, " checked_stderr_bytes={length} checked_stderr_sha256=")?;
+                for byte in digest {
+                    write!(out, "{byte:02x}")?;
+                }
+            } else {
+                write!(out, " checked_stderr_bytes=none checked_stderr_sha256=none")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -806,6 +946,23 @@ fn http_checked_with_timeout(
     limit: usize,
     timeout: Duration,
 ) -> Result<(u16, Vec<u8>), FixtureReadFailure> {
+    http_checked_with_attempt(method, url, token, request_id, body, limit, timeout, None)
+}
+
+fn http_checked_with_attempt(
+    method: &str,
+    url: &str,
+    token: Option<&str>,
+    request_id: Option<&str>,
+    body: Option<&Value>,
+    limit: usize,
+    timeout: Duration,
+    attempt: Option<media_attempt::Marker>,
+) -> Result<(u16, Vec<u8>), FixtureReadFailure> {
+    assert!(
+        attempt.is_none() || method == "GET",
+        "attempt marker is GET-only"
+    );
     let fixture = fixture_http();
     fixture.runtime.block_on(async {
         let operation = async {
@@ -825,8 +982,18 @@ fn http_checked_with_timeout(
             if let Some(value) = body {
                 request = request.json(value);
             }
+            if let Some(marker) = attempt {
+                request = request.header(media_attempt::HEADER, marker.get().to_string());
+            }
+            let request_started = Instant::now();
             let mut response = request.send().await.map_err(|error| {
-                FixtureReadFailure::transport_error(FixtureReadStage::HttpSend, None, None, &error)
+                FixtureReadFailure::transport(
+                    FixtureReadStage::HttpSend,
+                    &error,
+                    request_started.elapsed(),
+                    None,
+                    None,
+                )
             })?;
             if response
                 .content_length()
@@ -841,11 +1008,12 @@ fn http_checked_with_timeout(
                     Ok(Some(chunk)) => chunk,
                     Ok(None) => break,
                     Err(error) => {
-                        return Err(FixtureReadFailure::transport_error(
+                        return Err(FixtureReadFailure::transport(
                             FixtureReadStage::HttpBody,
+                            &error,
+                            request_started.elapsed(),
                             Some(status),
                             Some(bytes.len()),
-                            &error,
                         ))
                     }
                 };
@@ -959,7 +1127,17 @@ fn get_url_checked_with_timeout(
     limit: usize,
     timeout: Duration,
 ) -> Result<(u16, Vec<u8>), FixtureReadFailure> {
-    let response = http_checked_with_timeout("GET", url, token, None, None, limit, timeout);
+    get_url_checked_with_attempt(url, token, limit, timeout, None)
+}
+fn get_url_checked_with_attempt(
+    url: &str,
+    token: Option<&str>,
+    limit: usize,
+    timeout: Duration,
+    attempt: Option<media_attempt::Marker>,
+) -> Result<(u16, Vec<u8>), FixtureReadFailure> {
+    let response =
+        http_checked_with_attempt("GET", url, token, None, None, limit, timeout, attempt);
     if response.as_ref().is_ok_and(|(status, _)| *status == 200)
         && reqwest::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == "https")
     {
@@ -1389,6 +1567,15 @@ fn playlist_snapshot_checked_with_timeout(
     playlist_path: &str,
     timeout: Duration,
 ) -> Result<(u64, Vec<String>), FixtureReadFailure> {
+    playlist_snapshot_attempt_with_timeout(base, playlist_path, timeout, None)
+}
+
+fn playlist_snapshot_attempt_with_timeout(
+    base: &str,
+    playlist_path: &str,
+    timeout: Duration,
+    attempt: Option<media_attempt::Marker>,
+) -> Result<(u64, Vec<String>), FixtureReadFailure> {
     let playlist_url =
         if playlist_path.starts_with("http://") || playlist_path.starts_with("https://") {
             reqwest::Url::parse(playlist_path).map_err(|_| {
@@ -1419,9 +1606,361 @@ fn playlist_snapshot_checked_with_timeout(
         "https",
         "HLS media must use the selected HTTPS listener"
     );
+    // Only the existing private playlist seed path carries a diagnostic marker.
+    // The exact origin/HTTPS checks above remain fatal and precede the request.
+    let attempt = attempt.filter(|_| {
+        playlist_url.path().starts_with("/multiview/v1/media/")
+            && playlist_url.path().ends_with("/index.m3u8")
+            && playlist_url.query().is_none()
+    });
     let (code, playlist) =
-        get_url_checked_with_timeout(playlist_url.as_str(), None, 1024 * 1024, timeout)?;
+        get_url_checked_with_attempt(playlist_url.as_str(), None, 1024 * 1024, timeout, attempt)?;
     parse_playlist_snapshot_response(&playlist_url, &expected, code, &playlist)
+}
+
+// The counter is never reset between owned fixtures; exhaustion fails before a
+// request, rather than wrapping to a marker whose terminal event could be old.
+static NEXT_SEED_ATTEMPT: AtomicU64 = AtomicU64::new(1);
+fn next_seed_attempt(counter: &AtomicU64) -> Option<media_attempt::Marker> {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .ok()
+        .and_then(media_attempt::Marker::new)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SeedRefusal {
+    marker: media_attempt::Marker,
+    site: media_attempt::Site,
+    stderr_bytes: usize,
+    stderr_sha256: [u8; 32],
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeedEvaluationOutcome {
+    Accepted,
+    IneligibleTransport,
+    DeadlineElapsed,
+    StartUnavailable,
+    SnapshotUnavailable,
+    SnapshotChanged,
+    MissingRecord,
+    IncompleteRecord,
+    MalformedRecord,
+    DuplicateMarker,
+    WrongKind,
+    WrongTransport,
+}
+impl SeedEvaluationOutcome {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::IneligibleTransport => "ineligible_transport",
+            Self::DeadlineElapsed => "deadline_elapsed",
+            Self::StartUnavailable => "start_unavailable",
+            Self::SnapshotUnavailable => "snapshot_unavailable",
+            Self::SnapshotChanged => "snapshot_changed",
+            Self::MissingRecord => "missing_record",
+            Self::IncompleteRecord => "incomplete_record",
+            Self::MalformedRecord => "malformed_record",
+            Self::DuplicateMarker => "duplicate_marker",
+            Self::WrongKind => "wrong_kind",
+            Self::WrongTransport => "wrong_transport",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug)]
+struct SeedEvaluation {
+    marker: media_attempt::Marker,
+    outcome: SeedEvaluationOutcome,
+    // Fingerprint only the actual bounded snapshot checked once for this attempt.
+    // Missing/unsafe files have no fingerprint; diagnostics never reread them.
+    snapshot: Option<(usize, [u8; 32])>,
+}
+fn seed_site(site: media_attempt::Site) -> (&'static str, usize) {
+    match site {
+        media_attempt::Site::BodyFirst => ("body_first", 0),
+        media_attempt::Site::BodyLater => ("body_later", 1),
+        media_attempt::Site::Supervisor => ("supervisor", 2),
+    }
+}
+#[derive(Clone, Copy, Default)]
+struct SeedRefusalSummary {
+    counts: [u64; 3],
+    last: Option<SeedRefusal>,
+}
+impl SeedRefusalSummary {
+    fn record(&mut self, proof: SeedRefusal) {
+        let index = seed_site(proof.site).1;
+        self.counts[index] = self.counts[index].saturating_add(1);
+        self.last = Some(proof);
+    }
+}
+#[derive(Clone, Copy)]
+struct SeedCallSummary {
+    summary: SeedRefusalSummary,
+    completed: bool,
+}
+fn retain_seed_summary(summary: SeedRefusalSummary, completed: bool) {
+    SEED_REFUSAL_SUMMARIES.with(|rows| {
+        let mut rows = rows.borrow_mut();
+        let slot = rows
+            .iter_mut()
+            .find(|row| row.is_none())
+            .expect("only the three existing seed calls may retain summaries");
+        *slot = Some(SeedCallSummary { summary, completed });
+    });
+}
+fn seed_refusal_receipt() -> Value {
+    SEED_REFUSAL_SUMMARIES.with(|rows| {
+        Value::Array(rows.borrow().iter().enumerate().map(|(index, row)| {
+            let call = row.expect("all three seed summaries required");
+            let last = call.summary.last.map(|proof| json!({
+                "site":seed_site(proof.site).0,"marker":proof.marker.get(),
+                "stderr_bytes":proof.stderr_bytes,
+                "stderr_sha256":proof.stderr_sha256.iter().map(|byte|format!("{byte:02x}")).collect::<String>(),
+                "status":null,"response_bytes":null,
+            }));
+            json!({"seed":(["grid","main","replacement"][index]),
+                "body_first_count":call.summary.counts[0],"body_later_count":call.summary.counts[1],
+                "supervisor_count":call.summary.counts[2],"last":last,"completed":call.completed})
+        }).collect())
+    })
+}
+impl std::fmt::Display for SeedRefusalSummary {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Some(proof) = self.last else {
+            return Ok(());
+        };
+        write!(out, "private_media_seed_refusal version=1 body_first_count={} body_later_count={} supervisor_count={} last_site={} last_marker={} status=None response_bytes=None checked_stderr_bytes={} checked_stderr_sha256=",
+            self.counts[0], self.counts[1], self.counts[2], seed_site(proof.site).0,
+            proof.marker.get(), proof.stderr_bytes)?;
+        for byte in proof.stderr_sha256 {
+            write!(out, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Copy)]
+struct StderrStart {
+    dev: u64,
+    ino: u64,
+    length: usize,
+    prefix_sha256: [u8; 32],
+}
+// Read exactly the registered owned file, with the same 64KiB, owner, regular,
+// single-link, mode, no-follow and stable-identity checks as failure capture.
+// Unlike the display redactor, classification consumes only exact closed lines.
+fn owned_stderr_snapshot() -> Option<(u64, u64, Vec<u8>)> {
+    let root = FAILURE_STDERR_ROOT
+        .try_with(|slot| slot.try_borrow().ok()?.clone())
+        .ok()??;
+    let path = root.join("server.stderr");
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+        .ok()?;
+    let before = file.metadata().ok()?;
+    if !before.is_file()
+        || before.nlink() != 1
+        || before.uid() != unsafe { libc::geteuid() }
+        || before.mode() & 0o077 != 0
+        || before.len() > 65536
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    (&file).take(65537).read_to_end(&mut bytes).ok()?;
+    let after = file.metadata().ok()?;
+    let identity = |m: &fs::Metadata| {
+        (
+            m.dev(),
+            m.ino(),
+            m.len(),
+            m.mode(),
+            m.nlink(),
+            m.uid(),
+            m.mtime(),
+            m.mtime_nsec(),
+            m.ctime(),
+            m.ctime_nsec(),
+        )
+    };
+    if bytes.len() > 65536
+        || bytes.len() as u64 != after.len()
+        || identity(&before) != identity(&after)
+        || identity(&after) != identity(&fs::symlink_metadata(&path).ok()?)
+    {
+        return None;
+    }
+    Some((after.dev(), after.ino(), bytes))
+}
+impl StderrStart {
+    fn capture() -> Option<Self> {
+        let (dev, ino, bytes) = owned_stderr_snapshot()?;
+        Self::from_snapshot(dev, ino, &bytes)
+    }
+    fn from_snapshot(dev: u64, ino: u64, bytes: &[u8]) -> Option<Self> {
+        if bytes.len() > 65536 || (!bytes.is_empty() && bytes.last() != Some(&b'\n')) {
+            return None;
+        }
+        Some(Self {
+            dev,
+            ino,
+            length: bytes.len(),
+            prefix_sha256: Sha256::digest(bytes).into(),
+        })
+    }
+    fn appended<'a>(&self, dev: u64, ino: u64, bytes: &'a [u8]) -> Option<&'a [u8]> {
+        if (dev, ino) != (self.dev, self.ino) || bytes.len() > 65536 {
+            return None;
+        }
+        let prefix = bytes.get(..self.length)?;
+        let digest: [u8; 32] = Sha256::digest(prefix).into();
+        if digest != self.prefix_sha256 {
+            return None;
+        }
+        Some(&bytes[self.length..])
+    }
+}
+fn matching_seed_refusal(
+    bytes: &[u8],
+    marker: media_attempt::Marker,
+) -> Result<media_attempt::Site, SeedEvaluationOutcome> {
+    if bytes.is_empty() {
+        return Err(SeedEvaluationOutcome::MissingRecord);
+    }
+    // A partial line, malformed event or ambiguous marker never qualifies.
+    if bytes.last() != Some(&b'\n') {
+        return Err(SeedEvaluationOutcome::IncompleteRecord);
+    }
+    let mut matching = None;
+    for line in bytes[..bytes.len() - 1].split(|byte| *byte == b'\n') {
+        if !line
+            .windows(b"private_media_attempt".len())
+            .any(|window| window == b"private_media_attempt")
+        {
+            continue;
+        }
+        let event = std::str::from_utf8(line)
+            .ok()
+            .and_then(media_attempt::Terminal::parse)
+            .ok_or(SeedEvaluationOutcome::MalformedRecord)?;
+        if event.marker == marker {
+            if matching.is_some() {
+                return Err(SeedEvaluationOutcome::DuplicateMarker);
+            }
+            matching = Some(event);
+        }
+    }
+    let event = matching.ok_or(SeedEvaluationOutcome::MissingRecord)?;
+    if event.kind != media_attempt::Kind::TemporaryBusy {
+        return Err(SeedEvaluationOutcome::WrongKind);
+    }
+    if event.transport != media_attempt::Transport::Tls {
+        return Err(SeedEvaluationOutcome::WrongTransport);
+    }
+    // These are the exhaustive known refusal sites of this immutable custody.
+    // A yielded body chunk is not an application Response or a socket-write ACK.
+    match event.site {
+        media_attempt::Site::BodyFirst
+        | media_attempt::Site::BodyLater
+        | media_attempt::Site::Supervisor => Ok(event.site),
+    }
+}
+fn is_seed_send_failure(failure: &FixtureReadFailure) -> bool {
+    failure.stage == FixtureReadStage::HttpSend
+        && failure.status.is_none()
+        && failure.response_bytes.is_none()
+        && failure.response_sha256.is_none()
+        && failure.transport_error.is_some_and(|flags| {
+            flags.request
+                && !flags.timeout
+                && !flags.connect
+                && !flags.builder
+                && !flags.body
+                && !flags.decode
+        })
+}
+fn classify_seed_refusal_evidence(
+    mut failure: FixtureReadFailure,
+    marker: media_attempt::Marker,
+    start: StderrStart,
+    snapshot: (u64, u64, &[u8]),
+    now: Instant,
+    deadline: Instant,
+) -> FixtureReadFailure {
+    let (dev, ino, bytes) = snapshot;
+    let fingerprint =
+        (bytes.len() <= 65536).then(|| (bytes.len(), <[u8; 32]>::from(Sha256::digest(bytes))));
+    let matched = if !is_seed_send_failure(&failure) {
+        Err(SeedEvaluationOutcome::IneligibleTransport)
+    } else if now >= deadline {
+        Err(SeedEvaluationOutcome::DeadlineElapsed)
+    } else if fingerprint.is_none() {
+        Err(SeedEvaluationOutcome::SnapshotUnavailable)
+    } else {
+        start
+            .appended(dev, ino, bytes)
+            .ok_or(SeedEvaluationOutcome::SnapshotChanged)
+            .and_then(|tail| matching_seed_refusal(tail, marker))
+    };
+    let outcome = match matched {
+        Ok(site) => {
+            let (stderr_bytes, stderr_sha256) = fingerprint.expect("bounded checked snapshot");
+            failure.temporary_busy = true;
+            failure.seed_refusal = Some(SeedRefusal {
+                marker,
+                site,
+                stderr_bytes,
+                stderr_sha256,
+            });
+            SeedEvaluationOutcome::Accepted
+        }
+        Err(outcome) => outcome,
+    };
+    failure.seed_evaluation = Some(SeedEvaluation {
+        marker,
+        outcome,
+        snapshot: fingerprint,
+    });
+    failure
+}
+fn classify_seed_refusal(
+    mut failure: FixtureReadFailure,
+    marker: media_attempt::Marker,
+    start: Option<StderrStart>,
+    deadline: Instant,
+) -> FixtureReadFailure {
+    if !is_seed_send_failure(&failure) {
+        return failure;
+    }
+    let outcome = if Instant::now() >= deadline {
+        SeedEvaluationOutcome::DeadlineElapsed
+    } else if let Some(start) = start {
+        // Exactly one immediate bounded read. Never wait for a terminal logger.
+        if let Some((dev, ino, bytes)) = owned_stderr_snapshot() {
+            return classify_seed_refusal_evidence(
+                failure,
+                marker,
+                start,
+                (dev, ino, &bytes),
+                Instant::now(),
+                deadline,
+            );
+        }
+        SeedEvaluationOutcome::SnapshotUnavailable
+    } else {
+        SeedEvaluationOutcome::StartUnavailable
+    };
+    failure.seed_evaluation = Some(SeedEvaluation {
+        marker,
+        outcome,
+        snapshot: None,
+    });
+    failure
 }
 
 fn seed_busy_retry_delay(
@@ -1451,22 +1990,42 @@ fn playlist_snapshot_seed_until(
     deadline: Instant,
 ) -> Result<(u64, Vec<String>), FixtureReadFailure> {
     let mut last_busy = None;
-    loop {
+    let mut summary = SeedRefusalSummary::default();
+    let result = loop {
         let now = Instant::now();
-        let Some(timeout) = seed_request_timeout(now, deadline) else {
-            return Err(seed_deadline_failure(last_busy));
+        let Some(_) = seed_request_timeout(now, deadline) else {
+            break Err(seed_deadline_failure(last_busy));
         };
-        match playlist_snapshot_checked_with_timeout(base, playlist_path, timeout) {
-            Ok(snapshot) => return Ok(snapshot),
+        let marker =
+            next_seed_attempt(&NEXT_SEED_ATTEMPT).expect("private media attempt counter exhausted");
+        let stderr_start = StderrStart::capture();
+        // Snapshot work consumes this SAME deadline; do not restore its time.
+        let Some(timeout) = seed_request_timeout(Instant::now(), deadline) else {
+            break Err(seed_deadline_failure(last_busy));
+        };
+        match playlist_snapshot_attempt_with_timeout(base, playlist_path, timeout, Some(marker)) {
+            Ok(snapshot) => break Ok(snapshot),
             Err(failure) => {
+                let failure = classify_seed_refusal(failure, marker, stderr_start, deadline);
+                if let Some(proof) = failure.seed_refusal {
+                    summary.record(proof);
+                }
                 let Some(delay) = seed_busy_retry_delay(&failure, Instant::now(), deadline) else {
-                    return Err(failure);
+                    break Err(failure);
                 };
                 last_busy = Some(failure);
                 thread::sleep(delay);
             }
         }
+    };
+    // Persist classifications (not necessarily retries) even when libtest hides successful stderr.
+    retain_seed_summary(summary, result.is_ok());
+    // One closed summary per seed call, only after its requests have completed.
+    // Preserve the original status=None: this is not a fabricated HTTP 503.
+    if summary.last.is_some() {
+        eprintln!("{summary} completed={}", result.is_ok());
     }
+    result
 }
 fn parse_playlist_snapshot_response(
     playlist_url: &reqwest::Url,
@@ -1516,6 +2075,309 @@ fn parse_playlist_snapshot_response(
 
 #[test]
 fn playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts() {
+    let marker = media_attempt::Marker::new(41).unwrap();
+    let event = media_attempt::Terminal {
+        marker,
+        site: media_attempt::Site::BodyFirst,
+        kind: media_attempt::Kind::TemporaryBusy,
+        transport: media_attempt::Transport::Tls,
+    };
+    let line = format!("{event}\n");
+    assert!(matching_seed_refusal(line.as_bytes(), marker).is_ok());
+    for bytes in [
+        Vec::new(),
+        line.trim_end().as_bytes().to_vec(),
+        format!("{line}{line}").into_bytes(),
+        line.replace("marker=41", "marker=42").into_bytes(),
+        line.replace("marker=41", "marker=041").into_bytes(),
+        line.replace("reason=temporary_busy", "reason=secret-canary")
+            .into_bytes(),
+        line.replace(" terminal=closed", " extra=true terminal=closed")
+            .into_bytes(),
+        line.replace(" terminal=closed", " terminal=open")
+            .into_bytes(),
+        line.replace("site=body_first", "site=unknown").into_bytes(),
+        line.replace("reason=temporary_busy", "reason=unavailable")
+            .into_bytes(),
+        line.replace("reason=temporary_busy", "reason=denied")
+            .into_bytes(),
+        line.replace("transport=tls", "transport=http").into_bytes(),
+    ] {
+        assert!(matching_seed_refusal(&bytes, marker).is_err());
+    }
+    let old = b"previous complete event\n";
+    let start = StderrStart::from_snapshot(7, 8, old).unwrap();
+    assert!(StderrStart::from_snapshot(7, 8, b"incomplete old tail").is_none());
+    assert!(StderrStart::from_snapshot(7, 8, &vec![0; 65537]).is_none());
+    let stale = StderrStart::from_snapshot(7, 8, line.as_bytes()).unwrap();
+    assert!(matching_seed_refusal(stale.appended(7, 8, line.as_bytes()).unwrap(), marker).is_err());
+    assert!(matching_seed_refusal(
+        format!("{line}private_media_attempt broken\n").as_bytes(),
+        marker
+    )
+    .is_err());
+    assert!(matching_seed_refusal(format!("{line} {line}").as_bytes(), marker).is_err());
+    let unrelated = media_attempt::Terminal {
+        marker: media_attempt::Marker::new(42).unwrap(),
+        ..event
+    };
+    assert!(matching_seed_refusal(format!("{unrelated}\n{line}").as_bytes(), marker).is_ok());
+    let bytes = [old.as_slice(), line.as_bytes()].concat();
+    let now = Instant::now();
+    let deadline = now + Duration::from_millis(100);
+    let send = FixtureReadFailure {
+        stage: FixtureReadStage::HttpSend,
+        status: None,
+        response_bytes: None,
+        response_sha256: None,
+        temporary_busy: false,
+        transport_error: Some(TransportErrorFlags {
+            request: true,
+            timeout: false,
+            connect: false,
+            builder: false,
+            body: false,
+            decode: false,
+        }),
+        elapsed_ms: Some(2),
+        seed_refusal: None,
+        seed_evaluation: None,
+    };
+    let recognized =
+        classify_seed_refusal_evidence(send, marker, start, (7, 8, &bytes), now, deadline);
+    assert!(recognized.temporary_busy && recognized.seed_refusal.is_some());
+    assert_eq!(recognized.status, None);
+    assert_eq!(recognized.response_bytes, None);
+    assert_eq!(recognized.response_sha256, None);
+    assert_eq!(recognized.elapsed_ms, Some(2));
+    assert!(recognized.transport_error.unwrap().request);
+    assert_eq!(
+        seed_busy_retry_delay(&recognized, now, deadline),
+        Some(Duration::from_millis(100))
+    );
+    let retained = seed_deadline_failure(Some(recognized));
+    assert!(retained.seed_refusal.is_some() && retained.status.is_none());
+    for (dev, ino, snapshot, at) in [
+        (7, 9, bytes.as_slice(), now),
+        (9, 8, bytes.as_slice(), now),
+        (7, 8, old.as_slice(), now),
+        (7, 8, bytes.as_slice(), deadline),
+    ] {
+        assert!(
+            !classify_seed_refusal_evidence(
+                send,
+                marker,
+                start,
+                (dev, ino, snapshot),
+                at,
+                deadline
+            )
+            .temporary_busy
+        );
+    }
+    let mut rewritten = bytes.clone();
+    rewritten[0] = b'X';
+    assert!(start.appended(7, 8, &rewritten).is_none());
+    assert!(start.appended(7, 8, &vec![0; 65537]).is_none());
+    for stage in [
+        FixtureReadStage::HttpBody,
+        FixtureReadStage::HttpStatus,
+        FixtureReadStage::HttpDeadline,
+    ] {
+        let mut failure = send;
+        failure.stage = stage;
+        assert!(
+            !classify_seed_refusal_evidence(failure, marker, start, (7, 8, &bytes), now, deadline)
+                .temporary_busy
+        );
+    }
+    for field in 0..6 {
+        let mut failure = send;
+        let flags = failure.transport_error.as_mut().unwrap();
+        match field {
+            0 => flags.timeout = true,
+            1 => flags.connect = true,
+            2 => flags.builder = true,
+            3 => flags.body = true,
+            4 => flags.decode = true,
+            _ => flags.request = false,
+        }
+        assert!(
+            !classify_seed_refusal_evidence(failure, marker, start, (7, 8, &bytes), now, deadline)
+                .temporary_busy
+        );
+    }
+    let mut got_headers = send;
+    got_headers.status = Some(200);
+    assert!(!is_seed_send_failure(&got_headers));
+    let mut got_bytes = send;
+    got_bytes.response_bytes = Some(0);
+    assert!(!is_seed_send_failure(&got_bytes));
+    // All known sites describe the same refusal, but only before the client
+    // obtains a Response. Server body offset is not an application/wire boundary.
+    let mut summary = SeedRefusalSummary::default();
+    for site in [
+        media_attempt::Site::BodyFirst,
+        media_attempt::Site::BodyLater,
+        media_attempt::Site::Supervisor,
+    ] {
+        let line = format!("{}\n", media_attempt::Terminal { site, ..event });
+        let snapshot = [old.as_slice(), line.as_bytes()].concat();
+        let accepted =
+            classify_seed_refusal_evidence(send, marker, start, (7, 8, &snapshot), now, deadline);
+        assert!(accepted.temporary_busy);
+        assert_eq!(accepted.seed_refusal.unwrap().site, site);
+        assert_eq!(
+            accepted.seed_evaluation.unwrap().outcome,
+            SeedEvaluationOutcome::Accepted
+        );
+        assert_eq!(accepted.status, None);
+        assert_eq!(accepted.response_bytes, None);
+        assert_eq!(accepted.response_sha256, None);
+        assert!(accepted.transport_error.unwrap().request);
+        summary.record(accepted.seed_refusal.unwrap());
+        for field in 0..12 {
+            let mut fatal = send;
+            match field {
+                0 => fatal.stage = FixtureReadStage::HttpBody,
+                1 => {
+                    fatal.stage = FixtureReadStage::HttpBody;
+                    fatal.status = Some(200);
+                    fatal.response_bytes = Some(0);
+                }
+                2 => fatal.status = Some(200),
+                3 => fatal.response_bytes = Some(0),
+                4 => fatal.response_bytes = Some(1),
+                5 => fatal.response_sha256 = Some([0; 32]),
+                6 => fatal.transport_error.as_mut().unwrap().timeout = true,
+                7 => fatal.transport_error.as_mut().unwrap().connect = true,
+                8 => fatal.transport_error.as_mut().unwrap().builder = true,
+                9 => fatal.transport_error.as_mut().unwrap().body = true,
+                10 => fatal.transport_error.as_mut().unwrap().decode = true,
+                _ => fatal.transport_error.as_mut().unwrap().request = false,
+            }
+            let rejected = classify_seed_refusal_evidence(
+                fatal,
+                marker,
+                start,
+                (7, 8, &snapshot),
+                now,
+                deadline,
+            );
+            assert!(!rejected.temporary_busy);
+            assert!(rejected.seed_refusal.is_none());
+            assert_eq!(
+                rejected.seed_evaluation.unwrap().outcome,
+                SeedEvaluationOutcome::IneligibleTransport
+            );
+            assert!(seed_busy_retry_delay(&rejected, now, deadline).is_none());
+        }
+        let expired = classify_seed_refusal_evidence(
+            send,
+            marker,
+            start,
+            (7, 8, &snapshot),
+            deadline,
+            deadline,
+        );
+        assert!(!expired.temporary_busy);
+        assert_eq!(
+            expired.seed_evaluation.unwrap().outcome,
+            SeedEvaluationOutcome::DeadlineElapsed
+        );
+    }
+    assert_eq!(summary.counts, [1, 1, 1]);
+    let printed = summary.to_string();
+    assert!(printed.contains("body_first_count=1 body_later_count=1 supervisor_count=1"));
+    assert!(printed.contains("last_site=supervisor last_marker=41 status=None response_bytes=None"));
+    SEED_REFUSAL_SUMMARIES.with(|rows| *rows.borrow_mut() = [None; 3]);
+    retain_seed_summary(SeedRefusalSummary::default(), true);
+    retain_seed_summary(summary, true);
+    retain_seed_summary(SeedRefusalSummary::default(), false);
+    let retained = seed_refusal_receipt();
+    let last_line = format!(
+        "{}\n",
+        media_attempt::Terminal {
+            site: media_attempt::Site::Supervisor,
+            ..event
+        }
+    );
+    let last_snapshot = [old.as_slice(), last_line.as_bytes()].concat();
+    assert_eq!(retained.as_array().unwrap().len(), 3);
+    assert_eq!(retained[0]["seed"], "grid");
+    assert_eq!(retained[0]["body_first_count"], 0);
+    assert_eq!(retained[0]["body_later_count"], 0);
+    assert_eq!(retained[0]["supervisor_count"], 0);
+    assert!(retained[0]["last"].is_null());
+    assert_eq!(retained[0]["completed"], true);
+    assert_eq!(retained[1]["seed"], "main");
+    assert_eq!(retained[1]["body_first_count"], 1);
+    assert_eq!(retained[1]["body_later_count"], 1);
+    assert_eq!(retained[1]["supervisor_count"], 1);
+    assert_eq!(retained[1]["last"]["site"], "supervisor");
+    assert_eq!(retained[1]["last"]["marker"], 41);
+    assert_eq!(retained[1]["last"]["stderr_bytes"], last_snapshot.len());
+    assert_eq!(
+        retained[1]["last"]["stderr_sha256"],
+        format!("{:x}", Sha256::digest(&last_snapshot))
+    );
+    assert!(retained[1]["last"]["status"].is_null());
+    assert!(retained[1]["last"]["response_bytes"].is_null());
+    assert_eq!(retained[2]["seed"], "replacement");
+    assert_eq!(retained[2]["completed"], false);
+    assert!(std::panic::catch_unwind(|| retain_seed_summary(summary, true)).is_err());
+    assert_eq!(seed_refusal_receipt(), retained);
+    SEED_REFUSAL_SUMMARIES.with(|rows| *rows.borrow_mut() = [None; 3]);
+    assert!(std::panic::catch_unwind(seed_refusal_receipt).is_err());
+    let checked_hash: [u8; 32] = Sha256::digest(&bytes).into();
+    for (tail, outcome) in [
+        (Vec::new(), SeedEvaluationOutcome::MissingRecord),
+        (
+            line.trim_end().as_bytes().to_vec(),
+            SeedEvaluationOutcome::IncompleteRecord,
+        ),
+        (
+            format!("{line}{line}").into_bytes(),
+            SeedEvaluationOutcome::DuplicateMarker,
+        ),
+        (
+            line.replace("reason=temporary_busy", "secret-canary")
+                .into_bytes(),
+            SeedEvaluationOutcome::MalformedRecord,
+        ),
+        (
+            line.replace("reason=temporary_busy", "reason=denied")
+                .into_bytes(),
+            SeedEvaluationOutcome::WrongKind,
+        ),
+        (
+            line.replace("transport=tls", "transport=http").into_bytes(),
+            SeedEvaluationOutcome::WrongTransport,
+        ),
+    ] {
+        let snapshot = [old.as_slice(), &tail].concat();
+        let rejected =
+            classify_seed_refusal_evidence(send, marker, start, (7, 8, &snapshot), now, deadline);
+        assert_eq!(rejected.seed_evaluation.unwrap().outcome, outcome);
+        assert_eq!(
+            rejected.seed_evaluation.unwrap().snapshot,
+            Some((snapshot.len(), Sha256::digest(&snapshot).into()))
+        );
+        assert!(!rejected.temporary_busy);
+        assert!(!rejected.to_string().contains("secret-canary"));
+    }
+    assert_eq!(
+        recognized.seed_evaluation.unwrap().snapshot,
+        Some((bytes.len(), checked_hash))
+    );
+    let counter = AtomicU64::new(1);
+    assert_eq!(next_seed_attempt(&counter).unwrap().get(), 1);
+    assert_eq!(next_seed_attempt(&counter).unwrap().get(), 2);
+    counter.store(u64::MAX - 1, Ordering::Relaxed);
+    assert_eq!(next_seed_attempt(&counter).unwrap().get(), u64::MAX - 1);
+    assert!(next_seed_attempt(&counter).is_none());
+    assert!(next_seed_attempt(&counter).is_none());
+
     let base = reqwest::Url::parse("https://fixture.invalid").unwrap();
     let path = base.join("/owned/index.m3u8").unwrap();
     let now = Instant::now();
@@ -1621,6 +2483,32 @@ fn playlist_failure_evidence_preserves_http_parse_and_fatal_origin_contracts() {
         let record = error.to_string();
         assert!(record.contains(stage.code()) && record.ends_with("response_sha256=none"));
     }
+    // Construct a builder error locally so this privacy check never initializes
+    // the shared fixture client or performs network/TLS work.
+    let reqwest_error = reqwest::Client::builder()
+        .user_agent("transport-secret-canary\n")
+        .build()
+        .unwrap_err()
+        .with_url(
+            reqwest::Url::parse(
+                "https://transport-secret-canary:secret@example.invalid/path?token=transport-secret-canary",
+            )
+            .unwrap(),
+        );
+    let error = FixtureReadFailure::transport(
+        FixtureReadStage::HttpSend,
+        &reqwest_error,
+        Duration::from_millis(7),
+        None,
+        None,
+    );
+    let flags = error.transport_error.expect("builder classification");
+    assert!(flags.builder);
+    assert_eq!(error.elapsed_ms, Some(7));
+    let record = error.to_string();
+    assert!(record.contains("transport_builder=true"));
+    assert!(!record.contains("transport-secret-canary"));
+    assert!(!record.contains("http://") && !record.contains("https://"));
     let escaped = std::panic::catch_unwind(|| {
         parse_playlist_snapshot_response(
             &path,
@@ -1674,6 +2562,16 @@ fn segment_video_proof_checks_count_timing_and_sampling_domain() {
         (json!({"nb_read_frames":count.to_string(),"time_base":"1/90000"}),
          (0..count).map(|n| json!({"media_type":"video","best_effort_timestamp":n*9000,"pkt_duration":9000})).collect())
     }
+    let one_video = json!({"codec_type":"video"});
+    let one_audio = json!({"codec_type":"audio"});
+    assert!(single_av_streams(&[]).is_none());
+    assert!(single_av_streams(&[one_video.clone(), one_audio.clone()]).is_some());
+    assert!(single_av_streams(std::slice::from_ref(&one_video)).is_none());
+    assert!(
+        single_av_streams(&[one_video.clone(), one_video.clone(), one_audio.clone()]).is_none()
+    );
+    assert!(single_av_streams(&[one_video, one_audio.clone(), one_audio]).is_none());
+
     for (count, expected) in [(1, 0), (10, 9), (11, 10), (12, 10)] {
         let (video, frames) = report(count);
         let proof = segment_video_proof(&video, &frames).unwrap();
@@ -1681,6 +2579,8 @@ fn segment_video_proof_checks_count_timing_and_sampling_domain() {
         assert_eq!(proof.time_base, "1/90000");
         assert_eq!(proof.sample_index, expected);
         assert_eq!(proof.duration_ticks, count as i64 * 9000);
+        assert_eq!(proof.first_pts, 0);
+        assert_eq!(proof.end_pts, count as i64 * 9000);
     }
     let (mut video, mut frames) = report(10);
     video["nb_read_frames"] = json!("0");
@@ -1708,47 +2608,213 @@ fn segment_video_proof_checks_count_timing_and_sampling_domain() {
     let (video, mut frames) = report(10);
     frames[9]["pkt_duration"] = json!(31 * 90000);
     assert!(segment_video_proof(&video, &frames).is_none());
-}
 
-#[test]
-fn request_transport_diagnostics_classify_actual_error_without_authority() {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .unwrap_or_else(|_| panic!("fixture HTTP client construction failed"));
-    let request = client
-        .get("http://127.0.0.1/")
-        .header("x-fixture-marker", "private-header-marker\n");
-    let error = match request.build() {
-        Err(error) => error.with_url(
-            reqwest::Url::parse(
-                "https://fixture.invalid/private-route?capability=transport-privacy-marker",
-            )
-            .expect("valid synthetic privacy URL"),
-        ),
-        Ok(_) => panic!("invalid fixture header was unexpectedly accepted"),
-    };
-    assert!(error.url().is_some());
-    let failure =
-        FixtureReadFailure::transport_error(FixtureReadStage::HttpSend, None, None, &error);
-    let class = failure.transport.expect("closed transport classification");
-    assert!(class.builder);
-    assert!(!failure.temporary_busy);
-    let now = Instant::now();
-    assert!(seed_busy_retry_delay(&failure, now, now + Duration::from_secs(1)).is_none());
-    let record = failure.to_string();
-    assert!(record.contains("transport_builder=true"));
-    assert!(record.ends_with("response_sha256=none"));
-    assert!(record.len() < 512);
-    for authority in [
-        "fixture.invalid",
-        "private-route",
-        "transport-privacy-marker",
-        "private-header-marker",
-        "://",
-    ] {
-        assert!(!record.contains(authority));
+    let audio = json!({
+        "sample_rate":"48000",
+        "channels":2,
+        "time_base":"1/90000"
+    });
+    let audio_frames = vec![
+        json!({"media_type":"audio","best_effort_timestamp":0,"pkt_duration":1920,"nb_samples":1024}),
+        json!({"media_type":"audio","best_effort_timestamp":1920,"duration":1920,"nb_samples":1024}),
+    ];
+    let audio_proof = segment_audio_diagnostic(&audio, &audio_frames);
+    assert_eq!(audio_proof["audio_decoded_frames"], 2);
+    assert_eq!(audio_proof["audio_nb_samples_total"], 2048);
+    assert_eq!(audio_proof["audio_first_pts"], 0);
+    assert_eq!(audio_proof["audio_last_end_pts"], 3840);
+    assert_eq!(audio_proof["audio_packet_duration_ticks_total"], 3840);
+    assert_eq!(audio_proof["audio_sample_rate"], 48000);
+    assert_eq!(audio_proof["audio_channels"], 2);
+    assert_eq!(audio_proof["audio_time_base_num"], 1);
+    assert_eq!(audio_proof["audio_time_base_den"], 90000);
+
+    let malformed = segment_audio_diagnostic(
+        &json!({"sample_rate":"N/A","channels":0,"time_base":"1/0"}),
+        &[
+            json!({"media_type":"audio","best_effort_timestamp":"bad","pkt_duration":-1,"nb_samples":"bad"}),
+        ],
+    );
+    assert!(malformed["audio_nb_samples_total"].is_null());
+    assert!(malformed["audio_first_pts"].is_null());
+    assert!(malformed["audio_last_end_pts"].is_null());
+    assert!(malformed["audio_packet_duration_ticks_total"].is_null());
+    assert!(malformed["audio_sample_rate"].is_null());
+    assert!(malformed["audio_channels"].is_null());
+    assert!(malformed["audio_time_base_num"].is_null());
+    assert!(malformed["audio_time_base_den"].is_null());
+
+    let overflow = segment_audio_diagnostic(
+        &audio,
+        &[
+            json!({"media_type":"audio","best_effort_timestamp":0,"pkt_duration":i64::MAX,"nb_samples":i64::MAX}),
+            json!({"media_type":"audio","best_effort_timestamp":1,"pkt_duration":i64::MAX,"nb_samples":i64::MAX}),
+            json!({"media_type":"audio","best_effort_timestamp":2,"pkt_duration":i64::MAX,"nb_samples":i64::MAX}),
+        ],
+    );
+    assert!(overflow["audio_nb_samples_total"].is_null());
+    assert!(overflow["audio_packet_duration_ticks_total"].is_null());
+
+    fn audio_packets(count: usize, first_pts: i64) -> (Value, Vec<Value>) {
+        let audio = json!({
+            "codec_name":"aac",
+            "sample_rate":"48000",
+            "channels":2,
+            "time_base":"1/90000"
+        });
+        let frames = (0..count)
+            .map(|index| {
+                json!({"media_type":"audio",
+                    "best_effort_timestamp":first_pts + index as i64 * 1920,
+                    "pkt_duration":1920,"nb_samples":1024})
+            })
+            .collect();
+        (audio, frames)
     }
+
+    let (video, video_frames) = report(10);
+    let video = segment_video_proof(&video, &video_frames).unwrap();
+    for (count, first_pts, floor, ceil) in [
+        (46, 1680, 15_701, 15_702),
+        (47, 240, 16_042, 16_043),
+        (48, -1920, 16_384, 16_384),
+    ] {
+        let (audio, frames) = audio_packets(count, first_pts);
+        let proof = segment_audio_proof(&audio, &frames).unwrap();
+        assert!(audio_matches_video_window(&video, &proof));
+        assert_eq!(
+            resampled_pcm_sample_range(proof.sample_count),
+            Some((floor, ceil))
+        );
+        assert!(pcm_matches_audio_sample_count(&proof, (floor * 2) as usize));
+        assert!(pcm_matches_audio_sample_count(&proof, (ceil * 2) as usize));
+    }
+
+    // The endpoint contract is relative: a common negative MPEG-TS timestamp
+    // origin is valid, while shifting only audio by half a second is not.
+    let (shifted_video, mut shifted_video_frames) = report(10);
+    for frame in &mut shifted_video_frames {
+        let timestamp = frame["best_effort_timestamp"].as_i64().unwrap() - 90_000;
+        frame["best_effort_timestamp"] = json!(timestamp);
+    }
+    let shifted_video = segment_video_proof(&shifted_video, &shifted_video_frames).unwrap();
+    let (audio, frames) = audio_packets(48, -90_000 - 1920);
+    let proof = segment_audio_proof(&audio, &frames).unwrap();
+    assert!(audio_matches_video_window(&shifted_video, &proof));
+    for shift in [-45_000, 45_000] {
+        let (audio, frames) = audio_packets(46, shift);
+        let proof = segment_audio_proof(&audio, &frames).unwrap();
+        assert!(!audio_matches_video_window(&video, &proof));
+    }
+
+    let (audio, frames) = audio_packets(1, 0);
+    let proof = segment_audio_proof(&audio, &frames).unwrap();
+    assert!(
+        !audio_matches_video_window(&video, &proof),
+        "tiny audio span must fail"
+    );
+    let (short_video, short_video_frames) = report(1);
+    let short_video = segment_video_proof(&short_video, &short_video_frames).unwrap();
+    let (audio, frames) = audio_packets(5, 0);
+    let proof = segment_audio_proof(&audio, &frames).unwrap();
+    assert!(
+        !audio_matches_video_window(&short_video, &proof),
+        "short paired A/V startup fragment must fail the fixed live-window oracle"
+    );
+
+    let (audio, mut frames) = audio_packets(46, 0);
+    frames[1]["best_effort_timestamp"] = json!(1921);
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "audio PTS gap must fail"
+    );
+    frames[1]["best_effort_timestamp"] = json!(1919);
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "audio PTS overlap must fail"
+    );
+    frames[1]["best_effort_timestamp"] = json!(1920);
+    frames[0]["nb_samples"] = json!(1023);
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "wrong AAC frame size must fail"
+    );
+    frames[0]["nb_samples"] = json!(1024);
+    frames[0]["pkt_duration"] = json!(1919);
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "sample duration mismatch must fail"
+    );
+
+    let (mut audio, frames) = audio_packets(46, 0);
+    audio["codec_name"] = json!("mp3");
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "wrong codec must fail"
+    );
+    audio["codec_name"] = json!("aac");
+    audio["sample_rate"] = json!(44100);
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "wrong sample rate must fail"
+    );
+    audio["sample_rate"] = json!(48000);
+    audio["channels"] = json!(1);
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "wrong channel count must fail"
+    );
+    audio["channels"] = json!(2);
+    audio["time_base"] = json!("1/0");
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "invalid time base must fail"
+    );
+    audio["time_base"] = json!("1/90000");
+    assert!(
+        segment_audio_proof(&audio, &[]).is_none(),
+        "missing audio frames must fail"
+    );
+    let (audio, frames) = audio_packets(1, i64::MAX - 1000);
+    assert!(
+        segment_audio_proof(&audio, &frames).is_none(),
+        "PTS overflow must fail"
+    );
+
+    let (audio, frames) = audio_packets(46, 0);
+    let proof = segment_audio_proof(&audio, &frames).unwrap();
+    assert!(pcm_matches_audio_sample_count(&proof, 31_402));
+    assert!(pcm_matches_audio_sample_count(&proof, 31_404));
+    assert!(
+        !pcm_matches_audio_sample_count(&proof, 31_400),
+        "material PCM truncation must fail"
+    );
+    assert!(
+        !pcm_matches_audio_sample_count(&proof, 31_403),
+        "odd PCM byte count must fail"
+    );
+    assert!(
+        !pcm_matches_audio_sample_count(&proof, 0),
+        "empty PCM must fail"
+    );
+    assert!(
+        !pcm_matches_audio_sample_count(&proof, (MAX_PCM_SAMPLES as usize + 1) * 2),
+        "PCM cap must remain"
+    );
+    let exact_cap = SegmentAudioProof {
+        sample_count: AAC_SAMPLE_RATE * 8,
+        sample_rate: AAC_SAMPLE_RATE,
+        channels: 2,
+        first_pts: 0,
+        end_pts: 8 * 90_000,
+        time_base_num: 1,
+        time_base_den: 90_000,
+    };
+    assert!(pcm_matches_audio_sample_count(
+        &exact_cap,
+        (MAX_PCM_SAMPLES * 2) as usize
+    ));
+    assert_eq!(resampled_pcm_sample_range(u64::MAX), None);
 }
 
 fn try_new_segment(
@@ -1863,8 +2929,305 @@ fn run_bounded_filter(
 struct SegmentVideoProof {
     count: u64,
     sample_index: u64,
+    first_pts: i64,
+    end_pts: i64,
     duration_ticks: i64,
+    time_base_num: u64,
+    time_base_den: u64,
     time_base: String,
+}
+
+struct SegmentAudioProof {
+    sample_count: u64,
+    sample_rate: u64,
+    channels: u64,
+    first_pts: i64,
+    end_pts: i64,
+    time_base_num: u64,
+    time_base_den: u64,
+}
+
+struct SegmentMediaProof {
+    video: SegmentVideoProof,
+    audio: SegmentAudioProof,
+    segment_sha256: String,
+}
+
+const AAC_SAMPLES_PER_FRAME: u64 = 1024;
+const AAC_SAMPLE_RATE: u64 = 48_000;
+const PCM_SAMPLE_RATE: u64 = 16_000;
+const MAX_PCM_SAMPLES: u64 = PCM_SAMPLE_RATE * 8;
+
+fn stream_time_base(stream: &Value) -> Option<(u64, u64)> {
+    let value = stream["time_base"].as_str()?;
+    let (numerator, denominator) = value.split_once('/')?;
+    if numerator.is_empty()
+        || denominator.is_empty()
+        || !numerator.bytes().all(|byte| byte.is_ascii_digit())
+        || !denominator.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let numerator = numerator.parse::<u64>().ok()?;
+    let denominator = denominator.parse::<u64>().ok()?;
+    (numerator > 0 && denominator > 0).then_some((numerator, denominator))
+}
+
+fn frame_duration_ticks(frame: &Value) -> Option<i64> {
+    diagnostic_integer(&frame["pkt_duration"])
+        .or_else(|| diagnostic_integer(&frame["duration"]))
+        .filter(|duration| *duration > 0)
+}
+
+fn single_av_streams(streams: &[Value]) -> Option<(&Value, &Value)> {
+    let mut video: Option<&Value> = None;
+    let mut audio: Option<&Value> = None;
+    for stream in streams {
+        match stream.get("codec_type").and_then(Value::as_str) {
+            Some("video") if video.is_none() => video = Some(stream),
+            Some("audio") if audio.is_none() => audio = Some(stream),
+            Some("video" | "audio") => return None,
+            _ => {}
+        }
+    }
+    Some((video?, audio?))
+}
+
+fn segment_audio_proof(audio: &Value, frames: &[Value]) -> Option<SegmentAudioProof> {
+    if audio["codec_name"] != "aac"
+        || diagnostic_integer(&audio["sample_rate"]) != Some(AAC_SAMPLE_RATE as i64)
+        || diagnostic_integer(&audio["channels"]) != Some(2)
+    {
+        return None;
+    }
+    let (time_base_num, time_base_den) = stream_time_base(audio)?;
+    let audio_frames: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame["media_type"] == "audio")
+        .collect();
+    if audio_frames.is_empty() {
+        return None;
+    }
+    let mut sample_count = 0u64;
+    let mut previous_end = None;
+    let mut first_pts = None;
+    let mut end_pts = None;
+    for frame in audio_frames {
+        let timestamp = diagnostic_integer(&frame["best_effort_timestamp"])?;
+        let duration = frame_duration_ticks(frame)?;
+        let samples = diagnostic_integer(&frame["nb_samples"])?;
+        if samples != AAC_SAMPLES_PER_FRAME as i64
+            || previous_end.is_some_and(|end| end != timestamp)
+        {
+            return None;
+        }
+        // In the selected 48 kHz AAC profile each coded frame must occupy
+        // exactly its reported sample duration in the stream time base.
+        let duration_scaled = i128::from(duration)
+            .checked_mul(i128::from(time_base_num))?
+            .checked_mul(i128::from(AAC_SAMPLE_RATE))?;
+        let samples_scaled = i128::from(samples).checked_mul(i128::from(time_base_den))?;
+        if duration_scaled != samples_scaled {
+            return None;
+        }
+        let frame_end = timestamp.checked_add(duration)?;
+        first_pts.get_or_insert(timestamp);
+        end_pts = Some(frame_end);
+        previous_end = Some(frame_end);
+        sample_count = sample_count.checked_add(u64::try_from(samples).ok()?)?;
+    }
+    Some(SegmentAudioProof {
+        sample_count,
+        sample_rate: AAC_SAMPLE_RATE,
+        channels: 2,
+        first_pts: first_pts?,
+        end_pts: end_pts?,
+        time_base_num,
+        time_base_den,
+    })
+}
+
+fn endpoint_within_aac_frame(
+    audio_pts: i64,
+    audio_time_base: (u64, u64),
+    video_pts: i64,
+    video_time_base: (u64, u64),
+) -> bool {
+    let Some(audio_scaled) = i128::from(audio_pts)
+        .checked_mul(i128::from(audio_time_base.0))
+        .and_then(|value| value.checked_mul(i128::from(video_time_base.1)))
+    else {
+        return false;
+    };
+    let Some(video_scaled) = i128::from(video_pts)
+        .checked_mul(i128::from(video_time_base.0))
+        .and_then(|value| value.checked_mul(i128::from(audio_time_base.1)))
+    else {
+        return false;
+    };
+    let Some(difference) = audio_scaled
+        .checked_sub(video_scaled)
+        .and_then(|value| value.checked_abs())
+    else {
+        return false;
+    };
+    let Some(actual_scaled) = difference.checked_mul(i128::from(AAC_SAMPLE_RATE)) else {
+        return false;
+    };
+    let Some(allowed_scaled) = i128::from(AAC_SAMPLES_PER_FRAME)
+        .checked_mul(i128::from(audio_time_base.1))
+        .and_then(|value| value.checked_mul(i128::from(video_time_base.1)))
+    else {
+        return false;
+    };
+    actual_scaled <= allowed_scaled
+}
+
+fn audio_matches_video_window(video: &SegmentVideoProof, audio: &SegmentAudioProof) -> bool {
+    // Fixed live profile only: HLS targets 1s and the 10fps GOP is 10 frames.
+    // Requiring a complete video window avoids treating a short startup/EOF
+    // fragment as a healthy sample. One AAC access unit at each endpoint
+    // covers packet-boundary quantization and AAC priming; this is not a universal HLS
+    // continuity or loss-free guarantee.
+    let Some(video_duration_scaled) = u128::try_from(video.duration_ticks)
+        .ok()
+        .and_then(|ticks| ticks.checked_mul(u128::from(video.time_base_num)))
+    else {
+        return false;
+    };
+    if video.count < 10 || video_duration_scaled < u128::from(video.time_base_den) {
+        return false;
+    }
+    endpoint_within_aac_frame(
+        audio.first_pts,
+        (audio.time_base_num, audio.time_base_den),
+        video.first_pts,
+        (video.time_base_num, video.time_base_den),
+    ) && endpoint_within_aac_frame(
+        audio.end_pts,
+        (audio.time_base_num, audio.time_base_den),
+        video.end_pts,
+        (video.time_base_num, video.time_base_den),
+    )
+}
+
+fn resampled_pcm_sample_range(aac_samples: u64) -> Option<(u64, u64)> {
+    // Mono 16 kHz output from this 48 kHz AAC profile is exactly N/3 samples;
+    // only integer resampler rounding permits either adjacent sample count.
+    let scaled = aac_samples.checked_mul(PCM_SAMPLE_RATE)?;
+    let floor = scaled / AAC_SAMPLE_RATE;
+    let ceil = floor.checked_add(if scaled % AAC_SAMPLE_RATE != 0 { 1 } else { 0 })?;
+    Some((floor, ceil))
+}
+
+fn pcm_matches_audio_sample_count(audio: &SegmentAudioProof, pcm_bytes: usize) -> bool {
+    if audio.sample_rate != AAC_SAMPLE_RATE
+        || audio.channels != 2
+        || pcm_bytes == 0
+        || pcm_bytes % 2 != 0
+        || pcm_bytes > (MAX_PCM_SAMPLES * 2) as usize
+    {
+        return false;
+    }
+    let Some((floor, ceil)) = resampled_pcm_sample_range(audio.sample_count) else {
+        return false;
+    };
+    let Ok(actual) = u64::try_from(pcm_bytes / 2) else {
+        return false;
+    };
+    (actual == floor || actual == ceil) && actual <= MAX_PCM_SAMPLES
+}
+
+fn diagnostic_integer(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+        .or_else(|| value.as_str()?.parse::<i64>().ok())
+}
+
+fn segment_audio_diagnostic(audio: &Value, frames: &[Value]) -> Value {
+    let audio_frames: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame["media_type"] == "audio")
+        .collect();
+    let sample_rate = diagnostic_integer(&audio["sample_rate"])
+        .filter(|value| *value > 0)
+        .and_then(|value| u64::try_from(value).ok());
+    let channels = diagnostic_integer(&audio["channels"])
+        .filter(|value| *value > 0)
+        .and_then(|value| u64::try_from(value).ok());
+    let sample_count = audio_frames.iter().try_fold(0u64, |sum, frame| {
+        let samples = diagnostic_integer(&frame["nb_samples"])?;
+        if samples < 0 {
+            return None;
+        }
+        sum.checked_add(u64::try_from(samples).ok()?)
+    });
+    let packet_duration_ticks = audio_frames.iter().try_fold(0i64, |sum, frame| {
+        let duration = diagnostic_integer(&frame["pkt_duration"])
+            .or_else(|| diagnostic_integer(&frame["duration"]))?;
+        if duration <= 0 {
+            return None;
+        }
+        sum.checked_add(duration)
+    });
+    let timestamps: Option<Vec<i64>> = audio_frames
+        .iter()
+        .map(|frame| diagnostic_integer(&frame["best_effort_timestamp"]))
+        .collect();
+    let timestamps = timestamps.filter(|values| values.windows(2).all(|pair| pair[0] < pair[1]));
+    let first_pts = timestamps
+        .as_ref()
+        .and_then(|values| values.first().copied());
+    let last_end_pts = audio_frames.last().and_then(|frame| {
+        let duration = diagnostic_integer(&frame["pkt_duration"])
+            .or_else(|| diagnostic_integer(&frame["duration"]))?;
+        if duration <= 0 {
+            return None;
+        }
+        diagnostic_integer(&frame["best_effort_timestamp"])?.checked_add(duration)
+    });
+    let (time_base_num, time_base_den) = audio["time_base"]
+        .as_str()
+        .and_then(|value| value.split_once('/'))
+        .and_then(|(numerator, denominator)| {
+            let numerator = numerator.parse::<u64>().ok()?;
+            let denominator = denominator.parse::<u64>().ok()?;
+            (numerator > 0 && denominator > 0).then_some((numerator, denominator))
+        })
+        .map_or((None, None), |(numerator, denominator)| {
+            (Some(numerator), Some(denominator))
+        });
+    json!({
+        "audio_channels": channels,
+        "audio_decoded_frames": audio_frames.len(),
+        "audio_first_pts": first_pts,
+        "audio_last_end_pts": last_end_pts,
+        "audio_nb_samples_total": sample_count,
+        "audio_packet_duration_ticks_total": packet_duration_ticks,
+        "audio_sample_rate": sample_rate,
+        "audio_time_base_den": time_base_den,
+        "audio_time_base_num": time_base_num,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum PcmProofRole {
+    Grid,
+    InitialSustained,
+    Replacement,
+    LateSustained,
+}
+
+impl PcmProofRole {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Grid => "grid",
+            Self::InitialSustained => "initial_sustained",
+            Self::Replacement => "replacement",
+            Self::LateSustained => "late_sustained",
+        }
+    }
 }
 
 fn segment_video_proof(video: &Value, frames: &[Value]) -> Option<SegmentVideoProof> {
@@ -1906,10 +3269,10 @@ fn segment_video_proof(video: &Value, frames: &[Value]) -> Option<SegmentVideoPr
     if last_duration <= 0 {
         return None;
     }
-    let duration_ticks = last["best_effort_timestamp"]
+    let end_pts = last["best_effort_timestamp"]
         .as_i64()?
-        .checked_add(last_duration)?
-        .checked_sub(first)?;
+        .checked_add(last_duration)?;
+    let duration_ticks = end_pts.checked_sub(first)?;
     let scaled = u128::try_from(duration_ticks)
         .ok()?
         .checked_mul(u128::from(numerator))?;
@@ -1919,12 +3282,16 @@ fn segment_video_proof(video: &Value, frames: &[Value]) -> Option<SegmentVideoPr
     Some(SegmentVideoProof {
         count,
         sample_index: 10.min(count - 1),
+        first_pts: first,
+        end_pts,
         duration_ticks,
+        time_base_num: numerator,
+        time_base_den: denominator,
         time_base: time_base.to_owned(),
     })
 }
 
-fn ffprobe_segment(ffprobe: &Path, bytes: &[u8]) -> SegmentVideoProof {
+fn ffprobe_segment(ffprobe: &Path, bytes: &[u8]) -> SegmentMediaProof {
     assert!(
         bytes.len() >= 188 && bytes.len() <= 8 * 1024 * 1024,
         "bounded TS output segment required"
@@ -1937,7 +3304,7 @@ fn ffprobe_segment(ffprobe: &Path, bytes: &[u8]) -> SegmentVideoProof {
             "-count_frames",
             "-show_frames",
             "-show_entries",
-            "stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,nb_read_frames,time_base:frame=media_type,best_effort_timestamp,pkt_duration,duration",
+            "stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,nb_read_frames,time_base,sample_rate,channels:frame=media_type,best_effort_timestamp,pkt_duration,duration,nb_samples",
             "-of",
             "json",
             "-i",
@@ -1974,32 +3341,64 @@ fn ffprobe_segment(ffprobe: &Path, bytes: &[u8]) -> SegmentVideoProof {
         audio["codec_name"], "aac",
         "selected profile audio codec differs"
     );
-    let proof = segment_video_proof(
-        video,
-        report["frames"].as_array().expect("decoded frame proof"),
-    )
-    .expect("positive bounded decoded frame count, timestamps and duration required");
+    let frames = report["frames"].as_array().expect("decoded frame proof");
+    let video_proof = segment_video_proof(video, frames)
+        .expect("positive bounded decoded frame count, timestamps and duration required");
     // The segment is a borrowed immutable byte slice throughout probe and decode;
     // retain content identity, not an API URL or an output capability.
-    eprintln!("normal_segment_video_proof sha256={:x} bytes={} frames={} sample_index={} duration_ticks={} time_base={}",
-        Sha256::digest(bytes), bytes.len(), proof.count, proof.sample_index, proof.duration_ticks, proof.time_base);
+    eprintln!(
+        "normal_segment_video_proof sha256={:x} bytes={} frames={} sample_index={} duration_ticks={} time_base={}",
+        Sha256::digest(bytes),
+        bytes.len(),
+        video_proof.count,
+        video_proof.sample_index,
+        video_proof.duration_ticks,
+        video_proof.time_base
+    );
+    let audio_diagnostic = segment_audio_diagnostic(audio, frames);
+    eprintln!(
+        "normal_segment_audio_probe {}",
+        json!({
+            "input_bytes": bytes.len(),
+            "segment_sha256": format!("{:x}", Sha256::digest(bytes)),
+            "video_decoded_frames": video_proof.count,
+            "video_duration_ticks": video_proof.duration_ticks,
+            "video_time_base_den": Some(video_proof.time_base_den),
+            "video_time_base_num": Some(video_proof.time_base_num),
+            "audio": audio_diagnostic,
+        })
+    );
+    // Emit the bounded metadata above before new AAC timing assertions so a
+    // failed proof retains useful numeric evidence without exception strings.
+    let (_, audio) = single_av_streams(streams)
+        .expect("exactly one video and one audio stream required by fixed live profile");
+    let audio_proof =
+        segment_audio_proof(audio, frames).expect("selected profile AAC packet proof required");
+    assert!(
+        audio_matches_video_window(&video_proof, &audio_proof),
+        "AAC audio endpoints do not match the video window within one AAC frame"
+    );
     SEGMENT_VIDEO_PROOFS.with(|rows| {
         let mut rows = rows.borrow_mut();
         assert!(rows.len() < 64, "bounded segment proof summary required");
         rows.push(
             json!({"sha256":format!("{:x}", Sha256::digest(bytes)), "bytes":bytes.len(),
-            "decoded_video_frames":proof.count,"sample_index":proof.sample_index,
-            "duration_ticks":proof.duration_ticks,"time_base":proof.time_base}),
+            "decoded_video_frames":video_proof.count,"sample_index":video_proof.sample_index,
+            "duration_ticks":video_proof.duration_ticks,"time_base":video_proof.time_base}),
         );
     });
-    proof
+    SegmentMediaProof {
+        video: video_proof,
+        audio: audio_proof,
+        segment_sha256: format!("{:x}", Sha256::digest(bytes)),
+    }
 }
 
-fn decode_segment_rgb(ffmpeg: &Path, bytes: &[u8]) -> Vec<u8> {
+fn decode_segment_rgb(ffmpeg: &Path, bytes: &[u8]) -> (Vec<u8>, SegmentMediaProof) {
     let identity = Sha256::digest(bytes);
     let ffprobe = PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFPROBE").unwrap());
     let proof = ffprobe_segment(&ffprobe, bytes);
-    let select = format!(r"select=eq(n\,{})", proof.sample_index);
+    let select = format!(r"select=eq(n\,{})", proof.video.sample_index);
     assert!(
         bytes.len() >= 188 && bytes.len() <= 8 * 1024 * 1024,
         "bounded TS output segment required"
@@ -2041,13 +3440,23 @@ fn decode_segment_rgb(ffmpeg: &Path, bytes: &[u8]) -> Vec<u8> {
         rows.borrow_mut().last_mut().expect("owned segment proof")["source_identity_unchanged"] =
             json!(true);
     });
-    output
+    (output, proof)
 }
 
-fn decode_segment_pcm(ffmpeg: &Path, bytes: &[u8]) -> Vec<i16> {
+fn decode_segment_pcm(
+    ffmpeg: &Path,
+    bytes: &[u8],
+    role: PcmProofRole,
+    proof: &SegmentMediaProof,
+) -> Vec<i16> {
     assert!(
         bytes.len() >= 188 && bytes.len() <= 8 * 1024 * 1024,
         "bounded TS output segment required"
+    );
+    assert_eq!(
+        format!("{:x}", Sha256::digest(bytes)),
+        proof.segment_sha256,
+        "PCM decode must use the segment bytes covered by the A/V proof"
     );
     let (_, output) = run_bounded_filter(
         ffmpeg,
@@ -2071,9 +3480,28 @@ fn decode_segment_pcm(ffmpeg: &Path, bytes: &[u8]) -> Vec<i16> {
         512 * 1024,
         false,
     );
+    let pcm_range = resampled_pcm_sample_range(proof.audio.sample_count)
+        .expect("bounded selected-profile AAC sample count");
+    eprintln!(
+        "normal_segment_pcm_probe {}",
+        json!({
+            "max_pcm_bytes": 16_000 * 2 * 8,
+            "resampled_pcm_samples_floor": pcm_range.0,
+            "resampled_pcm_samples_ceil": pcm_range.1,
+            "pcm_bytes": output.len(),
+            "pcm_even_bytes": output.len() % 2 == 0,
+            "pcm_samples": output.len() / 2,
+            "role": role.label(),
+            "segment_input_bytes": bytes.len(),
+            "segment_sha256": proof.segment_sha256,
+            "video_time_base_den": proof.video.time_base_den,
+            "video_time_base_num": proof.video.time_base_num,
+            "audio_sample_count": proof.audio.sample_count,
+        })
+    );
     assert!(
-        output.len() >= 16_000 * 2 && output.len() <= 16_000 * 2 * 8,
-        "decoded HLS PCM length outside bounded interval"
+        pcm_matches_audio_sample_count(&proof.audio, output.len()),
+        "decoded HLS PCM does not match bounded AAC samples after resampling"
     );
     output
         .chunks_exact(2)
@@ -2236,6 +3664,7 @@ fn normal_server_private_http_hls_renew_replace_and_cleanup() {
 }
 fn run_normal_production(mode: ProductionMode) {
     let started = Instant::now();
+    SEED_REFUSAL_SUMMARIES.with(|rows| *rows.borrow_mut() = [None; 3]);
     let mut root = OwnedRoot::new();
     let _failure_stderr = FailureStderrGuard::install(&root.0);
     let mut tls = production_tls::SyntheticTls::generate(&root.0);
@@ -2343,6 +3772,8 @@ fn run_normal_production(mode: ProductionMode) {
     );
     let startup_deadline = Instant::now() + STARTUP_LIMIT;
     let server_epoch;
+    let clock_sample_ms;
+    let clock_observed;
     loop {
         if let Some(status) = server.0.try_wait().expect("server process status") {
             panic!(
@@ -2357,6 +3788,17 @@ fn run_normal_production(mode: ProductionMode) {
             256 * 1024,
         );
         if code == 200 {
+            let (_, _, startup_bytes) =
+                owned_stderr_snapshot().expect("owned bounded startup clock snapshot");
+            clock_sample_ms =
+                startup_clock_sample(&startup_bytes).expect("unique complete startup clock sample");
+            // Capture only AFTER the complete record was observed, before the
+            // potentially expensive TLS rejection probes below.
+            clock_observed = Instant::now();
+            assert!(
+                clock_observed < startup_deadline,
+                "startup clock observation exceeded unchanged startup bound"
+            );
             let capabilities: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(capabilities["max_inputs"], 9);
             assert_eq!(
@@ -2474,9 +3916,28 @@ fn run_normal_production(mode: ProductionMode) {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    while now_ms() < short_expires {
+    // Keep the one-shot 401 oracle, but wait on a conservative lower bound of
+    // its authority clock. Cleanup below is measured after observed expiry,
+    // not from an inferred physical wall-clock boundary.
+    let credential_clock = loop {
+        let probe_observed = Instant::now();
+        assert!(
+            probe_observed.duration_since(started) < RUN_LIMIT,
+            "credential expiry observation exceeded unchanged run bound"
+        );
+        let probe_elapsed = probe_observed.duration_since(clock_observed);
+        let lower_bound = broker_clock_lower_bound(clock_sample_ms, probe_elapsed)
+            .expect("startup clock lower bound overflow");
+        if lower_bound >= short_expires {
+            break json!({
+                "startup_sample_ms":clock_sample_ms,
+                "observation_elapsed_ms":u64::try_from(clock_observed.duration_since(started).as_millis()).expect("clock observation duration bound"),
+                "probe_elapsed_ms":u64::try_from(probe_elapsed.as_millis()).expect("clock probe duration bound"),
+                "lower_bound_ms":lower_bound,"short_expires_ms":short_expires,
+            });
+        }
         thread::sleep(Duration::from_millis(50));
-    }
+    };
     let (expired_code, _) = get(
         &api_origin,
         "/multiview/v1/capabilities",
@@ -2485,7 +3946,7 @@ fn run_normal_production(mode: ProductionMode) {
     );
     assert_eq!(
         expired_code, 401,
-        "expired control credential remained usable"
+        "expired control credential remained usable; credential_clock={credential_clock}"
     );
     let mut expired = false;
     for _ in 0..30 {
@@ -2624,13 +4085,13 @@ fn run_normal_production(mode: ProductionMode) {
     let _ = wait_new_segment(&api_origin, playlist, &mut grid_seen, grid_end);
     let (_, _, grid_segment) = wait_new_segment(&api_origin, playlist, &mut grid_seen, grid_end);
     let ffmpeg = PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFMPEG").unwrap());
-    let rgb = decode_segment_rgb(&ffmpeg, &grid_segment);
+    let (rgb, grid_proof) = decode_segment_rgb(&ffmpeg, &grid_segment);
     for slot_id in 0..9usize {
         let x = [107, 320, 533][slot_id % 3];
         let y = [60, 180, 300][slot_id / 3];
         assert_cell_color(&rgb, x, y, (slot_id % 3 + 1) as u8);
     }
-    let pcm = decode_segment_pcm(&ffmpeg, &grid_segment);
+    let pcm = decode_segment_pcm(&ffmpeg, &grid_segment, PcmProofRole::Grid, &grid_proof);
     assert_audio_tone(&pcm, 330.0);
 
     // Stop and close every real slot before the separate sustained replacement
@@ -2789,10 +4250,18 @@ fn run_normal_production(mode: ProductionMode) {
             if let Some(path) = last_status["output"]["playlist_path"].as_str() {
                 if let Some((_, _, bytes)) = try_new_segment(&api_origin, path, &mut main_seen) {
                     let ffmpeg = PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFMPEG").unwrap());
-                    let rgb = decode_segment_rgb(&ffmpeg, &bytes);
+                    let (rgb, proof) = decode_segment_rgb(&ffmpeg, &bytes);
                     assert_cell_color(&rgb, 160, 180, 1);
                     assert_cell_color(&rgb, 480, 180, 2);
-                    assert_audio_tone(&decode_segment_pcm(&ffmpeg, &bytes), 330.0);
+                    assert_audio_tone(
+                        &decode_segment_pcm(
+                            &ffmpeg,
+                            &bytes,
+                            PcmProofRole::InitialSustained,
+                            &proof,
+                        ),
+                        330.0,
+                    );
                     output_checked = true;
                 }
             }
@@ -2851,8 +4320,9 @@ fn run_normal_production(mode: ProductionMode) {
                     {
                         let ffmpeg =
                             PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFMPEG").unwrap());
-                        let rgb = decode_segment_rgb(&ffmpeg, &bytes);
-                        let pcm = decode_segment_pcm(&ffmpeg, &bytes);
+                        let (rgb, proof) = decode_segment_rgb(&ffmpeg, &bytes);
+                        let pcm =
+                            decode_segment_pcm(&ffmpeg, &bytes, PcmProofRole::Replacement, &proof);
                         assert!(
                             !cell_matches_color(&rgb, 160, 180, 1),
                             "old source A appeared in a newly published post-replacement segment"
@@ -2935,8 +4405,13 @@ fn run_normal_production(mode: ProductionMode) {
         "late replacement output did not advance beyond the first confirmed new-source segment"
     );
     let late_ffmpeg = PathBuf::from(std::env::var("OTTPLAY_MULTIVIEW_FFMPEG").unwrap());
-    let late_rgb = decode_segment_rgb(&late_ffmpeg, &late_segment);
-    let late_pcm = decode_segment_pcm(&late_ffmpeg, &late_segment);
+    let (late_rgb, late_proof) = decode_segment_rgb(&late_ffmpeg, &late_segment);
+    let late_pcm = decode_segment_pcm(
+        &late_ffmpeg,
+        &late_segment,
+        PcmProofRole::LateSustained,
+        &late_proof,
+    );
     assert!(
         !cell_matches_color(&late_rgb, 160, 180, 1),
         "old video source returned in late HLS output"
@@ -3116,6 +4591,7 @@ fn run_normal_production(mode: ProductionMode) {
     let receipt = json!({
         "schema":"ottplay.multiview.production-binary.v1","pass":true,
         "output_segment_video_proofs":SEGMENT_VIDEO_PROOFS.with(|rows| rows.borrow().clone()),
+        "seed_refusal_summaries":seed_refusal_receipt(),
         "input_adapter":mode.adapter(),"sequential_contexts":sequential_sessions.len(),
         "sequential_output_generations":sequential_outputs.len(),"active_sigterm":true,"hls_source":hls_source_evidence,
         "tls":tls.receipt(),
@@ -3123,6 +4599,7 @@ fn run_normal_production(mode: ProductionMode) {
         "scope":if mode == ProductionMode::RawMpegTs { "Normal production HTTPS control/HLS with a private RFC1918 HTTP MPEG-TS adapter, all nine advertised slots and private HLS output; no native-player or physical-television qualification" } else { "Normal production HTTPS control/HLS with a private RFC1918 live HLS MPEG-TS adapter, one master level and sliding media windows; no native-player or physical-television qualification" },
         "elapsed_seconds":started.elapsed().as_secs(),"sustained_seconds":sustained_started.elapsed().as_secs(),
         "credential_expiry_rejected":expired,
+        "credential_clock":credential_clock,
         "expiry_output_was_active":true,"expired_source_connections_closed":true,
         "expired_output_cleanup":true,"graceful_shutdown":true,"shutdown_signal":"SIGTERM",
         "output_directory_empty":true,

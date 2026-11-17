@@ -106,6 +106,15 @@ var keyStrings = {
         "Direktang nagpe-play ang mga sinusuportahang file at gumagamit ng katugmang HLS kapag kinakailangan.",
     alhabet: "abcdefghijklmnñopqrstuvwxyz",
     always: "palagi",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Hindi suportado ang mga lokal na HLS manifest; gumamit ng HTTP(S) manifest URL",
+    "Playlist contains unsupported sources":
+        "May mga hindi suportadong source ang playlist",
+    "Playlist is empty or invalid": "Walang laman o hindi wasto ang playlist",
+    "Playlist is too large": "Masyadong malaki ang playlist",
+    "Playlist local files must be dropped together with the playlist":
+        "Dapat sabay na i-drag at i-drop ang mga lokal na file at ang playlist",
+    "Playlist must use UTF-8": "Dapat gumamit ng UTF-8 ang playlist",
     "and enter code": "at ilagay ang code",
     Back: "Bumalik",
     "Back / Forward for 1 minute": "Laktawan pabalik / pasulong ng 1 minuto",

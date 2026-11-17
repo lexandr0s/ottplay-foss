@@ -102,6 +102,15 @@ var keyStrings = {
         "يقوم تلقائيًا بتشغيل الملفات المدعومة مباشرة ويستخدم HLS المتوافق عند الحاجة.",
     alhabet: "ءأؤإئاآبةتثجحخدذرزسشصضطظعغفقكلمنهوىي٠١٢٣٤٥٦٧٨٩،؛؟ـ‌‍ًٌٍَُِّْٰ",
     always: "دائما",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "بيانات HLS المحلية غير مدعومة؛ استخدم عنوان URL لبيان HTTP(S)",
+    "Playlist contains unsupported sources":
+        "تحتوي قائمة التشغيل على مصادر غير مدعومة",
+    "Playlist is empty or invalid": "قائمة التشغيل فارغة أو غير صالحة",
+    "Playlist is too large": "قائمة التشغيل كبيرة جدًا",
+    "Playlist local files must be dropped together with the playlist":
+        "يجب سحب الملفات المحلية وإفلاتها مع قائمة التشغيل",
+    "Playlist must use UTF-8": "يجب أن تستخدم قائمة التشغيل UTF-8",
     "and enter code": "وأدخل الرمز",
     Back: "العودة",
     "Back / Forward for 1 minute": "تخطي للخلف/للأمام لمدة دقيقة واحدة",

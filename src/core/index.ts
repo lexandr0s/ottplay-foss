@@ -1706,9 +1706,16 @@ function startCoreEngine(
                 observe();
                 observe = undefined;
             }
+            var localTransport = coreCall(
+                (window as any).__ottLocalMedia,
+                "playbackTransport",
+                [url],
+                3
+            );
             var localFile = !!(
                 (window as any).__ottLocalMedia &&
                 (window as any).__ottLocalMedia.isPlaybackUrl(url) &&
+                localTransport !== "stream" &&
                 !coreCompat(url)
             );
             if (localFile)
@@ -1725,6 +1732,7 @@ function startCoreEngine(
                 url,
                 transport === "file" ||
                     (transport !== "stream" &&
+                        localTransport !== "stream" &&
                         (transient || plexHint === "file" || localFile)),
                 (!transient && plexHint === "mse") || !!coreCompat(url)
             );
@@ -3182,6 +3190,12 @@ function startCorePipEngine(
             !!(
                 (window as any).__ottLocalMedia &&
                 (window as any).__ottLocalMedia.isPlaybackUrl(url) &&
+                coreCall(
+                    (window as any).__ottLocalMedia,
+                    "playbackTransport",
+                    [url],
+                    3
+                ) !== "stream" &&
                 !coreCompat(url)
             ));
     if (

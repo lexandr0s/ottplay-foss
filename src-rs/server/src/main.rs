@@ -327,8 +327,38 @@ async fn serve_private_http(listener: TcpListener, app: Router) -> anyhow::Resul
                 .await
             {
                 Ok(Ok(())) => {}
-                Ok(Err(_)) => tracing::debug!("HTTP serve connection error"),
-                Err(_) => tracing::debug!("Private media connection stopped"),
+                Ok(Err(error)) => {
+                    let failure = control.failure_recorder();
+                    let hyper_error = error.downcast_ref::<hyper::Error>();
+                    eprintln!(
+                        "private_media_connection id={} result=hyper_error typed={} parse={} user={} canceled={} closed={} incomplete={} body_write_aborted={} shutdown={} timeout={} authority_failure={:?}",
+                        failure.id(),
+                        hyper_error.is_some(),
+                        hyper_error.is_some_and(hyper::Error::is_parse),
+                        hyper_error.is_some_and(hyper::Error::is_user),
+                        hyper_error.is_some_and(hyper::Error::is_canceled),
+                        hyper_error.is_some_and(hyper::Error::is_closed),
+                        hyper_error.is_some_and(hyper::Error::is_incomplete_message),
+                        hyper_error.is_some_and(hyper::Error::is_body_write_aborted),
+                        hyper_error.is_some_and(hyper::Error::is_shutdown),
+                        hyper_error.is_some_and(hyper::Error::is_timeout),
+                        failure.first(),
+                    );
+                    if let Some(event) = failure.terminal(media_connection::attempt::Transport::Http) {
+                        eprintln!("{event}");
+                    }
+                }
+                Err(stop) => {
+                    let failure = control.failure_recorder();
+                    eprintln!(
+                        "private_media_connection id={} result=supervisor_stop stop={stop:?} authority_failure={:?}",
+                        failure.id(),
+                        failure.first(),
+                    );
+                    if let Some(event) = failure.terminal(media_connection::attempt::Transport::Http) {
+                        eprintln!("{event}");
+                    }
+                }
             }
         });
     }
@@ -370,8 +400,36 @@ async fn serve_private_tls_connection(
         .await
     {
         Ok(Ok(())) => {}
-        Ok(Err(_)) => tracing::warn!("TLS serve connection error"),
-        Err(_) => tracing::debug!("Private media connection stopped"),
+        Ok(Err(error)) => {
+            let failure = control.failure_recorder();
+            eprintln!(
+                "private_media_tls_connection id={} result=hyper_error parse={} user={} canceled={} closed={} incomplete={} body_write_aborted={} shutdown={} timeout={} authority_failure={:?}",
+                failure.id(),
+                error.is_parse(),
+                error.is_user(),
+                error.is_canceled(),
+                error.is_closed(),
+                error.is_incomplete_message(),
+                error.is_body_write_aborted(),
+                error.is_shutdown(),
+                error.is_timeout(),
+                failure.first(),
+            );
+            if let Some(event) = failure.terminal(media_connection::attempt::Transport::Tls) {
+                eprintln!("{event}");
+            }
+        }
+        Err(stop) => {
+            let failure = control.failure_recorder();
+            eprintln!(
+                "private_media_tls_connection id={} result=supervisor_stop stop={stop:?} authority_failure={:?}",
+                failure.id(),
+                failure.first(),
+            );
+            if let Some(event) = failure.terminal(media_connection::attempt::Transport::Tls) {
+                eprintln!("{event}");
+            }
+        }
     }
 }
 

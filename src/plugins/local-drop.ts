@@ -1,3 +1,7 @@
+import {
+    createDroppedPlaylists,
+    hasDroppedPlaylist,
+} from "../offline/dropped-playlist";
 import { createDroppedVideos } from "../offline/dropped-video";
 
 /** Desktop file gestures use the same temporary Local playback as remote commands. */
@@ -44,6 +48,82 @@ export function installLocalDrop(w: any): any {
     }
     function message(text: string): void {
         if (!disposed && typeof w.showShift === "function") w.showShift(text);
+    }
+    function failure(error: any): void {
+        // Never surface native paths, signed URLs, or arbitrary IPC errors.
+        var text = typeof error === "string" ? error : error?.message;
+        var codes: any = {
+            playlist_hls_local_unsupported: 0,
+            playlist_invalid: 3,
+            playlist_limit: 4,
+            playlist_local_unavailable: 1,
+            playlist_unsupported: 2,
+        };
+        if (
+            error &&
+            Object.prototype.hasOwnProperty.call(
+                codes,
+                error.droppedPlaylistCode
+            )
+        )
+            text = codes[error.droppedPlaylistCode];
+        if (
+            text ===
+            "Local HLS manifests are not supported; add the HTTP(S) manifest URL as a playlist entry"
+        )
+            text = codes.playlist_hls_local_unsupported;
+        if (text === "Dropped playlist must be UTF-8") text = 5;
+        if (
+            text ===
+                "Dropped playlist exceeds the 2 MiB file or 8 MiB batch limit" ||
+            text === "Dropped playlists exceed 4096 entries or 128 local files"
+        )
+            text = codes.playlist_limit;
+        if (
+            text === "Dropped playlist contains no playable entries" ||
+            text === "Dropped playlist contains an invalid entry"
+        )
+            text = codes.playlist_invalid;
+        // Keep literal translation keys visible to the catalog audit. Only the
+        // closed diagnostic labels above may reach this switch.
+        var _ = w._
+            ? w._.bind(w)
+            : function (value: string): string {
+                  return value;
+              };
+        switch (text) {
+            case 0:
+            case "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+                text = _(
+                    "Local HLS manifests are not supported; use an HTTP(S) manifest URL"
+                );
+                break;
+            case 1:
+            case "Playlist local files must be dropped together with the playlist":
+                text = _(
+                    "Playlist local files must be dropped together with the playlist"
+                );
+                break;
+            case 2:
+            case "Playlist contains unsupported sources":
+                text = _("Playlist contains unsupported sources");
+                break;
+            case 3:
+            case "Playlist is empty or invalid":
+                text = _("Playlist is empty or invalid");
+                break;
+            case 4:
+            case "Playlist is too large":
+                text = _("Playlist is too large");
+                break;
+            case 5:
+            case "Playlist must use UTF-8":
+                text = _("Playlist must use UTF-8");
+                break;
+            default:
+                text = _("Unsupported source");
+        }
+        message(text);
     }
     function invoke(name: string, args: any): Promise<any> {
         var bridge = w.__TAURI__?.core || w.__TAURI__;
@@ -118,6 +198,53 @@ export function installLocalDrop(w: any): any {
         event.stopPropagation();
         if (native || !allowed()) return;
         var files = event.dataTransfer.files;
+        if (!files || files.length < 1 || files.length > 128) {
+            failure(null);
+            return;
+        }
+        if (hasDroppedPlaylist(files)) {
+            // Capture the gesture's File references before the first await.
+            var captured: any[] = [];
+            for (var i = 0; i < files.length; i++) captured.push(files[i]);
+            cancelPending();
+            var request = sequence;
+            var load = w.__ottCommandChannelLoad;
+            var waiting: any = { release: function () {} };
+            pending = waiting;
+            waiting.timer = w.setTimeout(function () {
+                if (pending === waiting) {
+                    cancelPending();
+                    failure(null);
+                }
+            }, 20000);
+            createDroppedPlaylists(w, captured).then(
+                function (lease) {
+                    if (
+                        pending !== waiting ||
+                        request !== sequence ||
+                        !allowed() ||
+                        load !== w.__ottCommandChannelLoad
+                    ) {
+                        if (pending === waiting) {
+                            pending = null;
+                            w.clearTimeout(waiting.timer);
+                        }
+                        release(lease);
+                        return;
+                    }
+                    pending = null;
+                    w.clearTimeout(waiting.timer);
+                    play(lease);
+                },
+                function (error) {
+                    if (pending !== waiting) return;
+                    pending = null;
+                    w.clearTimeout(waiting.timer);
+                    failure(error);
+                }
+            );
+            return;
+        }
         var lease: any;
         try {
             // Capture every File synchronously while the gesture owns DataTransfer.
@@ -180,16 +307,12 @@ export function installLocalDrop(w: any): any {
                 lease.catalog = catalog;
                 play(lease);
             },
-            function () {
+            function (error) {
                 if (pending !== lease) return;
                 pending = null;
                 w.clearTimeout(lease.timer);
                 release(lease);
-                message(
-                    w._
-                        ? w._("Local source unavailable")
-                        : "Local source unavailable"
-                );
+                failure(error);
             }
         );
     }

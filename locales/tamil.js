@@ -640,6 +640,8 @@ var keyStrings = {
     "Loading via proxy...": "ப்ராக்ஸி வழியாக ஏற்றுகிறது…",
     "Loading. Please wait...": "ஏற்றுகிறது... காத்திருக்கவும்...",
     "Loading...": "ஏற்றுகிறது…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "உள்ளூர் HLS மேனிஃபெஸ்ட்கள் ஆதரிக்கப்படாது; மேனிஃபெஸ்டின் HTTP(S) URL-ஐப் பயன்படுத்தவும்",
     "Local HTTP remote control": "உள்ளூர் HTTP ரிமோட் கண்ட்ரோல்",
     "Local source did not respond": "உள்ளூர் மூலம் பதிலளிக்கவில்லை",
     "Local source unavailable": "உள்ளூர் மூலம் கிடைக்கவில்லை",
@@ -774,9 +776,16 @@ var keyStrings = {
     "Player info:": "பிளேயர் தகவல்:",
     "Playing: %1": "இயங்குகிறது: %1",
     Playlist: "பிளேலிஸ்ட்",
+    "Playlist contains unsupported sources":
+        "பிளேலிஸ்ட்டில் ஆதரிக்கப்படாத மூலங்கள் உள்ளன",
     "Playlist file": "பிளேலிஸ்ட் கோப்பு",
+    "Playlist is empty or invalid": "பிளேலிஸ்ட் காலியாக உள்ளது அல்லது செல்லாதது",
     "Playlist is not loading directly...Loading via server...":
         "பிளேலிஸ்ட்டை நேரடியாக ஏற்ற முடியவில்லை. சர்வர் வழியாக ஏற்றுகிறது…",
+    "Playlist is too large": "பிளேலிஸ்ட் மிகப் பெரியது",
+    "Playlist local files must be dropped together with the playlist":
+        "பிளேலிஸ்ட்டின் உள்ளூர் கோப்புகளை அதனுடன் சேர்த்தே விட வேண்டும்",
+    "Playlist must use UTF-8": "பிளேலிஸ்ட் UTF-8-ஐப் பயன்படுத்த வேண்டும்",
     "Playlist Name": "பிளேலிஸ்ட் பெயர்",
     "Playlist URL": "பிளேலிஸ்ட் URL",
     Plex: "Plex",

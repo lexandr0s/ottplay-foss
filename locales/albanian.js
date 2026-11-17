@@ -103,6 +103,15 @@ var keyStrings = {
         "Luan automatikisht skedarët e mbështetur drejtpërdrejt dhe përdor HLS të përputhshëm kur nevojitet.",
     alhabet: "abcçdheëfgjiklmnopqrstuvxyz",
     always: "gjithmonë",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Manifestet lokale HLS nuk mbështeten; përdorni një URL manifesti HTTP(S)",
+    "Playlist contains unsupported sources":
+        "Lista përmban burime të pambështetura",
+    "Playlist is empty or invalid": "Lista është bosh ose e pavlefshme",
+    "Playlist is too large": "Lista është tepër e madhe",
+    "Playlist local files must be dropped together with the playlist":
+        "Skedarët lokalë duhen hedhur bashkë me listën e luajtjes",
+    "Playlist must use UTF-8": "Lista duhet të përdorë UTF-8",
     "and enter code": "dhe fut kodin",
     Back: "Mbrapa",
     "Back / Forward for 1 minute": "Kapërce prapa / përpara 1 minutë",

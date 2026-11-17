@@ -105,6 +105,15 @@ var keyStrings = {
         "O modo automático reproduce directamente os ficheiros compatibles e usa HLS compatible cando fai falta.",
     alhabet: "aábcdeéfghiíïjklmnñoópqrstuúüvwxyz",
     always: "sempre",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Os manifestos HLS locais non son compatibles; use o URL dun manifesto HTTP(S)",
+    "Playlist contains unsupported sources":
+        "A lista contén fontes non compatibles",
+    "Playlist is empty or invalid": "A lista está baleira ou non é válida",
+    "Playlist is too large": "A lista é demasiado grande",
+    "Playlist local files must be dropped together with the playlist":
+        "Os ficheiros locais deben arrastrarse xunto coa lista de reprodución",
+    "Playlist must use UTF-8": "A lista debe usar UTF-8",
     "and enter code": "e introduce o código",
     Back: "Atrás",
     "Back / Forward for 1 minute": "Retroceder / avanzar 1 minuto",

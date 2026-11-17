@@ -99,6 +99,14 @@ var keyStrings = {
     alhabet:
         "ૐઅઆઇઈઉઊઋૠઍએઐઑઓઔકખગઘઙચછજઝઞટઠડઢણતથદધનપફબભમયરલવશષસહળઽ૦૧૨૩૪૫૬૭૮૯‌‍઼ંઁઃાિીુૂૃૄૅેૈૉોૌ્",
     always: "હંમેશા",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "સ્થાનિક HLS મેનિફેસ્ટ સમર્થિત નથી; HTTP(S) મેનિફેસ્ટ URL વાપરો",
+    "Playlist contains unsupported sources": "પ્લેલિસ્ટમાં અસમર્થિત સ્રોતો છે",
+    "Playlist is empty or invalid": "પ્લેલિસ્ટ ખાલી અથવા અમાન્ય છે",
+    "Playlist is too large": "પ્લેલિસ્ટ ખૂબ મોટી છે",
+    "Playlist local files must be dropped together with the playlist":
+        "સ્થાનિક ફાઇલો પ્લેલિસ્ટ સાથે જ ખેંચીને મૂકવી જરૂરી છે",
+    "Playlist must use UTF-8": "પ્લેલિસ્ટમાં UTF-8 વાપરવું જરૂરી છે",
     "and enter code": "અને કોડ દાખલ કરો",
     Back: "પાછા",
     "Back / Forward for 1 minute": "1 મિનિટ પાછળ / આગળ જાઓ",

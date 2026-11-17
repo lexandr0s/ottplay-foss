@@ -628,6 +628,8 @@ var keyStrings = {
     "Loading via proxy...": "प्रॉक्सीद्वारे लोड करत आहे...",
     "Loading. Please wait...": "लोड होत आहे... कृपया प्रतीक्षा करा...",
     "Loading...": "लोड करत आहे...",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "स्थानिक HLS मॅनिफेस्ट समर्थित नाहीत; मॅनिफेस्टचा HTTP(S) URL वापरा",
     "Local HTTP remote control": "स्थानिक HTTP रिमोट कंट्रोल",
     "Local source did not respond": "स्थानिक स्रोताने प्रतिसाद दिला नाही",
     "Local source unavailable": "स्थानिक स्रोत उपलब्ध नाही",
@@ -762,9 +764,15 @@ var keyStrings = {
     "Player info:": "प्लेअर माहिती:",
     "Playing: %1": "प्ले होत आहे: %1",
     Playlist: "प्लेलिस्ट",
+    "Playlist contains unsupported sources": "प्लेलिस्टमध्ये असमर्थित स्रोत आहेत",
     "Playlist file": "प्लेलिस्ट फाइल",
+    "Playlist is empty or invalid": "प्लेलिस्ट रिकामी किंवा अवैध आहे",
     "Playlist is not loading directly...Loading via server...":
         "प्लेलिस्ट थेट लोड करता आली नाही. सर्व्हरद्वारे लोड करत आहे...",
+    "Playlist is too large": "प्लेलिस्ट खूप मोठी आहे",
+    "Playlist local files must be dropped together with the playlist":
+        "प्लेलिस्टमधील स्थानिक फाइल्स प्लेलिस्टसोबत ड्रॉप करणे आवश्यक आहे",
+    "Playlist must use UTF-8": "प्लेलिस्टने UTF-8 वापरणे आवश्यक आहे",
     "Playlist Name": "प्लेलिस्ट नाव",
     "Playlist URL": "प्लेलिस्ट URL",
     Plex: "Plex",

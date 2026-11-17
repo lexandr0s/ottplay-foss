@@ -655,6 +655,8 @@ var keyStrings = {
     "Loading via proxy...": "Inapakia kupitia seva mbadala...",
     "Loading. Please wait...": "Inapakia... tafadhali subiri...",
     "Loading...": "Inapakia...",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Manifesti za HLS za ndani hazitumiki; tumia URL ya HTTP(S) ya manifesti",
     "Local HTTP remote control": "Kidhibiti cha mbali cha HTTP cha ndani",
     "Local source did not respond": "Chanzo cha ndani hakikujibu",
     "Local source unavailable": "Chanzo cha ndani hakipatikani",
@@ -790,9 +792,16 @@ var keyStrings = {
     "Player info:": "habari za kicheza media:",
     "Playing: %1": "Inacheza: %1",
     Playlist: "Orodha ya kucheza",
+    "Playlist contains unsupported sources":
+        "Orodha ya kucheza ina vyanzo visivyotumika",
     "Playlist file": "Faili ya orodha ya kucheza",
+    "Playlist is empty or invalid": "Orodha ya kucheza haina kitu au si sahihi",
     "Playlist is not loading directly...Loading via server...":
         "Orodha ya kucheza haikuweza kupakiwa moja kwa moja. Inapakia kupitia seva...",
+    "Playlist is too large": "Orodha ya kucheza ni kubwa mno",
+    "Playlist local files must be dropped together with the playlist":
+        "Faili za ndani za orodha ya kucheza lazima udondoshe pamoja na orodha",
+    "Playlist must use UTF-8": "Orodha ya kucheza lazima itumie UTF-8",
     "Playlist Name": "Jina la orodha ya kucheza",
     "Playlist URL": "Orodha ya kucheza URL",
     Plex: "Plex",

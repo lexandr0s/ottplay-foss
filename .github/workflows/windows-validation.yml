@@ -238,6 +238,7 @@ jobs:
       - name: Exercise direct and local media with the actual built UI
         timeout-minutes: 10
         run: |
+          npm run test:browser:external
           node tests/test_browser_direct_media.cjs
           node tests/test_browser_local_media.cjs --built-ui
           node tests/test_browser_local_media.cjs --built-ui --initial-retry

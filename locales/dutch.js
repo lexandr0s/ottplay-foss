@@ -103,6 +103,15 @@ var keyStrings = {
         "Automatisch speelt ondersteunde bestanden rechtstreeks af en gebruikt indien nodig compatibele HLS.",
     alhabet: "aáäbcdeéëfghiíïj́klmnoóöpqrstuúüvwxyz",
     always: "altijd",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Lokale HLS-manifesten worden niet ondersteund; gebruik een HTTP(S)-manifest-URL",
+    "Playlist contains unsupported sources":
+        "De afspeellijst bevat niet-ondersteunde bronnen",
+    "Playlist is empty or invalid": "De afspeellijst is leeg of ongeldig",
+    "Playlist is too large": "De afspeellijst is te groot",
+    "Playlist local files must be dropped together with the playlist":
+        "Sleep lokale bestanden samen met de afspeellijst hierheen",
+    "Playlist must use UTF-8": "De afspeellijst moet UTF-8 gebruiken",
     "and enter code": "en voer de code in",
     Back: "Terug",
     "Back / Forward for 1 minute": "1 minuut terug / vooruit",

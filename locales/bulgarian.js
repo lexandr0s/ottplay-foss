@@ -102,6 +102,15 @@ var keyStrings = {
         "Автоматично възпроизвежда поддържаните файлове директно и използва съвместим HLS, когато е необходимо.",
     alhabet: "абвгдежзийклмнопрстуфхцчшщъьюяѝ",
     always: "винаги",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Локалните HLS манифести не се поддържат; използвайте URL на HTTP(S) манифест",
+    "Playlist contains unsupported sources":
+        "Плейлистът съдържа неподдържани източници",
+    "Playlist is empty or invalid": "Плейлистът е празен или невалиден",
+    "Playlist is too large": "Плейлистът е твърде голям",
+    "Playlist local files must be dropped together with the playlist":
+        "Локалните файлове трябва да се пуснат заедно с плейлиста",
+    "Playlist must use UTF-8": "Плейлистът трябва да използва UTF-8",
     "and enter code": "и въведете кода",
     Back: "Назад",
     "Back / Forward for 1 minute": "Назад / напред с 1 минута",

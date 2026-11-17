@@ -297,11 +297,32 @@ fn expired_soft_lease_cannot_be_resurrected_by_registry_renewal() {
 
 #[test]
 fn media_checks_and_reporting_never_renew_and_held_body_loses_authority() {
+    let mut headers = HeaderMap::new();
+    assert!(media_attempt_marker(&headers).is_none());
+    headers.insert(
+        crate::media_connection::attempt::HEADER,
+        "41".parse().unwrap(),
+    );
+    assert_eq!(media_attempt_marker(&headers).unwrap().get(), 41);
+    headers.append(
+        crate::media_connection::attempt::HEADER,
+        "42".parse().unwrap(),
+    );
+    assert!(media_attempt_marker(&headers).is_none());
+    headers.remove(crate::media_connection::attempt::HEADER);
+    headers.insert(
+        crate::media_connection::attempt::HEADER,
+        "0".parse().unwrap(),
+    );
+    assert!(media_attempt_marker(&headers).is_none());
+
     let (broker, clock, _owner, _binding, record) = lease_fixture();
     let custody = Arc::new(MediaCustody {
         broker: broker.clone(),
         record: record.clone(),
         token: record.token.clone(),
+        failure: ConnectionControl::new().failure_recorder(),
+        attempt: None,
         _permit: broker.0.streams.clone().try_acquire_owned().unwrap(),
     });
     let output = Output {

@@ -647,6 +647,8 @@ var keyStrings = {
     "Loading via proxy...": "Bi proxy ve tê barkirin…",
     "Loading. Please wait...": "Bar dike… ji kerema xwe li bendê bin…",
     "Loading...": "Barkirin…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Manifestên HLS ên herêmî nayên piştgirîkirin; URL-ya manifestê ya HTTP(S) bikar bînin",
     "Local HTTP remote control": "Kontrola dûr a herêmî ya HTTP",
     "Local source did not respond": "Çavkaniya herêmî bersiv neda",
     "Local source unavailable": "Çavkaniya herêmî ne berdest e",
@@ -780,9 +782,16 @@ var keyStrings = {
     "Player info:": "Agahdariya lêdêrê:",
     "Playing: %1": "Tê lîstin: %1",
     Playlist: "Lîsteya lêdanê",
+    "Playlist contains unsupported sources":
+        "Lîsteya lêdanê çavkaniyên piştgirînekirî dihewîne",
     "Playlist file": "Dosya lîsteya lêdanê",
+    "Playlist is empty or invalid": "Lîsteya lêdanê vala an nederbasdar e",
     "Playlist is not loading directly...Loading via server...":
         "Lîsteya lêdanê rasterast nehat barkirin. Bi rêya serverê tê barkirin…",
+    "Playlist is too large": "Lîsteya lêdanê pir mezin e",
+    "Playlist local files must be dropped together with the playlist":
+        "Divê pelên herêmî yên lîsteya lêdanê bi lîsteya lêdanê re bên avêtin",
+    "Playlist must use UTF-8": "Lîsteya lêdanê divê UTF-8 bikar bîne",
     "Playlist Name": "Navê lîsteya lêdanê",
     "Playlist URL": "URL-ya lîsteya lêdanê",
     Plex: "Plex",

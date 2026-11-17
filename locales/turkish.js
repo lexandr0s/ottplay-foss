@@ -646,6 +646,8 @@ var keyStrings = {
     "Loading via proxy...": "Vekil sunucu üzerinden yükleniyor…",
     "Loading. Please wait...": "Yükleniyor… lütfen bekleyin…",
     "Loading...": "Yükleniyor…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Yerel HLS manifest dosyaları desteklenmiyor; manifestin HTTP(S) URL’sini kullanın",
     "Local HTTP remote control": "Yerel HTTP uzaktan kumandası",
     "Local source did not respond": "Yerel kaynak yanıt vermedi",
     "Local source unavailable": "Yerel kaynak kullanılamıyor",
@@ -780,9 +782,16 @@ var keyStrings = {
     "Player info:": "Oynatıcı bilgileri:",
     "Playing: %1": "Oynatılıyor: %1",
     Playlist: "Oynatma listesi",
+    "Playlist contains unsupported sources":
+        "Çalma listesi desteklenmeyen kaynaklar içeriyor",
     "Playlist file": "Oynatma listesi dosyası",
+    "Playlist is empty or invalid": "Çalma listesi boş veya geçersiz",
     "Playlist is not loading directly...Loading via server...":
         "Oynatma listesi doğrudan yüklenmiyor...Sunucu üzerinden yükleniyor...",
+    "Playlist is too large": "Çalma listesi çok büyük",
+    "Playlist local files must be dropped together with the playlist":
+        "Çalma listesindeki yerel dosyalar listeyle birlikte bırakılmalıdır",
+    "Playlist must use UTF-8": "Çalma listesi UTF-8 kullanmalıdır",
     "Playlist Name": "Oynatma listesi adı",
     "Playlist URL": "Oynatma listesi URL'si",
     Plex: "Plex",

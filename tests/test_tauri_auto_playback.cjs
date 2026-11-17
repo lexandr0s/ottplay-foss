@@ -3445,7 +3445,11 @@ async function run() {
     }
     if (failures) process.exitCode = 1;
 }
-run().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-});
+// Reuse the actual core engine fixture in Local admission integration tests.
+// Direct execution (including CI's node invocation) still runs every case.
+module.exports = { fixture };
+if (require.main === module)
+    run().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+    });

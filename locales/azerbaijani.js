@@ -103,6 +103,15 @@ var keyStrings = {
         "Avtomatik dəstəklənən faylları birbaşa oynayır və lazım olduqda uyğun HLS istifadə edir.",
     alhabet: "abcçdeəfgğhxıijkqlmnoöprsştuüvyz",
     always: "həmişə",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Yerli HLS manifestləri dəstəklənmir; HTTP(S) manifest URL-i istifadə edin",
+    "Playlist contains unsupported sources":
+        "Pleylistdə dəstəklənməyən mənbələr var",
+    "Playlist is empty or invalid": "Pleylist boşdur və ya etibarsızdır",
+    "Playlist is too large": "Pleylist çox böyükdür",
+    "Playlist local files must be dropped together with the playlist":
+        "Yerli faylları pleylistlə birlikdə sürükləyib buraxın",
+    "Playlist must use UTF-8": "Pleylist UTF-8 istifadə etməlidir",
     "and enter code": "və kodu daxil edin",
     Back: "Geri",
     "Back / Forward for 1 minute": "1 dəqiqə geri / irəli",

@@ -653,6 +653,8 @@ var keyStrings = {
     "Loading via proxy...": "Proksi orqali yuklanmoqda…",
     "Loading. Please wait...": "Yuklanmoqda… kuting…",
     "Loading...": "Yuklanmoqda…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Mahalliy HLS manifestlari qo‘llab-quvvatlanmaydi; manifestning HTTP(S) URL manzilidan foydalaning",
     "Local HTTP remote control": "Mahalliy HTTP pulti",
     "Local source did not respond": "Mahalliy manba javob bermadi",
     "Local source unavailable": "Mahalliy manba mavjud emas",
@@ -787,9 +789,16 @@ var keyStrings = {
     "Player info:": "Pleyer haqida:",
     "Playing: %1": "Ijro etilmoqda: %1",
     Playlist: "Pleylist",
+    "Playlist contains unsupported sources":
+        "Pleylistda qo‘llab-quvvatlanmaydigan manbalar bor",
     "Playlist file": "Playlist fayli",
+    "Playlist is empty or invalid": "Pleylist bo‘sh yoki yaroqsiz",
     "Playlist is not loading directly...Loading via server...":
         "Playlist to'g'ridan-to'g'ri yuklanmayapti...Server orqali yuklanmoqda...",
+    "Playlist is too large": "Pleylist juda katta",
+    "Playlist local files must be dropped together with the playlist":
+        "Pleylistning mahalliy fayllarini pleylist bilan birga tashlang",
+    "Playlist must use UTF-8": "Pleylist UTF-8 dan foydalanishi kerak",
     "Playlist Name": "Playlist nomi",
     "Playlist URL": "Pleylist URL manzili",
     Plex: "Plex",
