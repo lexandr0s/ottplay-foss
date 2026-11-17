@@ -1,5 +1,7 @@
 # Remaining interface and diagnostic preferences
 
+See also: [remote settings documentation index](remote-settings/README.md).
+
 These settings use the same typed `player_settings` protocol as ordinary preferences. Read a setting before writing it; the CLI carries its runtime, source and revision receipt into the write. Existing parental and kiosk restrictions still apply. The exact `notificationsEnabled` preference follows the existing notification-control policy, including kiosk mode.
 
 | Setting | Values | Scope and application |

@@ -1,5 +1,7 @@
 # Typed remote player settings
 
+See also: [remote settings documentation index](remote-settings/README.md).
+
 A compatible control server and CLI can discover, read and conditionally save the player's registered preferences. The player publishes `player_settings` version 1. Existing remote-control authorization enables this API; normal kiosk, PIN and platform restrictions still apply.
 
 ```sh

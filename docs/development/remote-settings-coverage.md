@@ -1,5 +1,7 @@
 # Remote settings coverage and platform boundaries
 
+See also: [remote settings documentation index](../remote-settings/README.md).
+
 The `player_settings` version 1 API uses the existing typed settings registry and source-bound draft. This inventory separates editable preferences, provider fields, dedicated operations and concrete platform limitations.
 
 ## Registry preferences

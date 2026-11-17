@@ -1,5 +1,7 @@
 # Remote language and connection settings
 
+See also: [remote settings documentation index](remote-settings/README.md).
+
 The typed settings API uses the real language, command-server, local HTTP and SWOP owners. These fields advertise `apply: "after_ack"`. Saving first commits a verified desired configuration; the player applies it only after the control server acknowledges the result. Normal kiosk and PIN policy still applies.
 
 ## Interface language
