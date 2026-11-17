@@ -24,9 +24,9 @@ inferred from one segment. Unsupported HLS sources without that retained
 presentation remain unavailable through this API. Subtitle group declarations do
 not block otherwise supported audio/video playback. A selected group can expose
 manual WebVTT choices when the separate-rendition TS VOD has a verified video
-clock anchor; see [HLS WebVTT subtitles](native-hls-webvtt.md). Unselected subtitle
-playlists are not fetched. Default/forced auto-selection and browser-player
-changes are not included.
+clock anchor; see the `native-hls-webvtt.md` document in the ottplay-lg
+repository. Unselected subtitle playlists are not fetched. Default/forced
+auto-selection and browser-player changes are not included.
 
 Remote row IDs are short-lived catalog references. Clients must send back the
 returned playback, source-generation and catalog references when selecting a
