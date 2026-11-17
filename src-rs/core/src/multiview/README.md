@@ -264,3 +264,25 @@ checks that no status/header bytes escape, the recorded cause is temporary busy,
 custody is released and a new request works after unlocking. This controlled
 interleaving does not prove that a past hosted or physical-device failure took
 the same path. No retry, authorization, freshness or deadline policy is relaxed.
+
+A timed decoder also retains its first observed failure before the existing
+`fail_owned` side effects. The record has an immutable source generation and
+one packed atomic byte containing only closed phase/reason codes. A single CAS
+selects the first recorded observation; losing that CAS or rejecting an obsolete
+generation never suppresses the original failure action. There is no diagnostic
+mutex, retry loop, logging or media I/O in that capture.
+
+`Session::source_failure_detail` is separate from `snapshot()` and uses a
+nonblocking worker lookup. A busy/poisoned worker mutex or a mismatched source
+revision returns unavailable. The streamed fixture reads failed-source details
+before session/producers cleanup, so a later ReaderClosed receipt cannot replace
+the earlier recorded phase. This instruments the timed Unix decoder paths; the
+legacy untimed path can still report unavailable. Atomic order identifies the
+first recorded observation, not the physical cause of a scheduler, pipe or PCM
+publication delay. Source URLs, payloads and raw errors are not retained.
+
+The local-media wake regression keeps its original two-second timeout, polling
+loop, held old-worker guard and success assertions. On timeout only, `try_lock`
+copies closed source state and scalar counters before the original failure. No
+worker is unlocked to obtain a passing result, and no extra wait or retry is
+introduced. This is failure evidence, not a claimed wake/liveness repair.

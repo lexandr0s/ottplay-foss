@@ -10,7 +10,7 @@ use std::{
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -84,6 +84,182 @@ fn probe_error_class(error: DecoderError) -> &'static str {
         DecoderError::Io => "io",
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
+enum DecoderFailurePhase {
+    Witness,
+    Video,
+    Audio,
+    State,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
+enum DecoderFailureReason {
+    Error(DecoderError),
+    ClockFault,
+    PublicationRejected,
+    PendingExit,
+    ChildExitOrStatus,
+}
+/// First observed failure for one owned source generation; not physical causality.
+/// Contains only closed enums and a numeric generation. Retaining it performs no I/O.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecoderFailureDetail {
+    generation: u64,
+    phase: DecoderFailurePhase,
+    reason: DecoderFailureReason,
+}
+impl DecoderFailureDetail {
+    pub fn generation(self) -> u64 {
+        self.generation
+    }
+    pub fn phase_code(self) -> &'static str {
+        match self.phase {
+            DecoderFailurePhase::Witness => "timed_witness",
+            DecoderFailurePhase::Video => "timed_video",
+            DecoderFailurePhase::Audio => "timed_audio",
+            DecoderFailurePhase::State => "timed_state",
+        }
+    }
+    pub fn reason_code(self) -> &'static str {
+        match self.reason {
+            DecoderFailureReason::Error(_) => "decoder_error",
+            DecoderFailureReason::ClockFault => "clock_fault",
+            DecoderFailureReason::PublicationRejected => "publication_rejected",
+            DecoderFailureReason::PendingExit => "pending_exit",
+            DecoderFailureReason::ChildExitOrStatus => "child_exit_or_status",
+        }
+    }
+    pub fn error_code(self) -> Option<&'static str> {
+        match self.reason {
+            DecoderFailureReason::Error(error) => Some(probe_error_class(error)),
+            DecoderFailureReason::ClockFault
+            | DecoderFailureReason::PublicationRejected
+            | DecoderFailureReason::PendingExit
+            | DecoderFailureReason::ChildExitOrStatus => None,
+        }
+    }
+}
+fn decoder_failure_for_generation(
+    owned_generation: u64,
+    expected_generation: u64,
+    detail: Option<DecoderFailureDetail>,
+) -> Option<DecoderFailureDetail> {
+    detail.filter(|value| {
+        owned_generation == expected_generation && value.generation == owned_generation
+    })
+}
+// One immutable owner generation and one packed, first-CAS observation. A
+// winning CAS records observation order, never physical failure causality.
+// No diagnostic getter can retain a lock needed by failure teardown.
+#[cfg_attr(not(unix), allow(dead_code))]
+struct DecoderFailureRecorder {
+    generation: u64,
+    first: AtomicU8,
+}
+#[cfg_attr(not(unix), allow(dead_code))]
+impl DecoderFailureRecorder {
+    fn new(generation: u64) -> Self {
+        Self {
+            generation,
+            first: AtomicU8::new(0),
+        }
+    }
+    fn detail(&self) -> Option<DecoderFailureDetail> {
+        decode_decoder_failure(self.generation, self.first.load(Ordering::Acquire))
+    }
+    fn record(&self, generation: u64, phase: DecoderFailurePhase, reason: DecoderFailureReason) {
+        if generation == self.generation {
+            let packed = pack_decoder_failure(phase, reason);
+            let _ = self
+                .first
+                .compare_exchange(0, packed, Ordering::Release, Ordering::Relaxed);
+        }
+    }
+}
+#[cfg_attr(not(unix), allow(dead_code))]
+fn pack_decoder_failure(phase: DecoderFailurePhase, reason: DecoderFailureReason) -> u8 {
+    let phase = match phase {
+        DecoderFailurePhase::Witness => 0,
+        DecoderFailurePhase::Video => 1,
+        DecoderFailurePhase::Audio => 2,
+        DecoderFailurePhase::State => 3,
+    };
+    let reason = match reason {
+        DecoderFailureReason::Error(DecoderError::InvalidInput) => 0,
+        DecoderFailureReason::Error(DecoderError::Unsupported) => 1,
+        DecoderFailureReason::Error(DecoderError::ProbeFailed) => 2,
+        DecoderFailureReason::Error(DecoderError::ProbeTimeout) => 3,
+        DecoderFailureReason::Error(DecoderError::ProbeLimit) => 4,
+        DecoderFailureReason::Error(DecoderError::StaleGeneration) => 5,
+        DecoderFailureReason::Error(DecoderError::Expired) => 6,
+        DecoderFailureReason::Error(DecoderError::Revoked) => 7,
+        DecoderFailureReason::Error(DecoderError::BindingMismatch) => 8,
+        DecoderFailureReason::Error(DecoderError::PublicationDenied) => 9,
+        DecoderFailureReason::Error(DecoderError::Backpressure) => 10,
+        DecoderFailureReason::Error(DecoderError::Stalled) => 11,
+        DecoderFailureReason::Error(DecoderError::Cancelled) => 12,
+        DecoderFailureReason::Error(DecoderError::Io) => 13,
+        DecoderFailureReason::ClockFault => 14,
+        DecoderFailureReason::PublicationRejected => 15,
+        DecoderFailureReason::PendingExit => 16,
+        DecoderFailureReason::ChildExitOrStatus => 17,
+    };
+    phase * 18 + reason + 1
+}
+fn decode_decoder_failure(generation: u64, packed: u8) -> Option<DecoderFailureDetail> {
+    if !(1..=72).contains(&packed) {
+        return None;
+    }
+    let code = packed - 1;
+    let phase = match code / 18 {
+        0 => DecoderFailurePhase::Witness,
+        1 => DecoderFailurePhase::Video,
+        2 => DecoderFailurePhase::Audio,
+        3 => DecoderFailurePhase::State,
+        _ => return None,
+    };
+    let reason = match code % 18 {
+        0 => DecoderFailureReason::Error(DecoderError::InvalidInput),
+        1 => DecoderFailureReason::Error(DecoderError::Unsupported),
+        2 => DecoderFailureReason::Error(DecoderError::ProbeFailed),
+        3 => DecoderFailureReason::Error(DecoderError::ProbeTimeout),
+        4 => DecoderFailureReason::Error(DecoderError::ProbeLimit),
+        5 => DecoderFailureReason::Error(DecoderError::StaleGeneration),
+        6 => DecoderFailureReason::Error(DecoderError::Expired),
+        7 => DecoderFailureReason::Error(DecoderError::Revoked),
+        8 => DecoderFailureReason::Error(DecoderError::BindingMismatch),
+        9 => DecoderFailureReason::Error(DecoderError::PublicationDenied),
+        10 => DecoderFailureReason::Error(DecoderError::Backpressure),
+        11 => DecoderFailureReason::Error(DecoderError::Stalled),
+        12 => DecoderFailureReason::Error(DecoderError::Cancelled),
+        13 => DecoderFailureReason::Error(DecoderError::Io),
+        14 => DecoderFailureReason::ClockFault,
+        15 => DecoderFailureReason::PublicationRejected,
+        16 => DecoderFailureReason::PendingExit,
+        17 => DecoderFailureReason::ChildExitOrStatus,
+        _ => return None,
+    };
+    Some(DecoderFailureDetail {
+        generation,
+        phase,
+        reason,
+    })
+}
+#[cfg_attr(not(unix), allow(dead_code))]
+fn retain_decoder_failure_before(
+    first: &DecoderFailureRecorder,
+    generation: u64,
+    phase: DecoderFailurePhase,
+    reason: DecoderFailureReason,
+    fail: impl FnOnce(),
+) {
+    first.record(generation, phase, reason);
+    // Always run the original failure side effects, including CAS losers and
+    // a refused diagnostic generation; recording never becomes authorization.
+    fail();
+}
+
 #[derive(Clone, Copy)]
 /// Opaque closed failure evidence; retaining this Copy value performs no I/O.
 /// The host must finish owned probe/producer/operation cleanup before emission.
@@ -3165,6 +3341,7 @@ pub struct Decoder {
     cancelled: Arc<AtomicBool>,
     readers: Vec<JoinHandle<()>>,
     reader_join_failed: bool,
+    first_failure: Arc<DecoderFailureRecorder>,
     audio: Arc<AudioQueue>,
     generation: u64,
     #[cfg(unix)]
@@ -3463,6 +3640,7 @@ impl Decoder {
             cancelled: Arc::new(AtomicBool::new(false)),
             readers: Vec::new(),
             reader_join_failed: false,
+            first_failure: Arc::new(DecoderFailureRecorder::new(generation)),
             audio: audio.clone(),
             generation,
             #[cfg(unix)]
@@ -3856,6 +4034,7 @@ impl Decoder {
                 cancelled: Arc::new(AtomicBool::new(false)),
                 readers: Vec::new(),
                 reader_join_failed: false,
+                first_failure: Arc::new(DecoderFailureRecorder::new(generation)),
                 audio: audio.clone(),
                 generation,
                 metadata_pipes: Some(pipes),
@@ -3899,6 +4078,7 @@ impl Decoder {
             let video = video.clone();
             let binding = publication.clone();
             let done = finished.clone();
+            let first_failure = decoder.first_failure.clone();
             let handle = thread::Builder::new()
                 .name("multiview-witness".into())
                 .spawn(move || {
@@ -3908,8 +4088,16 @@ impl Decoder {
                         &cancelled,
                         binding.as_deref(),
                     );
-                    if result.is_err() && !cancelled.load(Ordering::Acquire) {
-                        fail_owned(&process, &cancelled, &video, &queue, generation);
+                    if let Err(error) = result {
+                        if !cancelled.load(Ordering::Acquire) {
+                            retain_decoder_failure_before(
+                                &first_failure,
+                                generation,
+                                DecoderFailurePhase::Witness,
+                                DecoderFailureReason::Error(error),
+                                || fail_owned(&process, &cancelled, &video, &queue, generation),
+                            );
+                        }
                     }
                 })
                 .map_err(|_| DecoderError::Io)?;
@@ -3926,6 +4114,7 @@ impl Decoder {
             let done = finished.clone();
             let complete = video_complete.clone();
             let pending = video_pending.clone();
+            let first_failure = decoder.first_failure.clone();
             let handle = thread::Builder::new()
                 .name("multiview-timed-video".into())
                 .spawn(move || {
@@ -4018,8 +4207,16 @@ impl Decoder {
                     if result.is_ok() {
                         complete.store(true, Ordering::Release);
                     }
-                    if result.is_err() && !cancelled.load(Ordering::Acquire) {
-                        fail_owned(&process, &cancelled, &video, &queue, generation);
+                    if let Err(error) = result {
+                        if !cancelled.load(Ordering::Acquire) {
+                            retain_decoder_failure_before(
+                                &first_failure,
+                                generation,
+                                DecoderFailurePhase::Video,
+                                DecoderFailureReason::Error(error),
+                                || fail_owned(&process, &cancelled, &video, &queue, generation),
+                            );
+                        }
                     }
                 })
                 .map_err(|_| DecoderError::Io)?;
@@ -4037,6 +4234,7 @@ impl Decoder {
             let complete = audio_complete.clone();
             let pending = audio_pending.clone();
             let clock = clock.clone();
+            let first_failure = decoder.first_failure.clone();
             let handle = thread::Builder::new()
                 .name("multiview-timed-audio".into())
                 .spawn(move || {
@@ -4173,8 +4371,16 @@ impl Decoder {
                     if result.is_ok() {
                         complete.store(true, Ordering::Release);
                     }
-                    if result.is_err() && !cancelled.load(Ordering::Acquire) {
-                        fail_owned(&process, &cancelled, &video, &queue, generation);
+                    if let Err(error) = result {
+                        if !cancelled.load(Ordering::Acquire) {
+                            retain_decoder_failure_before(
+                                &first_failure,
+                                generation,
+                                DecoderFailurePhase::Audio,
+                                DecoderFailureReason::Error(error),
+                                || fail_owned(&process, &cancelled, &video, &queue, generation),
+                            );
+                        }
                     }
                 })
                 .map_err(|_| DecoderError::Io)?;
@@ -4185,13 +4391,20 @@ impl Decoder {
             let cancelled = decoder.cancelled.clone();
             let queue = audio;
             let binding = publication;
+            let first_failure = decoder.first_failure.clone();
             let handle = thread::Builder::new()
                 .name("multiview-timed-state".into())
                 .spawn(move || {
                     let mut pending_since = None;
                     while !cancelled.load(Ordering::Acquire) {
                         if clock.fault.load(Ordering::Acquire) {
-                            fail_owned(&process, &cancelled, &video, &queue, generation);
+                            retain_decoder_failure_before(
+                                &first_failure,
+                                generation,
+                                DecoderFailurePhase::State,
+                                DecoderFailureReason::ClockFault,
+                                || fail_owned(&process, &cancelled, &video, &queue, generation),
+                            );
                             break;
                         }
                         if binding.as_ref().is_some_and(|b| {
@@ -4199,7 +4412,13 @@ impl Decoder {
                                 || (!b.active.load(Ordering::Acquire)
                                     && began.elapsed() >= Duration::from_secs(5))
                         }) {
-                            fail_owned(&process, &cancelled, &video, &queue, generation);
+                            retain_decoder_failure_before(
+                                &first_failure,
+                                generation,
+                                DecoderFailurePhase::State,
+                                DecoderFailureReason::PublicationRejected,
+                                || fail_owned(&process, &cancelled, &video, &queue, generation),
+                            );
                             break;
                         }
                         if finished.load(Ordering::Acquire) {
@@ -4223,7 +4442,17 @@ impl Decoder {
                                     audio_pending.load(Ordering::Acquire),
                                     Instant::now(),
                                 ) {
-                                    fail_owned(&process, &cancelled, &video, &queue, generation);
+                                    retain_decoder_failure_before(
+                                        &first_failure,
+                                        generation,
+                                        DecoderFailurePhase::State,
+                                        DecoderFailureReason::PendingExit,
+                                        || {
+                                            fail_owned(
+                                                &process, &cancelled, &video, &queue, generation,
+                                            )
+                                        },
+                                    );
                                     break;
                                 }
                             }
@@ -4232,7 +4461,17 @@ impl Decoder {
                             }
                             _ => {
                                 if !cancelled.load(Ordering::Acquire) {
-                                    fail_owned(&process, &cancelled, &video, &queue, generation);
+                                    retain_decoder_failure_before(
+                                        &first_failure,
+                                        generation,
+                                        DecoderFailurePhase::State,
+                                        DecoderFailureReason::ChildExitOrStatus,
+                                        || {
+                                            fail_owned(
+                                                &process, &cancelled, &video, &queue, generation,
+                                            )
+                                        },
+                                    );
                                 }
                                 break;
                             }
@@ -4282,6 +4521,17 @@ impl Decoder {
         child.kill().map_err(|_| DecoderError::Io)
     }
 
+    /// Read-only source-generation evidence; call before retiring the owned decoder.
+    pub fn failure_detail(&self, expected_generation: u64) -> Option<DecoderFailureDetail> {
+        if self.generation != expected_generation {
+            return None;
+        }
+        decoder_failure_for_generation(
+            self.generation,
+            expected_generation,
+            self.first_failure.detail(),
+        )
+    }
     pub fn pid(&self) -> u32 {
         self.pid
     }
@@ -4350,6 +4600,7 @@ impl Decoder {
             cancelled: self.cancelled.clone(),
             readers: std::mem::take(&mut self.readers),
             reader_join_failed: self.reader_join_failed,
+            first_failure: self.first_failure.clone(),
             audio: self.audio.clone(),
             generation: self.generation,
             #[cfg(unix)]
@@ -4456,6 +4707,7 @@ mod tests {
                 cancelled: Arc::new(AtomicBool::new(false)),
                 readers,
                 reader_join_failed: false,
+                first_failure: Arc::new(DecoderFailureRecorder::new(0)),
                 audio: Arc::new(AudioQueue::new(0)),
                 generation: 0,
                 #[cfg(unix)]
@@ -4510,6 +4762,7 @@ mod tests {
                         let _ = waiting.recv();
                     })],
                     reader_join_failed: false,
+                    first_failure: Arc::new(DecoderFailureRecorder::new(0)),
                     audio: Arc::new(AudioQueue::new(0)),
                     generation: 0,
                     #[cfg(unix)]
@@ -7245,5 +7498,237 @@ mod probe_diagnostic_tests {
             ),
             Ok(11)
         );
+    }
+}
+
+#[cfg(test)]
+mod decoder_failure_detail_tests {
+    use super::*;
+    #[test]
+    fn first_observation_precedes_failure_and_releases_its_lock() {
+        let first = DecoderFailureRecorder::new(7);
+        let callbacks = std::cell::Cell::new(0);
+        let expected = DecoderFailureDetail {
+            generation: 7,
+            phase: DecoderFailurePhase::Audio,
+            reason: DecoderFailureReason::Error(DecoderError::Io),
+        };
+        for reason in [expected.reason, DecoderFailureReason::ClockFault] {
+            retain_decoder_failure_before(&first, 7, expected.phase, reason, || {
+                // Retention precedes failure and its getter cannot hold a lock.
+                assert_eq!(first.detail(), Some(expected));
+                callbacks.set(callbacks.get() + 1);
+            });
+        }
+        assert_eq!(callbacks.get(), 2);
+        assert_eq!(first.detail(), Some(expected));
+    }
+    #[test]
+    fn first_observation_is_bound_to_the_owned_source_generation() {
+        let first = DecoderFailureRecorder::new(7);
+        retain_decoder_failure_before(
+            &first,
+            7,
+            DecoderFailurePhase::Video,
+            DecoderFailureReason::Error(DecoderError::Stalled),
+            || {},
+        );
+        let detail = first.detail();
+        assert_eq!(decoder_failure_for_generation(7, 7, detail), detail);
+        assert_eq!(decoder_failure_for_generation(7, 8, detail), None);
+        assert_eq!(decoder_failure_for_generation(8, 8, detail), None);
+        let replacement = DecoderFailureRecorder::new(8);
+        assert_eq!(
+            decoder_failure_for_generation(8, 8, replacement.detail()),
+            None
+        );
+        retain_decoder_failure_before(
+            &replacement,
+            8,
+            DecoderFailurePhase::State,
+            DecoderFailureReason::ClockFault,
+            || {},
+        );
+        let next = decoder_failure_for_generation(8, 8, replacement.detail()).unwrap();
+        assert_eq!(next.generation(), 8);
+        assert_eq!(next.error_code(), None); // A monitor observation is not a fabricated error.
+    }
+    #[test]
+    fn decoder_failure_vocabulary_is_closed_and_payload_free() {
+        for (error, code) in [
+            (DecoderError::InvalidInput, "invalid_input"),
+            (DecoderError::Unsupported, "unsupported"),
+            (DecoderError::ProbeFailed, "probe_failed"),
+            (DecoderError::ProbeTimeout, "probe_timeout"),
+            (DecoderError::ProbeLimit, "probe_limit"),
+            (DecoderError::StaleGeneration, "stale_generation"),
+            (DecoderError::Expired, "expired"),
+            (DecoderError::Revoked, "revoked"),
+            (DecoderError::BindingMismatch, "binding_mismatch"),
+            (DecoderError::PublicationDenied, "publication_denied"),
+            (DecoderError::Backpressure, "backpressure"),
+            (DecoderError::Stalled, "stalled"),
+            (DecoderError::Cancelled, "cancelled"),
+            (DecoderError::Io, "io"),
+        ] {
+            let detail = DecoderFailureDetail {
+                generation: 7,
+                phase: DecoderFailurePhase::Audio,
+                reason: DecoderFailureReason::Error(error),
+            };
+            assert_eq!(detail.reason_code(), "decoder_error");
+            assert_eq!(detail.error_code(), Some(code));
+        }
+        for (phase, code) in [
+            (DecoderFailurePhase::Witness, "timed_witness"),
+            (DecoderFailurePhase::Video, "timed_video"),
+            (DecoderFailurePhase::Audio, "timed_audio"),
+            (DecoderFailurePhase::State, "timed_state"),
+        ] {
+            let detail = DecoderFailureDetail {
+                generation: 7,
+                phase,
+                reason: DecoderFailureReason::ClockFault,
+            };
+            assert_eq!(detail.phase_code(), code);
+        }
+        for (reason, code) in [
+            (DecoderFailureReason::ClockFault, "clock_fault"),
+            (
+                DecoderFailureReason::PublicationRejected,
+                "publication_rejected",
+            ),
+            (DecoderFailureReason::PendingExit, "pending_exit"),
+            (
+                DecoderFailureReason::ChildExitOrStatus,
+                "child_exit_or_status",
+            ),
+        ] {
+            let detail = DecoderFailureDetail {
+                generation: 7,
+                phase: DecoderFailurePhase::State,
+                reason,
+            };
+            assert_eq!(detail.reason_code(), code);
+            assert_eq!(detail.error_code(), None);
+        }
+    }
+    #[test]
+    fn packed_failure_codec_exhausts_closed_vocabulary_and_reserved_bytes() {
+        let phases = [
+            DecoderFailurePhase::Witness,
+            DecoderFailurePhase::Video,
+            DecoderFailurePhase::Audio,
+            DecoderFailurePhase::State,
+        ];
+        let reasons = [
+            DecoderFailureReason::Error(DecoderError::InvalidInput),
+            DecoderFailureReason::Error(DecoderError::Unsupported),
+            DecoderFailureReason::Error(DecoderError::ProbeFailed),
+            DecoderFailureReason::Error(DecoderError::ProbeTimeout),
+            DecoderFailureReason::Error(DecoderError::ProbeLimit),
+            DecoderFailureReason::Error(DecoderError::StaleGeneration),
+            DecoderFailureReason::Error(DecoderError::Expired),
+            DecoderFailureReason::Error(DecoderError::Revoked),
+            DecoderFailureReason::Error(DecoderError::BindingMismatch),
+            DecoderFailureReason::Error(DecoderError::PublicationDenied),
+            DecoderFailureReason::Error(DecoderError::Backpressure),
+            DecoderFailureReason::Error(DecoderError::Stalled),
+            DecoderFailureReason::Error(DecoderError::Cancelled),
+            DecoderFailureReason::Error(DecoderError::Io),
+            DecoderFailureReason::ClockFault,
+            DecoderFailureReason::PublicationRejected,
+            DecoderFailureReason::PendingExit,
+            DecoderFailureReason::ChildExitOrStatus,
+        ];
+        let mut seen = [false; 256];
+        for phase in phases {
+            for reason in reasons {
+                let packed = pack_decoder_failure(phase, reason);
+                assert!(!seen[usize::from(packed)]);
+                seen[usize::from(packed)] = true;
+                assert_eq!(
+                    decode_decoder_failure(u64::MAX, packed),
+                    Some(DecoderFailureDetail {
+                        generation: u64::MAX,
+                        phase,
+                        reason
+                    })
+                );
+            }
+        }
+        assert_eq!(seen.iter().filter(|value| **value).count(), 72);
+        for packed in 0..=u8::MAX {
+            assert_eq!(
+                decode_decoder_failure(1, packed).is_some(),
+                seen[usize::from(packed)]
+            );
+        }
+    }
+    #[test]
+    fn refused_generation_and_cas_loss_still_run_failure_actions() {
+        let recorder = DecoderFailureRecorder::new(7);
+        let callbacks = std::cell::Cell::new(0);
+        for generation in [8, 7, 7] {
+            retain_decoder_failure_before(
+                &recorder,
+                generation,
+                DecoderFailurePhase::State,
+                DecoderFailureReason::ClockFault,
+                || callbacks.set(callbacks.get() + 1),
+            );
+            if generation == 8 {
+                assert_eq!(recorder.detail(), None);
+            }
+        }
+        assert_eq!(callbacks.get(), 3);
+        assert_eq!(recorder.detail().unwrap().generation(), 7);
+    }
+    #[test]
+    fn concurrent_first_cas_is_stable_and_all_failure_actions_run() {
+        use std::sync::{atomic::AtomicUsize, Barrier};
+        let recorder = Arc::new(DecoderFailureRecorder::new(7));
+        let start = Arc::new(Barrier::new(17));
+        let callbacks = Arc::new(AtomicUsize::new(0));
+        let mut workers = Vec::new();
+        for index in 0..16 {
+            let recorder = recorder.clone();
+            let start = start.clone();
+            let callbacks = callbacks.clone();
+            workers.push(std::thread::spawn(move || {
+                start.wait();
+                retain_decoder_failure_before(
+                    &recorder,
+                    7,
+                    if index % 2 == 0 {
+                        DecoderFailurePhase::Audio
+                    } else {
+                        DecoderFailurePhase::Video
+                    },
+                    DecoderFailureReason::Error(DecoderError::Io),
+                    || {
+                        callbacks.fetch_add(1, Ordering::Relaxed);
+                    },
+                );
+            }));
+        }
+        start.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let first = recorder.detail().unwrap();
+        assert_eq!(first.generation(), 7);
+        assert!(matches!(
+            first.phase,
+            DecoderFailurePhase::Audio | DecoderFailurePhase::Video
+        ));
+        assert_eq!(first.reason, DecoderFailureReason::Error(DecoderError::Io));
+        assert_eq!(callbacks.load(Ordering::Relaxed), 16);
+        recorder.record(
+            7,
+            DecoderFailurePhase::State,
+            DecoderFailureReason::ClockFault,
+        );
+        assert_eq!(recorder.detail(), Some(first));
     }
 }
