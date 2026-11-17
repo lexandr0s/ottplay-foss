@@ -1722,7 +1722,7 @@ fn seed_refusal_receipt() -> Value {
                 "stderr_sha256":proof.stderr_sha256.iter().map(|byte|format!("{byte:02x}")).collect::<String>(),
                 "status":null,"response_bytes":null,
             }));
-            json!({"seed":["grid","main","replacement"][index],
+            json!({"seed":(["grid","main","replacement"][index]),
                 "body_first_count":call.summary.counts[0],"body_later_count":call.summary.counts[1],
                 "supervisor_count":call.summary.counts[2],"last":last,"completed":call.completed})
         }).collect())
