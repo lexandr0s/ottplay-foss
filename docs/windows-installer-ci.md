@@ -32,7 +32,7 @@ Both MSI operations must produce a nonempty verbose log, whose size and hash
 are retained in the receipt. The 180-second process limit remains unchanged.
 The portable guard tests run with `python tests/test_windows_installers.py`.
 
-Tauri CLI 2.12.4 stamps `__TAURI_BUNDLE_TYPE_VAR_UNK` as `NSS` for NSIS or
+Tauri CLI 2.12.6 stamps `__TAURI_BUNDLE_TYPE_VAR_UNK` as `NSS` for NSIS or
 `MSI` for MSI, then restores the original raw executable after each package.
 The harness binds that behavior to the installed and locked CLI version. It
 requires exactly one unpatched `UNK` target, then derives the full expected
