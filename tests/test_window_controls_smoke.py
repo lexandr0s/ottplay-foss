@@ -268,6 +268,58 @@ class EvidenceTests(unittest.TestCase):
                 saved = json.loads((Path(directory) / "missing-permission.json").read_text())
                 self.assertEqual(saved, result)
 
+    def test_startup_watchdog_flake_is_retried_once_and_acl_is_still_validated(self):
+        launches = []
+        class Process:
+            pid = 45690
+            def __init__(self, command, **kwargs):
+                private = Path(command[1])
+                launches.append(private)
+                if len(launches) == 1:
+                    (private / "watchdog.json").write_text(json.dumps({
+                        "status": "fail", "phase": "building-main", "elapsed_ms": 60009,
+                        "error": "startup did not complete within 60 seconds",
+                        "loaded_mask": 0, "request_count": 0}))
+                else:
+                    (private / "result.json").write_text(json.dumps(evidence(True)))
+            def wait(self, timeout):
+                return 1 if len(launches) == 1 else 0
+            def poll(self):
+                return 1 if len(launches) == 1 else 0
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with patch.object(runner.subprocess, "Popen", Process):
+                result = runner.run_acl_case(Path("fixture.exe"), output, True)
+            self.assertEqual(result["status"], "pass")
+            self.assertEqual(len(launches), 2)
+            self.assertEqual(result["startup_retry"]["watchdog"]["phase"], "building-main")
+            self.assertTrue((output / "missing-permission.json").is_file())
+            self.assertTrue((output / "missing-permission.retry.json").is_file())
+            self.assertFalse(launches[0].exists())
+
+    def test_startup_timeout_after_a_page_request_is_not_retried(self):
+        launches = []
+        class Process:
+            pid = 45691
+            def __init__(self, command, **kwargs):
+                private = Path(command[1])
+                launches.append(private)
+                (private / "watchdog.json").write_text(json.dumps({
+                    "status": "fail", "phase": "building-pip", "elapsed_ms": 60009,
+                    "error": "startup did not complete within 60 seconds",
+                    "loaded_mask": 1, "request_count": 1}))
+                (private / "result.json").write_text(json.dumps(evidence(True)))
+            def wait(self, timeout):
+                return 1
+            def poll(self):
+                return 1
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(runner.subprocess, "Popen", Process):
+                result = runner.run_acl_case(Path("fixture.exe"), Path(directory), True)
+            self.assertEqual(result["status"], "fail")
+            self.assertEqual(len(launches), 1)
+            self.assertNotIn("startup_retry", result)
+
     def test_outer_deadline_retains_native_phase_and_log_evidence(self):
         captured = []
         class Process:
