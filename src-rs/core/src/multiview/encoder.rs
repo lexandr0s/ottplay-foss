@@ -2141,8 +2141,7 @@ mod runtime {
                 let mut detail =
                     EncoderFailureDetail::stalled(EncoderFailureSite::WriteAbsolute, lane);
                 if progress.is_none() {
-                    // A startup fill is bounded by the startup deadline, so an
-                    // expired fill is a slow start, not a write stall.
+                    // Initializing writes are bounded only by the startup deadline.
                     detail.error = EncoderError::StartupTimeout;
                 }
                 detail.write_failure = Some(EncoderWriteFailure {
@@ -2409,12 +2408,15 @@ mod runtime {
                 } else {
                     None
                 };
-                let absolute = if reservation.phase == CapturePhase::Initializing {
-                    startup.deadline
+                let (progress, absolute) = if reservation.phase == CapturePhase::Initializing {
+                    (None, startup.deadline)
                 } else {
-                    target
-                        .checked_add(debt)
-                        .ok_or(EncoderError::InvalidConfig)?
+                    (
+                        Some(stall),
+                        target
+                            .checked_add(debt)
+                            .ok_or(EncoderError::InvalidConfig)?,
+                    )
                 };
                 let written = match lease.as_ref().map(|lease| &lease.frame.pixels) {
                     Some(CapturePixels::Rgb(bytes))
@@ -2424,7 +2426,7 @@ mod runtime {
                             &mut writer,
                             bytes,
                             &shared,
-                            Some(stall),
+                            progress,
                             absolute,
                             || Ok(true),
                             EncoderFailureLane::Video,
@@ -2435,7 +2437,7 @@ mod runtime {
                         &mut writer,
                         *bytes,
                         &shared,
-                        Some(stall),
+                        progress,
                         absolute,
                         || Ok(true),
                         EncoderFailureLane::Video,
@@ -2445,7 +2447,7 @@ mod runtime {
                         &mut writer,
                         canvas.width as usize * canvas.height as usize * 3,
                         &shared,
-                        Some(stall),
+                        progress,
                         absolute,
                         || feed.empty_sources(generation),
                         EncoderFailureLane::Video,
@@ -2550,18 +2552,21 @@ mod runtime {
                     }
                 }
                 let initializing = reservation.phase == CapturePhase::Initializing;
-                let absolute = if initializing {
-                    startup.deadline
+                let (progress, absolute) = if initializing {
+                    (None, startup.deadline)
                 } else {
-                    target
-                        .checked_add(debt)
-                        .ok_or(EncoderError::InvalidConfig)?
+                    (
+                        Some(stall),
+                        target
+                            .checked_add(debt)
+                            .ok_or(EncoderError::InvalidConfig)?,
+                    )
                 };
                 let written = write_capture_complete_detail_with_wait(
                     &mut writer,
                     &bytes,
                     &shared,
-                    Some(stall),
+                    progress,
                     absolute,
                     || {
                         if initializing {
@@ -5913,6 +5918,77 @@ mod runtime {
                 lock(&shared.error)
             );
             assert!(shared.audio_samples_written.load(Ordering::Relaxed) >= 6 * 1920);
+        }
+        #[test]
+        fn initializing_reservation_writes_obey_the_startup_deadline() {
+            struct BlockAfterBootstrap(u64);
+            impl Write for BlockAfterBootstrap {
+                fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                    if self.0 == 0 {
+                        return Err(io::ErrorKind::WouldBlock.into());
+                    }
+                    self.0 -= 1;
+                    Ok(bytes.len())
+                }
+                fn flush(&mut self) -> io::Result<()> {
+                    Ok(())
+                }
+            }
+
+            for lane in [EncoderFailureLane::Video, EncoderFailureLane::Audio] {
+                let began = Instant::now();
+                let stall = Duration::from_millis(20);
+                let deadline = began + Duration::from_millis(500);
+                let canvas = tiny_canvas();
+                let feed = Arc::new(CaptureVideoFeed::new(
+                    Arc::from(vec![0; 12]),
+                    fence(0),
+                    began,
+                ));
+                feed.bind(1).unwrap();
+                let mut shared = shared_at(began);
+                lock(&shared.snapshot).state = EncoderState::Starting;
+                let startup = Arc::new(CaptureStartup::new(canvas.fps, deadline, feed.clone(), 1));
+                Arc::get_mut(&mut shared).unwrap().capture_startup = Some(startup.clone());
+                let wait = |_: &mut BlockAfterBootstrap| {
+                    assert_eq!(lock(&shared.snapshot).state, EncoderState::Starting);
+                    assert_eq!(startup.phase().unwrap(), CapturePhase::Initializing);
+                    thread::sleep(Duration::from_millis(2));
+                };
+                // Model the peer's completed bootstrap so this lane owns the first failure.
+                let index = if lane == EncoderFailureLane::Video {
+                    lock(&startup.state).audio_done = true;
+                    capture_video_loop_with_wait(
+                        BlockAfterBootstrap(startup.video_units),
+                        feed,
+                        canvas,
+                        stall,
+                        shared.clone(),
+                        wait,
+                    );
+                    startup.video_units
+                } else {
+                    lock(&startup.state).video_done = true;
+                    capture_audio_loop_with_wait(
+                        BlockAfterBootstrap(startup.audio_units),
+                        AudioInput::Timed(Arc::new(|_| panic!("audio source used during startup"))),
+                        canvas,
+                        stall,
+                        shared.clone(),
+                        wait,
+                    );
+                    startup.audio_units
+                };
+                let failure = lock(&shared.error).unwrap();
+                assert_eq!(failure.error, EncoderError::StartupTimeout, "{lane:?}");
+                assert_eq!(failure.site, EncoderFailureSite::WriteAbsolute);
+                assert_eq!(failure.lane, lane);
+                let write = failure.write_failure.unwrap();
+                assert_eq!(write.media_index, Some(index));
+                assert!(write.would_block > 0);
+                assert!(write.elapsed_ns > stall.as_nanos() as u64);
+                assert!(Instant::now() >= deadline);
+            }
         }
         #[test]
         fn focus_changes_preserve_visual_candidates_and_partial_frame_contents() {
