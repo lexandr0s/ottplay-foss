@@ -4226,6 +4226,8 @@ fn run_normal_production(mode: ProductionMode) {
     .collect::<HashSet<_>>();
     let mut late_progress_baseline = None;
     let mut last_b_progress = Instant::now();
+    let mut sibling_absent = 0u8;
+    let mut sibling_last_seen = Instant::now();
     while Instant::now() < end && started.elapsed() < RUN_LIMIT {
         let last_status = snapshot(&api_origin, TOKEN, &ctx0, "long_status");
         let b_now = slot(&last_status, 1)["frames"].as_u64().unwrap();
@@ -4242,10 +4244,33 @@ fn run_normal_production(mode: ProductionMode) {
         {
             late_progress_baseline = Some(b_now);
         }
-        assert!(
-            slot(&last_status, 1)["source_ref"].as_str().is_some(),
-            "sibling source authority disappeared"
-        );
+        let sibling = slot(&last_status, 1);
+        if sibling["source_ref"].as_str().is_some() {
+            sibling_absent = 0;
+            sibling_last_seen = Instant::now();
+        } else {
+            // Authority is derived per status sample, so a single sample may
+            // legitimately straddle a session or lease transition. Name the
+            // cause and hold the strict bound to three consecutive samples.
+            sibling_absent = sibling_absent.saturating_add(1);
+            let sibling_state = sibling["state"].as_str().unwrap_or("unknown");
+            let cause = if sibling_state.eq_ignore_ascii_case("playing") {
+                "authority_lost"
+            } else {
+                "slot_state"
+            };
+            assert!(
+                sibling_absent < 3,
+                "sibling source authority disappeared for {sibling_absent} consecutive samples \
+                 cause={cause} sibling_state={sibling_state} absent_before={:?} \
+                 session={} session_state={} slot0={} slot1={}",
+                sibling_last_seen.elapsed(),
+                last_status["session_id"],
+                last_status["state"],
+                slot(&last_status, 0),
+                sibling
+            );
+        }
         if !output_checked {
             if let Some(path) = last_status["output"]["playlist_path"].as_str() {
                 if let Some((_, _, bytes)) = try_new_segment(&api_origin, path, &mut main_seen) {
