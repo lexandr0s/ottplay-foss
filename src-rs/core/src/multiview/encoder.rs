@@ -2064,7 +2064,7 @@ mod runtime {
         writer: &mut W,
         bytes: &[u8],
         shared: &Shared,
-        stall: Duration,
+        progress: Option<Duration>,
         absolute: Instant,
         authorized: impl FnMut() -> Result<bool, EncoderError>,
         lane: EncoderFailureLane,
@@ -2074,7 +2074,7 @@ mod runtime {
             writer,
             bytes,
             shared,
-            stall,
+            progress,
             absolute,
             authorized,
             lane,
@@ -2100,7 +2100,7 @@ mod runtime {
             writer,
             bytes,
             shared,
-            stall,
+            Some(stall),
             absolute,
             authorized,
             lane,
@@ -2112,7 +2112,7 @@ mod runtime {
         writer: &mut W,
         bytes: &[u8],
         shared: &Shared,
-        stall: Duration,
+        progress: Option<Duration>,
         absolute: Instant,
         mut authorized: impl FnMut() -> Result<bool, EncoderError>,
         lane: EncoderFailureLane,
@@ -2138,7 +2138,13 @@ mod runtime {
         };
         let failure =
             |offset: usize, calls, blocked, interrupted, advanced: Instant, observed: Instant| {
-                let mut detail = EncoderFailureDetail::stalled(EncoderFailureSite::WriteAbsolute, lane);
+                let mut detail =
+                    EncoderFailureDetail::stalled(EncoderFailureSite::WriteAbsolute, lane);
+                if progress.is_none() {
+                    // A startup fill is bounded by the startup deadline, so an
+                    // expired fill is a slow start, not a write stall.
+                    detail.error = EncoderError::StartupTimeout;
+                }
                 detail.write_failure = Some(EncoderWriteFailure {
                     scope: match lane {
                         EncoderFailureLane::Video => EncoderWriteScope::RgbFrame,
@@ -2186,11 +2192,13 @@ mod runtime {
                     observed,
                 ));
             }
-            if now().duration_since(advanced) >= stall {
-                return Err(EncoderFailureDetail::stalled(
-                    EncoderFailureSite::WriteNoProgress,
-                    lane,
-                ));
+            if let Some(stall) = progress {
+                if now().duration_since(advanced) >= stall {
+                    return Err(EncoderFailureDetail::stalled(
+                        EncoderFailureSite::WriteNoProgress,
+                        lane,
+                    ));
+                }
             }
             if !authorized()? {
                 return Err(EncoderError::Cancelled.into());
@@ -2244,7 +2252,7 @@ mod runtime {
             writer,
             bytes,
             shared,
-            stall,
+            Some(stall),
             absolute,
             &mut authorized,
             lane,
@@ -2255,7 +2263,7 @@ mod runtime {
         writer: &mut W,
         bytes: usize,
         shared: &Shared,
-        stall: Duration,
+        progress: Option<Duration>,
         absolute: Instant,
         mut authorized: impl FnMut() -> Result<bool, EncoderError>,
         lane: EncoderFailureLane,
@@ -2269,7 +2277,7 @@ mod runtime {
                 writer,
                 &zeros[..count],
                 shared,
-                stall,
+                progress,
                 absolute,
                 &mut authorized,
                 lane,
@@ -2364,7 +2372,7 @@ mod runtime {
                     &mut writer,
                     canvas.width as usize * canvas.height as usize * 3,
                     &shared,
-                    stall,
+                    None,
                     startup.deadline,
                     || feed.empty_sources(generation),
                     EncoderFailureLane::Video,
@@ -2416,7 +2424,7 @@ mod runtime {
                             &mut writer,
                             bytes,
                             &shared,
-                            stall,
+                            Some(stall),
                             absolute,
                             || Ok(true),
                             EncoderFailureLane::Video,
@@ -2427,7 +2435,7 @@ mod runtime {
                         &mut writer,
                         *bytes,
                         &shared,
-                        stall,
+                        Some(stall),
                         absolute,
                         || Ok(true),
                         EncoderFailureLane::Video,
@@ -2437,7 +2445,7 @@ mod runtime {
                         &mut writer,
                         canvas.width as usize * canvas.height as usize * 3,
                         &shared,
-                        stall,
+                        Some(stall),
                         absolute,
                         || feed.empty_sources(generation),
                         EncoderFailureLane::Video,
@@ -2511,7 +2519,7 @@ mod runtime {
                     &mut writer,
                     &silent,
                     &shared,
-                    stall,
+                    None,
                     startup.deadline,
                     || startup.feed.empty_sources(generation),
                     EncoderFailureLane::Audio,
@@ -2553,7 +2561,7 @@ mod runtime {
                     &mut writer,
                     &bytes,
                     &shared,
-                    stall,
+                    Some(stall),
                     absolute,
                     || {
                         if initializing {
@@ -4461,11 +4469,11 @@ mod runtime {
                     &mut writer,
                     &[1, 7, 3, 9],
                     &shared,
-                    if mode == 2 {
+                    Some(if mode == 2 {
                         Duration::from_micros(200)
                     } else {
                         Duration::from_secs(1)
-                    },
+                    }),
                     epoch
                         + if mode == 1 {
                             Duration::from_micros(200)
@@ -5722,6 +5730,189 @@ mod runtime {
             assert!(state.lanes.iter().all(|lane| lane.strict_full_writes >= 1));
             assert!(shared.audio_samples_written.load(Ordering::Relaxed) >= 6 * 1920);
             assert!(shared.video_frames_written.load(Ordering::Relaxed) >= startup.video_units + 1);
+        }
+        #[test]
+        fn startup_fill_outlives_the_stall_window_but_not_the_startup_deadline() {
+            use std::cell::Cell;
+            struct SlowReader<'a> {
+                clock: &'a Cell<Instant>,
+                ready: Instant,
+                accepted: usize,
+            }
+            impl Write for SlowReader<'_> {
+                fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                    if self.clock.get() < self.ready {
+                        return Err(io::ErrorKind::WouldBlock.into());
+                    }
+                    self.accepted += bytes.len();
+                    Ok(bytes.len())
+                }
+                fn flush(&mut self) -> io::Result<()> {
+                    Ok(())
+                }
+            }
+            let began = Instant::now();
+            let shared = shared_at(began);
+            let frame = [0u8; 12];
+            let stall = Duration::from_millis(600);
+            let deadline = began + Duration::from_secs(10);
+            let clock = Cell::new(began);
+            // The steady window still names a writer that accepts nothing.
+            let mut steady = SlowReader {
+                clock: &clock,
+                ready: began + Duration::from_millis(1_800),
+                accepted: 0,
+            };
+            let detail = write_capture_complete_detail_clocked_wait(
+                &mut steady,
+                &frame,
+                &shared,
+                Some(stall),
+                deadline,
+                || Ok(true),
+                EncoderFailureLane::Video,
+                || clock.get(),
+                |_| clock.set(clock.get() + Duration::from_millis(2)),
+            )
+            .unwrap_err();
+            assert_eq!(
+                detail,
+                EncoderFailureDetail::stalled(
+                    EncoderFailureSite::WriteNoProgress,
+                    EncoderFailureLane::Video
+                )
+            );
+            assert_eq!(steady.accepted, 0);
+            // The startup fill has no steady window: the startup deadline is its
+            // only bound, so a reader that starts three windows late still gets
+            // the whole frame.
+            clock.set(began);
+            let mut startup = SlowReader {
+                clock: &clock,
+                ready: began + Duration::from_millis(1_800),
+                accepted: 0,
+            };
+            write_capture_complete_detail_clocked_wait(
+                &mut startup,
+                &frame,
+                &shared,
+                None,
+                deadline,
+                || Ok(true),
+                EncoderFailureLane::Video,
+                || clock.get(),
+                |_| clock.set(clock.get() + Duration::from_millis(2)),
+            )
+            .unwrap();
+            assert_eq!(startup.accepted, frame.len());
+            // A reader that never starts is still bounded, and the expiry is a
+            // startup timeout rather than a write stall.
+            clock.set(began);
+            let mut dead = SlowReader {
+                clock: &clock,
+                ready: began + Duration::from_secs(60),
+                accepted: 0,
+            };
+            let detail = write_capture_complete_detail_clocked_wait(
+                &mut dead,
+                &frame,
+                &shared,
+                None,
+                began + Duration::from_millis(100),
+                || Ok(true),
+                EncoderFailureLane::Video,
+                || clock.get(),
+                |_| clock.set(clock.get() + Duration::from_millis(2)),
+            )
+            .unwrap_err();
+            assert_eq!(detail.error, EncoderError::StartupTimeout);
+            assert_eq!(detail.site, EncoderFailureSite::WriteAbsolute);
+            assert!(detail.write_failure.is_some());
+            assert_eq!(dead.accepted, 0);
+        }
+        #[test]
+        fn capture_audio_startup_survives_a_reader_blocked_past_the_stall_window() {
+            struct SlowStartWriter {
+                ready: Instant,
+                accepted: usize,
+                stop_after: usize,
+                stop: Arc<AtomicBool>,
+            }
+            impl Write for SlowStartWriter {
+                fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                    if Instant::now() < self.ready {
+                        return Err(io::ErrorKind::WouldBlock.into());
+                    }
+                    self.accepted += bytes.len();
+                    if self.accepted >= self.stop_after {
+                        self.stop.store(true, Ordering::Release);
+                    }
+                    Ok(bytes.len())
+                }
+                fn flush(&mut self) -> io::Result<()> {
+                    Ok(())
+                }
+            }
+            let began = Instant::now();
+            let stall = Duration::from_millis(120);
+            let feed = Arc::new(CaptureVideoFeed::new(
+                Arc::from(vec![9; 12]),
+                fence(0),
+                began,
+            ));
+            feed.bind(1).unwrap();
+            let mut shared = shared_at(began);
+            let startup = Arc::new(CaptureStartup::new(
+                10,
+                began + Duration::from_secs(5),
+                feed.clone(),
+                1,
+            ));
+            Arc::get_mut(&mut shared).unwrap().capture_startup = Some(startup);
+            let audio = AudioInput::Timed(Arc::new(|_tick: Instant| vec![7; 1920]));
+            let pf = feed.clone();
+            let ps = shared.stop.clone();
+            let publisher = thread::spawn(move || {
+                while !ps.load(Ordering::Acquire) {
+                    if pf
+                        .publish(Arc::from(vec![9; 12]), fence(0), Instant::now())
+                        .is_err()
+                    {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+            });
+            // The reader accepts nothing for three stall windows, as ffmpeg does
+            // while it is still starting, then drains normally.
+            let audio_writer = SlowStartWriter {
+                ready: began + 3 * stall,
+                accepted: 0,
+                stop_after: 8 * 3840,
+                stop: shared.stop.clone(),
+            };
+            let video_writer = PressureWriter {
+                blocked_until: began,
+                inject_after: None,
+                frame_bytes: 12,
+                accepted: Arc::new(Mutex::new(Vec::new())),
+                stop_after: usize::MAX,
+                stop: shared.stop.clone(),
+            };
+            let vs = shared.clone();
+            let vf = feed.clone();
+            let video = thread::spawn(move || {
+                capture_video_loop(video_writer, vf, tiny_canvas(), stall, vs)
+            });
+            capture_audio_loop(audio_writer, audio, tiny_canvas(), stall, shared.clone());
+            video.join().unwrap();
+            publisher.join().unwrap();
+            assert!(
+                lock(&shared.error).is_none(),
+                "startup fill failed: {:?}",
+                lock(&shared.error)
+            );
+            assert!(shared.audio_samples_written.load(Ordering::Relaxed) >= 6 * 1920);
         }
         #[test]
         fn focus_changes_preserve_visual_candidates_and_partial_frame_contents() {
