@@ -32,6 +32,15 @@ use uuid::Uuid;
 
 const MAX_OPERATIONS: usize = 64;
 const MAX_SESSIONS: usize = 16;
+/// A slot's wire `source_ref` is derived from redeemed authority, so a `null`
+/// cannot distinguish a lifecycle transition from a lost lease. Emit one line
+/// per slot and reason transition, hard capped, so an owned fixture stderr
+/// stays inside its documented bound while the next disappearance names its
+/// cause.
+const AUTHORITY_NOTES: usize = 4;
+/// Lines a single session may ever print, so a long or noisy session cannot
+/// spend the stderr budget that the run's diagnostics have to fit in.
+const AUTHORITY_SESSION_LINES: u8 = 8;
 #[cfg(test)]
 const FIXTURE_LIMIT: Duration = Duration::from_secs(60);
 
@@ -95,6 +104,7 @@ struct Control {
     closed: bool,
     cleanup_failed: bool,
     first_close: Option<FirstCloseRecord>,
+    authority_lines: u8,
 }
 struct SourceOwner {
     factory: StreamFactory,
@@ -423,6 +433,43 @@ fn acknowledge_retired_outputs(
     outputs.is_empty()
 }
 
+/// Why one slot did not project redeemed authority in a single status sample.
+/// Notes belong to that snapshot only and are printed together at its end, so
+/// no state, lock or budget is shared between requests.
+struct AuthorityNote {
+    slot: u8,
+    reason: &'static str,
+    state: wire::SlotState,
+    source_revision: u64,
+}
+/// Prints at most `AUTHORITY_NOTES` notes and never more than `budget` lines
+/// in total, so a whole run stays inside a known stderr bound. Truncation is
+/// reported once through that same budget.
+fn emit_authority(session: &str, notes: &[AuthorityNote], budget: &mut u8) {
+    if notes.is_empty() || *budget == 0 {
+        return;
+    }
+    let room = usize::from(*budget);
+    let fits = notes.len() <= room && notes.len() <= AUTHORITY_NOTES;
+    let shown = notes
+        .len()
+        .min(AUTHORITY_NOTES)
+        .min(room - usize::from(!fits));
+    for note in notes.iter().take(shown) {
+        eprintln!(
+            "multiview_authority version=3 session={session} slot={} reason={} state={:?} source_revision={}",
+            note.slot, note.reason, note.state, note.source_revision
+        );
+    }
+    *budget -= shown as u8;
+    if !fits {
+        eprintln!(
+            "multiview_authority version=3 session={session} omitted={}",
+            notes.len() - shown
+        );
+        *budget = 0;
+    }
+}
 fn project_slot_source_refs(
     registry: &Registry,
     principal: &wire::Principal,
@@ -430,20 +477,31 @@ fn project_slot_source_refs(
     observed_slot_id: u8,
     observed_source_revision: u64,
     state: wire::SlotState,
-) -> Option<SlotSourceRefs> {
+) -> (Option<SlotSourceRefs>, Option<AuthorityNote>) {
+    let note = |reason| AuthorityNote {
+        slot: observed_slot_id,
+        reason,
+        state,
+        source_revision: observed_source_revision,
+    };
     if !matches!(
         state,
         wire::SlotState::Preparing | wire::SlotState::Playing | wire::SlotState::Stalled
     ) {
-        return None;
+        // Idle slots have no authority by design.
+        let reason = (!matches!(state, wire::SlotState::Empty)).then(|| note("slot_state"));
+        return (None, reason);
     }
-    let binding = binding.filter(|b| b.native_expected.slot_id == observed_slot_id)?;
+    let Some(binding) = binding.filter(|b| b.native_expected.slot_id == observed_slot_id) else {
+        return (None, Some(note("binding_unavailable")));
+    };
     // Metadata is projected from redeemed authority, never from a requested
     // grant, selected UI item, SourceOwner cache or a guessed playback source.
-    registry
-        .slot_source_refs(principal, binding, observed_source_revision)
-        .ok()
-        .flatten()
+    match registry.slot_source_refs(principal, binding, observed_source_revision) {
+        Ok(Some(refs)) => (Some(refs), None),
+        Ok(None) => (None, Some(note("lease_not_projectable"))),
+        Err(error) => (None, Some(note(error.code()))),
+    }
 }
 
 impl Control {
@@ -1343,6 +1401,7 @@ impl LiveBackend {
                 closed: false,
                 cleanup_failed: false,
                 first_close: None,
+                authority_lines: AUTHORITY_SESSION_LINES,
             }),
             close_receipt: Mutex::new(None),
         });
@@ -1595,6 +1654,7 @@ impl LiveBackend {
         }
         let reported_output = control.reported_output(broker);
         let state = control.session_state(broker);
+        let mut authority = Vec::new();
         let slots = control
             .snapshot
             .slots
@@ -1643,7 +1703,7 @@ impl LiveBackend {
                                 && current.backend_expected.scene == session.scene
                         })
                 });
-                let source_refs = project_slot_source_refs(
+                let (source_refs, authority_note) = project_slot_source_refs(
                     &self.registry,
                     &session.owner.principal,
                     source_binding.as_ref(),
@@ -1651,6 +1711,9 @@ impl LiveBackend {
                     s.source_revision,
                     state,
                 );
+                if let Some(note) = authority_note {
+                    authority.push(note);
+                }
                 let (source_ref, item_ref) = source_refs
                     .map(|refs| (Some(refs.source_ref), Some(refs.item_ref)))
                     .unwrap_or((None, None));
@@ -1667,6 +1730,7 @@ impl LiveBackend {
                 }
             })
             .collect();
+        emit_authority(&session.id, &authority, &mut control.authority_lines);
         let audio = wire::AudioState {
             policy: match control.snapshot.audio_policy {
                 persistent::AudioPolicy::FollowsFocus => wire::AudioPolicy::FollowsFocus,
@@ -3121,6 +3185,7 @@ mod tests {
             row_revision,
             row_state,
         )
+        .0
         .map(|refs| (refs.source_ref, refs.item_ref))
     }
 
@@ -3784,6 +3849,7 @@ mod close_diagnostic_tests {
             closed: false,
             cleanup_failed: false,
             first_close,
+            authority_lines: AUTHORITY_SESSION_LINES,
         }
     }
 
