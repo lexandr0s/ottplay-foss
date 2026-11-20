@@ -616,7 +616,7 @@ def remove_private_data(directory):
             time.sleep(0.1)
 
 
-def run_case(binary, output, missing, *, phase=None, preferences=None, platform="windows"):
+def run_case(binary, output, missing, *, phase=None, preferences=None, platform="windows", evidence_suffix=""):
     require(phase in {None, "pin", "unpin", "verify-off", "cold-off", "cold-pending-off"}
             and (phase not in {"cold-off", "cold-pending-off"} or platform == "linux"), "Unknown preference phase")
     require((phase is None) == (preferences is None), "Preference phases need an owned shared directory")
@@ -639,7 +639,7 @@ def run_case(binary, output, missing, *, phase=None, preferences=None, platform=
             require(not aspect_stored.is_symlink(), "Invalid fixture preference seed path")
             aspect_stored.write_bytes(b"1\n")
             result["seeded_aspect_preference"] = True
-        with (output / f"{name}.log").open("w", encoding="utf-8") as log:
+        with (output / f"{name}{evidence_suffix}.log").open("w", encoding="utf-8") as log:
             platform_options = {"start_new_session": True} if platform in {"macos", "linux"} else {}
             process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=environment, **platform_options)
             result["pid"] = process.pid
@@ -705,8 +705,45 @@ def run_case(binary, output, missing, *, phase=None, preferences=None, platform=
         except Exception as error:
             result["status"] = "fail"
             result["cleanup_error"] = str(error)
-        (output / f"{name}.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        (output / f"{name}{evidence_suffix}.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     return result
+
+
+STARTUP_WATCHDOG_PHASES = {"startup", "building-main", "building-pip"}
+
+
+def startup_only_flake(result):
+    """A watchdog startup timeout that produced no page request and no ACL evidence.
+
+    The fixture never reached its first IPC, so permission enforcement was not
+    exercised: retrying cannot turn a denial into a pass. A timeout after the
+    first page request, or any recorded ACL verdict, is never retried.
+    """
+    watchdog = result.get("watchdog") or {}
+    return (
+        result.get("status") == "fail"
+        and "native" not in result
+        and "cleanup_error" not in result
+        and watchdog.get("status") == "fail"
+        and watchdog.get("phase") in STARTUP_WATCHDOG_PHASES
+        and watchdog.get("loaded_mask") == 0
+        and watchdog.get("request_count") == 0
+        and str(watchdog.get("error", "")).startswith("startup did not complete")
+    )
+
+
+def run_acl_case(binary, output, missing, *, platform="windows"):
+    """Run one ACL case, retrying once only when startup itself never happened."""
+    result = run_case(binary, output, missing, platform=platform)
+    if not startup_only_flake(result):
+        return result
+    retry = run_case(binary, output, missing, platform=platform, evidence_suffix=".retry")
+    retry["startup_retry"] = {
+        "error": result.get("error"),
+        "exit_code": result.get("exit_code"),
+        "watchdog": result.get("watchdog"),
+    }
+    return retry
 
 
 def run_restoration_sequence(binary, output, *, platform="windows"):
@@ -754,7 +791,7 @@ def main():
     binary = args.binary.resolve()
     require(binary.is_file(), "Build window_controls_smoke before running the fixture")
     args.output.mkdir(parents=True, exist_ok=True)
-    reports = [run_case(binary, args.output, missing, platform=platform) for missing in [True, False]]
+    reports = [run_acl_case(binary, args.output, missing, platform=platform) for missing in [True, False]]
     restoration = run_restoration_sequence(binary, args.output, platform=platform)
     passed = all(item["status"] == "pass" for item in reports) and restoration["status"] == "pass"
     summary = {"status": "pass" if passed else "fail", "runs": reports, "restoration": restoration}
