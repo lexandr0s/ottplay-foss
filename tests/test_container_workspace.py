@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Offline Cargo integration contracts for the container cache input boundary."""
 
+import ast
+import fnmatch
 import hashlib
 import importlib.util
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -32,6 +36,68 @@ def crate(directory, name, version, dependencies="", source="pub fn value() -> u
         directory / "Cargo.toml", f'[package]\nname = "{name}"\nversion = "{version}"\nedition = "2021"\n{dependencies}'
     )
     write(directory / "src/lib.rs", source)
+
+
+class FrontendHomeInputs(unittest.TestCase):
+    """Pure declared-input checks; no Docker, npm, network or Cargo is started."""
+
+    @staticmethod
+    def home_sources():
+        helper = (ROOT / "scripts/home-integration-assets.cjs").read_text()
+        declaration = re.search(r"const FILES = Object\.freeze\((\[.*?\])\);", helper, re.S)
+        if declaration is None:
+            raise AssertionError("Public Home input inventory moved")
+        return {"integrations/home/" + name for name in ast.literal_eval(declaration.group(1))}
+
+    @staticmethod
+    def copied_home_sources(dockerfile):
+        instructions = dockerfile.replace("\\\n", " ").splitlines()
+        copied = set()
+        for instruction in instructions:
+            words = shlex.split(instruction, comments=True)
+            if words[:1] == ["RUN"] and "build:server" in instruction:
+                break
+            if words[:1] != ["COPY"] or any(word.startswith("--from=") for word in words):
+                continue
+            copied.update(word for word in words[1:-1] if word.startswith("integrations/"))
+        return copied
+
+    @staticmethod
+    def context_includes(relative, rules):
+        # These fixed ordinary paths need only Docker's basename/path patterns,
+        # directory ancestry and last matching negation; no filesystem traversal.
+        parts = relative.split("/")
+        paths = ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
+        included = True
+        for line in rules.splitlines():
+            rule = line.strip()
+            if not rule or rule.startswith("#"):
+                continue
+            negate = rule.startswith("!")
+            pattern = rule.lstrip("!").strip("/")
+            candidates = paths if "/" in pattern else parts + paths
+            if any(fnmatch.fnmatchcase(candidate, pattern) for candidate in candidates):
+                included = negate
+        return included
+
+    def test_clean_frontend_inputs_copy_exact_public_home_files(self):
+        expected = self.home_sources()
+        self.assertEqual(len(expected), 5)
+        self.assertEqual(self.copied_home_sources((ROOT / "Dockerfile").read_text()), expected)
+        rules = (ROOT / ".dockerignore").read_text()
+        for source in expected:
+            with self.subTest(source=source):
+                self.assertTrue((ROOT / source).is_file())
+                self.assertTrue(self.context_includes(source, rules))
+                self.assertFalse(self.context_includes(source, rules + "\nintegrations/\n"))
+        self.assertFalse(self.context_includes("integrations/home/private.key", rules))
+
+    def test_copy_guard_detects_a_missing_asset(self):
+        expected = self.home_sources()
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        for source in expected:
+            with self.subTest(source=source):
+                self.assertNotEqual(self.copied_home_sources(dockerfile.replace(source, "", 1)), expected)
 
 
 class WorkspaceContracts(unittest.TestCase):

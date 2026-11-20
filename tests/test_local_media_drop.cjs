@@ -7,6 +7,7 @@ const path = require("node:path");
 const test = require("node:test");
 const ts = require("typescript");
 const vm = require("node:vm");
+const { File } = require("node:buffer");
 const imports = require("./helpers/remote-transfer-dependency.cjs").storage;
 const ROOT = path.resolve(__dirname, "..");
 const clone = (v) => JSON.parse(JSON.stringify(v));
@@ -73,7 +74,7 @@ function queue(names) {
     }));
     return value;
 }
-function fixture() {
+function fixture(random = Math.random) {
     const saved = new Map([
         ["ottplayprov", "m3u"],
         ["m3uprimaryIndex", "4"],
@@ -138,24 +139,31 @@ function fixture() {
     w.stbGetItem = storageModule.stbGetItem;
     w.stbSetItem = storageModule.stbSetItem;
     w.stbDelItem = storageModule.stbDelItem;
-    const api = load("src/plugins/local-media.ts", {
-        "../commands/remote-feature": { loadRemoteFeature: forbidden },
-        "../offline/browser-local-media": {
-            installBrowserLocalMedia: () => ({ list: forbidden, suspend() {} }),
-            installOfflineShell() {},
+    const api = load(
+        "src/plugins/local-media.ts",
+        {
+            "../commands/remote-feature": { loadRemoteFeature: forbidden },
+            "../offline/browser-local-media": {
+                installBrowserLocalMedia: () => ({
+                    list: forbidden,
+                    suspend() {},
+                }),
+                installOfflineShell() {},
+            },
+            "../offline/local-media-progress": load(
+                "src/offline/local-media-progress.ts"
+            ),
+            "../offline/playback-selection": load(
+                "src/offline/playback-selection.ts"
+            ),
+            "../offline/profiles": { installOfflineProfiles() {} },
+            "./native-bridge": {
+                resolveNativePlugin: () => ({}),
+                tauriInvoke: forbidden,
+            },
         },
-        "../offline/local-media-progress": load(
-            "src/offline/local-media-progress.ts"
-        ),
-        "../offline/playback-selection": load(
-            "src/offline/playback-selection.ts"
-        ),
-        "../offline/profiles": { installOfflineProfiles() {} },
-        "./native-bridge": {
-            resolveNativePlugin: () => ({}),
-            tauriInvoke: forbidden,
-        },
-    }).installLocalMedia(w);
+        { Math: Object.assign(Object.create(Math), { random }) }
+    ).installLocalMedia(w);
     w.loadProv = (id, session) => {
         calls.push(["load", id]);
         w.__ottCommandChannelLoad = {};
@@ -266,6 +274,68 @@ test("a dropped queue preserves supplied order and every file without scanning o
     assert.deepEqual(f.saved, f.before);
 });
 
+test("shuffle changes the starting item and preserves one order for the accepted drop", async () => {
+    const f = fixture(() => 0);
+    f.w.settings = { droppedFileShuffle: 1 };
+    const input = queue(["same", "same", "other"]);
+    f.api.playDroppedVideo(
+        input,
+        () => true,
+        () => {}
+    );
+    const value = await f.api.playbackList();
+    assert.deepEqual(clone(value.items.map((item) => item.id)), [
+        "queue-item-1",
+        "queue-item-2",
+        "queue-item-0",
+    ]);
+    assert.deepEqual(
+        clone(f.api.playbackOrder()),
+        Array.from(value.items, (item) => "local-" + item.id)
+    );
+    assert.equal(input.items[0].id, "queue-item-0");
+    assert.deepEqual(f.saved, f.before);
+    f.w.settings.droppedFileShuffle = 0;
+    assert.equal((await f.api.playbackList()).items[0].id, "queue-item-1");
+    f.api.playDroppedVideo(
+        input,
+        () => true,
+        () => {}
+    );
+    assert.equal((await f.api.playbackList()).items[0].id, "queue-item-0");
+});
+
+test("Repeat in Actions targets the active drop and leaves the ordinary Local preference alone", () => {
+    const f = fixture();
+    f.w.settings = { droppedFileRepeat: 0 };
+    f.w.__ottPlayerSettingsHost = {
+        store: {
+            begin() {
+                let next;
+                return {
+                    set(key, value) {
+                        assert.equal(key, "droppedFileRepeat");
+                        next = value;
+                    },
+                    commit(_writes, admitted) {
+                        assert.equal(admitted(), true);
+                        f.w.settings.droppedFileRepeat = next;
+                    },
+                };
+            },
+        },
+    };
+    assert.equal(f.api.cycleDroppedRepeat(), false);
+    f.drop();
+    for (const mode of ["one", "off", "all"]) {
+        assert.equal(f.api.cycleDroppedRepeat(), true);
+        assert.equal(f.api.droppedRepeatMode(), mode);
+    }
+    f.api.cancelDroppedVideo();
+    assert.equal(f.api.droppedRepeatMode(), undefined);
+    assert.deepEqual(f.saved, f.before);
+});
+
 test("invalid later queue entries reject the whole replacement and retain the previous video", async () => {
     for (const invalidate of [
         (v) => {
@@ -293,7 +363,7 @@ test("invalid later queue entries reject the whole replacement and retain the pr
             v.items = [];
         },
         (v) => {
-            v.items = queue(Array(129).fill("video")).items;
+            v.items = queue(Array(4097).fill("video")).items;
         },
     ]) {
         const f = fixture();
@@ -510,4 +580,296 @@ test("ordinary remote activation retains its existing promotable session contrac
     assert.equal(f.w.ottpStorage.localPlayback.end(true), true);
     assert.equal(f.saved.get("ottplayprov"), "offline");
     assert.deepEqual(f.releases, []);
+});
+
+test("dropped queues admit 15000 ordered HTTP media entries without changing the saved provider", async () => {
+    const f = fixture();
+    const value = queue(
+        Array.from({ length: 15000 }, (_, i) => "station-" + i)
+    );
+    value.items.forEach((item, i) => {
+        item.url = "https://media.example.test/" + i + ".m3u8";
+        item.mime = "application/vnd.apple.mpegurl";
+    });
+    f.api.playDroppedVideo(
+        value,
+        () => true,
+        () => f.releases.push("playlist")
+    );
+    const delivered = await f.api.playbackList();
+    assert.equal(delivered.items.length, 15000);
+    assert.equal(delivered.items[14999].url, value.items[14999].url);
+    assert.deepEqual(f.saved, f.before);
+    f.api.cancelDroppedVideo();
+    assert.deepEqual(f.releases, ["playlist"]);
+});
+
+test("real mixed playlist builder hands one temporary source to the real Local plugin", async () => {
+    const f = fixture();
+    const videos = load("src/offline/dropped-video.ts");
+    const playlists = load(
+        "src/offline/dropped-playlist.ts",
+        { "./dropped-video": videos },
+        { TextDecoder }
+    );
+    const revoked = [];
+    const host = {
+        File,
+        TextDecoder,
+        document: { createElement: () => ({ canPlayType: () => "probably" }) },
+        URL: {
+            createObjectURL: () => "blob:mixed-local",
+            revokeObjectURL: (url) => revoked.push(url),
+        },
+    };
+    const playlist = new File(
+        [
+            "#EXTM3U\n#EXTINF:-1,Remote channel\nhttps://media.example.test/live.m3u8\n#EXTINF:90,Local film\nclip.mp4\n",
+        ],
+        "mixed.m3u"
+    );
+    const lease = await playlists.createDroppedPlaylists(host, [
+        playlist,
+        new File(["video"], "clip.mp4", { type: "video/mp4" }),
+    ]);
+    f.api.playDroppedVideo(lease.catalog, () => true, lease.release);
+    const delivered = await f.api.playbackList();
+    const { fixture: coreFixture } = require("./test_tauri_auto_playback.cjs");
+    for (const [index, expectedHls] of [
+        [0, 1],
+        [1, 0],
+    ]) {
+        const core = coreFixture({ nativeHls: false, savedPlayerMode: 1 });
+        core.w.__ottLocalMedia = f.api;
+        core.w.startCoreEngine(delivered.items[index].url);
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.equal(
+            core.players.length,
+            expectedHls,
+            "real browser playlist uses each item's transport"
+        );
+    }
+    assert.equal(delivered.sources.length, 1);
+    assert.equal(delivered.items.length, 2);
+    assert.deepEqual(
+        Array.from(delivered.items, (item) => item.name),
+        ["Remote channel", "Local film"]
+    );
+    assert.equal(
+        delivered.items[0].url,
+        "https://media.example.test/live.m3u8"
+    );
+    assert.equal(delivered.items[1].url, "blob:mixed-local");
+    assert.ok(
+        delivered.items.every(
+            (item) => item.sourceId === delivered.sources[0].id
+        )
+    );
+    assert.deepEqual(f.saved, f.before);
+    f.api.cancelDroppedVideo();
+    assert.deepEqual(revoked, ["blob:mixed-local"]);
+});
+
+test("long recovery is scoped to remote direct files in the currently owned drop", async () => {
+    const f = fixture();
+    const value = queue([
+        "browser-remote",
+        "native-remote",
+        "native-local",
+        "live",
+    ]);
+    const [browser, native, local, hls] = value.items;
+    Object.assign(browser, {
+        type: "stream",
+        url: "https://example.test/browser.mp4",
+    });
+    Object.assign(native, {
+        source: "linked",
+        size: 0,
+        url: "https://example.test/native.mp4",
+    });
+    Object.assign(local, {
+        source: "linked",
+        size: 512,
+        url:
+            "http://127.0.0.1:8899/offline-media/" +
+            "a".repeat(32) +
+            "/" +
+            local.id,
+    });
+    Object.assign(hls, {
+        type: "stream",
+        mime: "application/vnd.apple.mpegurl",
+        url: "https://example.test/live.m3u8",
+    });
+    f.api.playDroppedVideo(
+        value,
+        () => true,
+        () => {}
+    );
+    await f.api.playbackList();
+    const browserOwner = f.api.captureDroppedHttpFile(browser.url);
+    assert.ok(browserOwner());
+    assert.ok(f.api.captureDroppedHttpFile(native.url)());
+    assert.equal(f.api.captureDroppedHttpFile(local.url), undefined);
+    assert.equal(f.api.captureDroppedHttpFile(hls.url), undefined);
+    f.api.cancelDroppedVideo();
+    assert.equal(browserOwner(), false);
+});
+
+test("owned Local catalog membership distinguishes adaptive transport from direct files", async () => {
+    const cap = "a".repeat(32);
+    for (const [url, mime, expected, playback] of [
+        [
+            "https://media.invalid/live.m3u8?token=fixture",
+            "video/mp4",
+            "stream",
+        ],
+        ["https://media.invalid/dash.mpd", "", "stream"],
+        [
+            "https://media.invalid/live",
+            "application/vnd.apple.mpegurl",
+            "stream",
+        ],
+        ["https://media.invalid/live", "application/dash+xml", "stream"],
+        ["https://media.invalid/live.ts", "video/mp2t", "stream"],
+        ["https://media.invalid/unknown", "", "stream"],
+        ["https://media.invalid/film.mp4", "video/mp4", "file"],
+        ["blob:fixture/local", "video/mp4", "file"],
+        [`http://127.0.0.1:43210/offline-media/${cap}/one`, "", "file"],
+        [
+            `http://127.0.0.1:43210/offline-media/${cap}/wrong-item`,
+            "",
+            "stream",
+        ],
+        ["http://127.0.0.1:43210/one", "", "stream"],
+        [`https://cdn.invalid/offline-media/${cap}/bad%ZZ`, "", "stream"],
+        [
+            `http://127.0.0.1:43210/offline-media/${cap}/one`,
+            "video/mp4",
+            "stream",
+            { mode: "compatibility" },
+        ],
+    ]) {
+        const f = fixture();
+        const input = catalog();
+        Object.assign(input.items[0], {
+            url,
+            mime,
+            ...(playback ? { playback } : {}),
+        });
+        f.api.playDroppedVideo(
+            input,
+            () => true,
+            () => {}
+        );
+        await f.api.playbackList();
+        assert.equal(
+            f.api.isPlaybackUrl(url),
+            true,
+            "membership remains independent of engine hint"
+        );
+        assert.equal(f.api.playbackTransport(url), expected, url);
+        assert.equal(
+            f.api.playbackTransport("https://unowned.invalid/film.mp4"),
+            undefined
+        );
+        assert.deepEqual(f.saved, f.before);
+    }
+});
+
+test("actual Local catalogs reach main and PiP HLS selection while direct files retain HTML5", async () => {
+    const { fixture: coreFixture } = require("./test_tauri_auto_playback.cjs");
+    for (const nativeShaped of [false, true]) {
+        for (const [url, mime, adaptive] of [
+            [
+                "https://media.invalid/live.m3u8",
+                "application/vnd.apple.mpegurl",
+                true,
+            ],
+            ["https://media.invalid/film.mp4", "video/mp4", false],
+            ["blob:fixture/film", "video/mp4", false],
+            [
+                `http://127.0.0.1:43210/offline-media/${"a".repeat(32)}/one`,
+                "video/mp4",
+                false,
+            ],
+        ]) {
+            const f = fixture();
+            const input = catalog();
+            Object.assign(input.items[0], { url, mime });
+            if (nativeShaped)
+                Object.assign(input.items[0], {
+                    source: "linked",
+                    size: 0,
+                    relativePath: null,
+                });
+            f.api.playDroppedVideo(
+                input,
+                () => true,
+                () => {}
+            );
+            await f.api.playbackList();
+            assert.equal(f.api.isPlaybackUrl(url), true);
+            for (const pip of [false, true]) {
+                const core = coreFixture({
+                    nativeHls: false,
+                    savedPlayerMode: 1,
+                });
+                core.w.__ottLocalMedia = f.api;
+                if (pip) core.w.startCorePipEngine(url);
+                else core.w.startCoreEngine(url);
+                await Promise.resolve();
+                await Promise.resolve();
+                assert.equal(
+                    core.players.length,
+                    adaptive ? 1 : 0,
+                    `adaptive=${adaptive}, native=${nativeShaped}, pip=${pip}`
+                );
+                if (!adaptive)
+                    assert.equal(
+                        (pip ? core.w.videoPip : core.w.video).src,
+                        url
+                    );
+            }
+            const shaka = coreFixture({ nativeHls: false, savedPlayerMode: 2 });
+            shaka.w.__ottLocalMedia = f.api;
+            shaka.w.startCoreEngine(url);
+            await Promise.resolve();
+            await Promise.resolve();
+            assert.equal(
+                shaka.shakaPlayers.length,
+                adaptive ? 1 : 0,
+                "adaptive entries also retain the selected Shaka engine"
+            );
+            if (adaptive) {
+                for (const mode of [1, 2]) {
+                    const preview = coreFixture({
+                        nativeHls: false,
+                        savedPlayerMode: mode,
+                    });
+                    preview.w.__ottLocalMedia = f.api;
+                    preview.w.startCoreEngine(
+                        url,
+                        undefined,
+                        undefined,
+                        false,
+                        url,
+                        true
+                    );
+                    await Promise.resolve();
+                    await Promise.resolve();
+                    assert.equal(
+                        mode === 1
+                            ? preview.players.length
+                            : preview.shakaPlayers.length,
+                        1,
+                        "temporary preview ownership must not force adaptive media through HTML5"
+                    );
+                }
+            }
+            assert.deepEqual(f.saved, f.before);
+        }
+    }
 });

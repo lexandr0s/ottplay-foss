@@ -1,4 +1,4 @@
-//! OS-owned ordered video-batch capabilities. No command accepts a filesystem path.
+//! OS-owned ordered media/playlist capabilities. No command accepts a filesystem path.
 use super::offline_media::{self, OfflineMediaState};
 use ottplay_core::offline_media::{Catalog, TransientVideos, MAX_DROPPED_VIDEOS};
 use serde::Serialize;
@@ -217,7 +217,7 @@ fn supported_path(path: &std::path::Path) -> bool {
         && path.extension().and_then(|v| v.to_str()).is_some_and(|v| {
             matches!(
                 v.to_ascii_lowercase().as_str(),
-                "mp4" | "m4v" | "webm" | "avi" | "mkv" | "ogv"
+                "mp4" | "m4v" | "webm" | "avi" | "mkv" | "ogv" | "m3u" | "m3u8"
             )
         })
 }
@@ -274,7 +274,7 @@ fn argument_paths(args: &[OsString], cwd: &std::path::Path) -> Option<Vec<PathBu
         .collect()
 }
 
-/// Finder/Open With delivers local file URLs on both cold and warm macOS opens.
+/// Finder/Open With delivers local media/playlist URLs on cold and warm macOS opens.
 #[cfg(target_os = "macos")]
 pub fn opened(app: &AppHandle, urls: &[url::Url]) {
     if let Some(paths) = opened_paths(urls) {
@@ -690,5 +690,82 @@ mod tests {
         })
         .unwrap();
         assert_eq!(event, serde_json::json!({"grant": "a".repeat(64)}));
+    }
+    #[test]
+    fn playlist_suffixes_use_the_same_bounded_local_os_admission() {
+        let first = path().with_file_name("channels with space ü.M3U");
+        let second = path().with_file_name("streams.m3u8");
+        assert!(supported_paths(&[first.clone(), second.clone(), path()]));
+        assert!(supported_paths(&vec![first.clone(); MAX_DROPPED_VIDEOS]));
+        assert!(!supported_paths(&vec![
+            first.clone();
+            MAX_DROPPED_VIDEOS + 1
+        ]));
+        assert!(!supported_paths(&[
+            first.clone(),
+            first.with_extension("txt")
+        ]));
+        assert!(!supported_path(std::path::Path::new("relative.m3u")));
+        assert!(!supported_path(&first.with_file_name("control\n.m3u")));
+        assert!(!supported_path(std::path::Path::new(
+            "https://source.invalid/list.m3u"
+        )));
+    }
+    #[test]
+    fn playlist_system_open_and_argv_keep_order_and_local_only_authority() {
+        let cwd = std::env::temp_dir();
+        let first = cwd.join("first ü.M3U8");
+        let second = cwd.join("second.m3u");
+        let urls = [
+            url::Url::from_file_path(&first).unwrap(),
+            url::Url::from_file_path(&second).unwrap(),
+        ];
+        assert_eq!(
+            opened_paths(&urls),
+            Some(vec![first.clone(), second.clone()])
+        );
+        assert_eq!(
+            argument_paths(&["first ü.M3U8".into(), "second.m3u".into()], &cwd),
+            Some(vec![first.clone(), second.clone()])
+        );
+        assert_eq!(
+            argument_paths(&[urls[1].as_str().into(), urls[0].as_str().into()], &cwd),
+            Some(vec![second, first])
+        );
+        for raw in [
+            "https://source.invalid/list.m3u",
+            "file://remote/list.m3u8",
+            "file:///list.m3u?token=1",
+            "file:///list.m3u8#fragment",
+        ] {
+            assert!(opened_paths(&[urls[0].clone(), url::Url::parse(raw).unwrap()]).is_none());
+            assert!(argument_paths(&[raw.into()], &cwd).is_none());
+        }
+    }
+    #[test]
+    fn playlist_reservation_keeps_page_expiry_and_previous_issued_grant() {
+        let mut slots = Slots::default();
+        let now = Instant::now();
+        let active = ready(&mut slots, now);
+        slots.start(&active, now).unwrap();
+        slots.finish(&active, 1, now).unwrap();
+        let selected = path().with_extension("m3u8");
+        let pending = slots.reserve(&[selected.clone()], now).unwrap();
+        assert!(slots.ready(&pending, now));
+        assert_eq!(slots.start(&pending, now).unwrap(), [selected]);
+        slots.advance_page();
+        assert!(slots.finish(&pending, 2, now).is_err());
+        assert!(
+            slots.flight.is_some(),
+            "page changes retain ownership until filesystem work drains"
+        );
+        slots.reject(&pending);
+        let next = slots.reserve(&[path().with_extension("m3u")], now).unwrap();
+        assert!(slots.ready(&next, now));
+        assert!(slots.start(&next, now + DROP_LIFETIME).is_err());
+        assert!(
+            slots.issued.is_empty(),
+            "page retirement revokes previously issued media too"
+        );
     }
 }

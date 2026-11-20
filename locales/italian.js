@@ -102,6 +102,15 @@ var keyStrings = {
         "Riproduce automaticamente direttamente i file supportati e utilizza HLS compatibile quando necessario.",
     alhabet: "aàbcdeéèfghiìíjklmnoóòpqrstuúùvwxyz",
     always: "sempre",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "I manifest HLS locali non sono supportati; usa un URL di manifest HTTP(S)",
+    "Playlist contains unsupported sources":
+        "La playlist contiene sorgenti non supportate",
+    "Playlist is empty or invalid": "La playlist è vuota o non valida",
+    "Playlist is too large": "La playlist è troppo grande",
+    "Playlist local files must be dropped together with the playlist":
+        "Trascina i file locali insieme alla playlist",
+    "Playlist must use UTF-8": "La playlist deve usare UTF-8",
     "and enter code": "e inserisci il codice",
     Back: "Indietro",
     "Back / Forward for 1 minute": "Indietro / avanti di 1 minuto",
@@ -384,6 +393,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Impostazioni di Dragon Media PRO",
     "Drop one video file at a time":
         "Trascina e rilascia un solo file video alla volta",
+    "Dropped files": "File trascinati",
     Duration: "Durata",
     Edit: "Modifica",
     "Edit access key": "Modifica chiave di accesso",

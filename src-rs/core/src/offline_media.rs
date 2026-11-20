@@ -2,6 +2,7 @@
 //! HTTP requests select opaque IDs only. Explicit native commands may link folders.
 #[path = "offline_media_compat.rs"]
 mod compatibility_routes;
+mod drop_playlist;
 #[path = "offline_media_priority.rs"]
 mod io_priority;
 use axum::{
@@ -31,8 +32,10 @@ use tokio::{
 };
 
 const MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-/// Maximum ordered videos retained by one OS-selected drop capability.
+/// Maximum OS-selected input files and retained local originals per drop.
 pub const MAX_DROPPED_VIDEOS: usize = 128;
+/// Maximum expanded playlist entries, including local members of mixed drops.
+pub const MAX_DROPPED_ITEMS: usize = 20_000;
 const MAX_TRANSIENT_BATCHES: usize = 2;
 pub const NATIVE_SOURCE_OVERLAP: &str =
     "Local folder overlaps an existing source; use the connected source or disconnect it before linking this folder";
@@ -578,11 +581,17 @@ pub struct TransientVideo {
     library: Library,
     entry: Arc<TransientRecord>,
 }
-/// One atomic, ordered OS-selected batch. Dropping it revokes every member,
-/// including in-flight chunks and compatibility leases; no media is copied.
+/// One atomic, ordered OS-selected batch. Drop revokes its local grants,
+/// in-flight local chunks and compatibility leases; no media is copied.
+/// Remote URLs are direct player inputs, not revocable server-proxy grants.
 pub struct TransientVideos {
     library: Library,
     entries: Vec<Arc<TransientRecord>>,
+    order: Vec<drop_playlist::Member>,
+    source_id: String,
+    source_name: String,
+    live: Arc<AtomicBool>,
+    owns_group: bool,
 }
 fn revoke_transient(library: &Library, entries: &[Arc<TransientRecord>]) {
     let Some(first) = entries.first() else { return };
@@ -609,7 +618,17 @@ impl Drop for TransientVideo {
 }
 impl Drop for TransientVideos {
     fn drop(&mut self) {
-        revoke_transient(&self.library, &self.entries);
+        if self.owns_group {
+            self.live.store(false, Ordering::Release);
+            revoke_transient(&self.library, &self.entries);
+            // Remote-only batches have no file record to retire their group.
+            self.library
+                .transient
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .groups
+                .remove(&self.source_id);
+        }
     }
 }
 impl TransientVideo {
@@ -620,7 +639,66 @@ impl TransientVideo {
 impl TransientVideos {
     /// The native listener supplies endpoint; the renderer supplies no paths.
     pub fn catalog(&self, endpoint: &str) -> Result<Catalog, &'static str> {
-        transient_catalog(&self.library, &self.entries, endpoint)
+        if !drop_endpoint_valid(&self.library, endpoint) || !self.live.load(Ordering::Acquire) {
+            return Err("Local drop is no longer available");
+        }
+        let items = self
+            .order
+            .iter()
+            .map(|member| match member {
+                drop_playlist::Member::Local(index) => {
+                    drop_local_item(&self.entries[*index], endpoint, &self.source_id)
+                }
+                drop_playlist::Member::Remote {
+                    id,
+                    name,
+                    url,
+                    mime,
+                } => Item {
+                    id: id.clone(),
+                    name: name.clone(),
+                    url: url.clone(),
+                    mime: mime.clone(),
+                    directory: String::new(),
+                    relative_path: None,
+                    size: 0,
+                    available: true,
+                    source: "linked",
+                    source_id: self.source_id.clone(),
+                    playback: None,
+                },
+            })
+            .collect();
+        Ok(drop_catalog(
+            &self.library,
+            &self.source_id,
+            &self.source_name,
+            items,
+        ))
+    }
+}
+fn drop_endpoint_valid(library: &Library, endpoint: &str) -> bool {
+    endpoint
+        .strip_prefix("http://127.0.0.1:")
+        .and_then(|s| s.strip_suffix(&library.endpoint()))
+        .and_then(|s| s.parse::<u16>().ok())
+        .is_some_and(|port| port != 0)
+}
+fn drop_local_item(entry: &TransientRecord, endpoint: &str, source_id: &str) -> Item {
+    let r = &entry.record;
+    Item {
+        id: r.id.clone(),
+        name: r.name.clone(),
+        directory: String::new(),
+        relative_path: None,
+        size: r.size,
+        mime: r.mime.clone(),
+        url: format!("{endpoint}/{}", r.id),
+        available: true,
+        source: "linked",
+        source_id: source_id.into(),
+        playback: matches!(r.extension.as_str(), "avi" | "mkv")
+            .then(|| crate::local_compatibility::Playback::new(endpoint, &r.id, true)),
     }
 }
 fn transient_catalog(
@@ -628,13 +706,8 @@ fn transient_catalog(
     entries: &[Arc<TransientRecord>],
     endpoint: &str,
 ) -> Result<Catalog, &'static str> {
-    let suffix = library.endpoint();
-    let port = endpoint
-        .strip_prefix("http://127.0.0.1:")
-        .and_then(|s| s.strip_suffix(&suffix))
-        .and_then(|s| s.parse::<u16>().ok());
     let first = entries.first().ok_or("Local drop is no longer available")?;
-    if port.is_none_or(|p| p == 0)
+    if !drop_endpoint_valid(library, endpoint)
         || entries
             .iter()
             .any(|entry| !entry.live.load(Ordering::Acquire))
@@ -646,48 +719,42 @@ fn transient_catalog(
         .source_id
         .as_ref()
         .ok_or("Local drop is no longer available")?;
-    Ok(Catalog {
+    let items = entries
+        .iter()
+        .map(|entry| drop_local_item(entry, endpoint, source_id))
+        .collect();
+    Ok(drop_catalog(library, source_id, &first.record.name, items))
+}
+fn drop_catalog(
+    library: &Library,
+    source_id: &str,
+    source_name: &str,
+    items: Vec<Item>,
+) -> Catalog {
+    let count = items.len() as u64;
+    Catalog {
         available: true,
-        items: entries
-            .iter()
-            .map(|entry| {
-                let r = &entry.record;
-                Item {
-                    id: r.id.clone(),
-                    name: r.name.clone(),
-                    directory: String::new(),
-                    relative_path: None,
-                    size: r.size,
-                    mime: r.mime.clone(),
-                    url: format!("{endpoint}/{}", r.id),
-                    available: true,
-                    source: "linked",
-                    source_id: source_id.clone(),
-                    playback: matches!(r.extension.as_str(), "avi" | "mkv")
-                        .then(|| crate::local_compatibility::Playback::new(endpoint, &r.id, true)),
-                }
-            })
-            .collect(),
+        items,
         storage: "device".into(),
         persistent: false,
         upload_url: String::new(),
         direct_sources: false,
         read_only: true,
         sources: vec![Source {
-            id: source_id.clone(),
-            name: first.record.name.clone(),
+            id: source_id.into(),
+            name: source_name.into(),
             kind: "file".into(),
             available: true,
             access: "granted",
         }],
         source_scans: Vec::new(),
         scanning: false,
-        scanned: entries.len() as u64,
-        total: Some(entries.len() as u64),
+        scanned: count,
+        total: Some(count),
         scan_error: None,
         preferred: None,
         compatibility: crate::local_compatibility::Capability::new(library.compatibility.is_some()),
-    })
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1004,11 +1071,11 @@ pub async fn validate_dropped_files(
         Some(std::time::Instant::now() + NATIVE_SOURCE_PROBE_TIMEOUT),
         move |owner| async move {
             for path in paths {
-                let metadata = checked(Some(&owner), fs::symlink_metadata(path))
-                    .await?
-                    .map_err(|_| (StatusCode::NOT_FOUND, "Dropped video unavailable"))?;
-                if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() == 0 {
-                    return Err((StatusCode::BAD_REQUEST, "Drop regular video files"));
+                let opened = drop_playlist::open_original(&owner, &path).await?;
+                if drop_playlist::is_playlist(&path)
+                    && opened.metadata.len() > drop_playlist::MAX_PLAYLIST_BYTES as u64
+                {
+                    return Err((StatusCode::BAD_REQUEST, drop_playlist::TOO_LARGE));
                 }
             }
             Ok(())
@@ -1198,7 +1265,11 @@ impl Library {
     }
     /// Single-file compatibility API with the same two-group lifetime bound.
     pub async fn transient_video(&self, path: PathBuf) -> Result<TransientVideo, &'static str> {
+        if drop_playlist::is_playlist(&path) {
+            return Err("Use the playlist batch API");
+        }
         let mut batch = self.transient_videos(vec![path]).await?;
+        batch.owns_group = false;
         // Exactly one entry was admitted. Transfer its group ownership; the
         // now-empty batch has nothing to revoke.
         let entry = batch.entries.pop().expect("one requested video");
@@ -1219,35 +1290,9 @@ impl Library {
         if paths.is_empty() || paths.len() > MAX_DROPPED_VIDEOS {
             return Err("Drop between 1 and 128 video files");
         }
-        // Validate every path before starting filesystem work. Never omit an
-        // unsupported member or publish a partial replacement.
-        let mut requested = Vec::with_capacity(paths.len());
-        for path in paths {
-            let extension = path
-                .extension()
-                .and_then(|v| v.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if !matches!(
-                extension.as_str(),
-                "mp4" | "m4v" | "webm" | "avi" | "mkv" | "ogv"
-            ) {
-                return Err("Unsupported dropped video");
-            }
-            let name = path
-                .file_name()
-                .and_then(|v| v.to_str())
-                .filter(|v| !v.is_empty() && !v.chars().any(char::is_control))
-                .ok_or("Invalid dropped video")?
-                .to_string();
-            if !path.is_absolute() || path.as_os_str().len() > 4096 {
-                return Err("Invalid dropped video");
-            }
-            if matches!(extension.as_str(), "avi" | "mkv") && self.compatibility.is_none() {
-                return Err("Local compatibility tools are unavailable");
-            }
-
-            requested.push((path, name, extension));
+        // HTTP entries are player data, never requests made by this library.
+        for path in &paths {
+            drop_playlist::validate_input(path)?;
         }
         let work = self
             .background
@@ -1275,77 +1320,64 @@ impl Library {
                 // Keep the complete reservation in the reader until its file
                 // operations finish, including after caller cancellation.
                 let mut reservation = reservation;
-                let mut entries = Vec::with_capacity(requested.len());
+                let requested = drop_playlist::expand(&owner, paths).await?;
+                let source_name = requested
+                    .first()
+                    .map(|item| item.name().to_owned())
+                    .ok_or((StatusCode::BAD_REQUEST, drop_playlist::EMPTY))?;
+                let mut entries = Vec::new();
+                let mut order = Vec::with_capacity(requested.len());
                 let live = Arc::new(AtomicBool::new(true));
-                for (path, name, extension) in requested {
-                    let before = checked(Some(&owner), fs::symlink_metadata(&path))
-                        .await?
-                        .map_err(|_| (StatusCode::NOT_FOUND, "Dropped video unavailable"))?;
-                    if !before.is_file() || before.file_type().is_symlink() || before.len() == 0 {
-                        return Err((StatusCode::BAD_REQUEST, "Drop one regular video file"));
-                    }
-                    // On Windows, retain a handle to the selected name while
-                    // resolving and opening the canonical path. Both opens must
-                    // identify the same file as well as pass the metadata checks.
-                    #[cfg(windows)]
-                    let (selected_file, selected_identity) = {
-                        let file = checked(Some(&owner), fs::File::open(&path))
-                            .await?
-                            .map_err(storage_error)?;
-                        let metadata = checked(Some(&owner), file.metadata())
-                            .await?
-                            .map_err(storage_error)?;
-                        if !metadata.is_file()
-                            || FileStamp::new(&before) != FileStamp::new(&metadata)
-                        {
-                            return Err((StatusCode::GONE, "Dropped video changed"));
-                        }
-                        let identity = read_windows_file_identity(&file, Some(&owner)).await?;
-                        (file, identity)
-                    };
-                    let path = checked(Some(&owner), fs::canonicalize(path))
-                        .await?
-                        .map_err(|_| (StatusCode::NOT_FOUND, "Dropped video unavailable"))?;
-                    let file = checked(Some(&owner), fs::File::open(&path))
-                        .await?
-                        .map_err(storage_error)?;
-                    let metadata = checked(Some(&owner), file.metadata())
-                        .await?
-                        .map_err(storage_error)?;
-                    if !metadata.is_file() || FileStamp::new(&before) != FileStamp::new(&metadata) {
-                        return Err((StatusCode::GONE, "Dropped video changed"));
-                    }
-                    #[cfg(windows)]
-                    let windows_identity = read_windows_file_identity(&file, Some(&owner)).await?;
-                    #[cfg(windows)]
-                    if windows_identity != selected_identity {
-                        return Err((StatusCode::GONE, "Dropped video changed"));
-                    }
-                    #[cfg(windows)]
-                    drop(selected_file);
-                    let id = if entries.is_empty() {
+                for item in requested {
+                    owner.check()?;
+                    let id = if order.is_empty() {
                         source_id.clone()
                     } else {
                         uuid::Uuid::new_v4().simple().to_string()
                     };
-                    let entry = Arc::new(TransientRecord {
-                        _original: file,
-                        record: Record {
-                            id: id.clone(),
+                    match item {
+                        drop_playlist::Requested::Remote { name, url, mime } => {
+                            order.push(drop_playlist::Member::Remote {
+                                id,
+                                name,
+                                url,
+                                mime,
+                            });
+                        }
+                        drop_playlist::Requested::Local {
+                            path,
                             name,
-                            size: metadata.len(),
-                            mime: media_type(&extension).unwrap().into(),
                             extension,
-                            linked_path: Some(path),
-                            source_id: Some(source_id.clone()),
-                        },
-                        stamp: FileStamp::new(&metadata),
-                        #[cfg(windows)]
-                        windows_identity,
-                        live: live.clone(),
-                    });
-
-                    entries.push(entry);
+                        } => {
+                            if matches!(extension.as_str(), "avi" | "mkv")
+                                && library.compatibility.is_none()
+                            {
+                                return Err((
+                                    StatusCode::BAD_REQUEST,
+                                    "Local compatibility tools are unavailable",
+                                ));
+                            }
+                            let opened = drop_playlist::open_original(&owner, &path).await?;
+                            let entry = Arc::new(TransientRecord {
+                                record: Record {
+                                    id,
+                                    name,
+                                    size: opened.metadata.len(),
+                                    mime: media_type(&extension).unwrap().into(),
+                                    extension,
+                                    linked_path: Some(opened.path),
+                                    source_id: Some(source_id.clone()),
+                                },
+                                stamp: FileStamp::new(&opened.metadata),
+                                _original: opened.file,
+                                #[cfg(windows)]
+                                windows_identity: opened.windows_identity,
+                                live: live.clone(),
+                            });
+                            order.push(drop_playlist::Member::Local(entries.len()));
+                            entries.push(entry);
+                        }
+                    }
                 }
                 owner.publish(|| {
                     let mut state = library.transient.lock().unwrap_or_else(|e| e.into_inner());
@@ -1364,6 +1396,11 @@ impl Library {
                     Ok(TransientVideos {
                         library: library.clone(),
                         entries,
+                        order,
+                        source_id,
+                        source_name,
+                        live,
+                        owns_group: true,
                     })
                 })?
             },
@@ -5825,7 +5862,7 @@ mod tests {
             .start_link_folder_path_tracked(movies, current.clone())
             .await
             .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 let scan = library.scan.lock().await;
                 if scan
@@ -5842,8 +5879,36 @@ mod tests {
                 tokio::task::yield_now().await;
             }
         })
-        .await
-        .expect("new source must complete while the old source worker is held");
+        .await;
+        if completed.is_err() {
+            // Failure-only, nonblocking observation; do not extend the deadline
+            // or release the old worker to make the selected source complete.
+            let observed = library.scan.try_lock().ok().map(|scan| {
+                let source = scan.source_scans.get(&selected.id);
+                let state = match source.map(|source| source.state) {
+                    None => "missing",
+                    Some("pending") => "pending",
+                    Some("scanning") => "scanning",
+                    Some("complete") => "complete",
+                    Some("error") => "error",
+                    Some(_) => "unknown",
+                };
+                (
+                    state,
+                    scan.work_epoch == Some(current.epoch()),
+                    scan.jobs,
+                    scan.cached,
+                    scan.error.is_some(),
+                    source.is_some_and(|source| source.error.is_some()),
+                    source.and_then(|source| source.available),
+                    scan.scanned,
+                )
+            });
+            panic!(
+                "new source must complete while the old source worker is held; \
+                 observed(state,current_epoch,jobs,cached,scan_error,source_error,available,scanned)={observed:?}"
+            );
+        }
         drop(held_worker);
         drop(current);
         wait_for_drain(&background).await;

@@ -18,7 +18,12 @@ vm.runInNewContext(
     {
         exports: plugin,
         require(name) {
-            assert.equal(name, "../offline/dropped-video");
+            assert.ok(
+                [
+                    "../offline/dropped-video",
+                    "../offline/dropped-playlist",
+                ].includes(name)
+            );
             return {
                 createDroppedVideo() {
                     assert.fail("not a DOM drop");

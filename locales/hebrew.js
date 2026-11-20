@@ -99,6 +99,15 @@ var keyStrings = {
         "אוטומטית מנגן קבצים נתמכים ישירות ומשתמש ב-HLS תואם בעת הצורך.",
     alhabet: "אבגדהוזחטיכךלמםנןסעפףצץקרשת",
     always: "תמיד",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "מניפסטים מקומיים של HLS אינם נתמכים; יש להשתמש בכתובת URL של מניפסט HTTP(S)",
+    "Playlist contains unsupported sources":
+        "רשימת ההשמעה מכילה מקורות שאינם נתמכים",
+    "Playlist is empty or invalid": "רשימת ההשמעה ריקה או לא תקינה",
+    "Playlist is too large": "רשימת ההשמעה גדולה מדי",
+    "Playlist local files must be dropped together with the playlist":
+        "יש לגרור את הקבצים המקומיים יחד עם רשימת ההשמעה",
+    "Playlist must use UTF-8": "רשימת ההשמעה חייבת להשתמש ב-UTF-8",
     "and enter code": "והזן את הקוד",
     Back: "חזרה",
     "Back / Forward for 1 minute": "דלג דקה אחורה / קדימה",
@@ -361,6 +370,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "הגדרות Dragon Media PRO",
     "Drop one video file at a time": "יש לגרור ולשחרר קובץ וידאו אחד בכל פעם",
+    "Dropped files": "קבצים שנגררו ושוחררו",
     Duration: "משך",
     Edit: "ערוך",
     "Edit access key": "ערוך מפתח גישה",

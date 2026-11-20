@@ -104,6 +104,16 @@ var keyStrings = {
         "Uburyo bwikora bukina dosiye zishyigikiwe ako kanya, bugakoresha HLS ihuje n'igikoresho iyo bikenewe.",
     alhabet: "abcdefghijklmnopqrstuvwxyz",
     always: "buri gihe",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Manifesti za HLS zo ku gikoresho ntizishyigikiwe; koresha URL ya manifesti ya HTTP(S)",
+    "Playlist contains unsupported sources":
+        "Urutonde rwo gukina rurimo amasoko adashyigikiwe",
+    "Playlist is empty or invalid":
+        "Urutonde rwo gukina rurimo ubusa cyangwa ntirwemewe",
+    "Playlist is too large": "Urutonde rwo gukina ni runini cyane",
+    "Playlist local files must be dropped together with the playlist":
+        "Idosiye zo ku gikoresho zigomba gukururwa zigashyirwa hamwe n’urutonde rwo gukina",
+    "Playlist must use UTF-8": "Urutonde rwo gukina rugomba gukoresha UTF-8",
     "and enter code": "maze winjize kode",
     Back: "Subira inyuma",
     "Back / Forward for 1 minute": "Subiza inyuma / jya imbere umunota 1",
@@ -386,6 +396,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Igenamiterere rya Dragon Media PRO",
     "Drop one video file at a time":
         "Kurura dosiye imwe ya videwo uyirekure, imwe imwe",
+    "Dropped files": "Dosiye zakuruwe zikarekurwa",
     Duration: "Igihe bimara",
     Edit: "Hindura",
     "Edit access key": "Hindura urufunguzo rwo kwinjira",

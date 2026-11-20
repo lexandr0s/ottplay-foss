@@ -100,6 +100,15 @@ var keyStrings = {
         "Automaticky přehrává podporované soubory přímo a v případě potřeby používá kompatibilní HLS.",
     alhabet: "aábcčdďeéěfghiíjklmnňoópqrřsštťuúůvwxyýzž",
     always: "vždy",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Místní manifesty HLS nejsou podporovány; použijte URL manifestu HTTP(S)",
+    "Playlist contains unsupported sources":
+        "Seznam skladeb obsahuje nepodporované zdroje",
+    "Playlist is empty or invalid": "Seznam skladeb je prázdný nebo neplatný",
+    "Playlist is too large": "Seznam skladeb je příliš velký",
+    "Playlist local files must be dropped together with the playlist":
+        "Místní soubory je nutné přetáhnout společně se seznamem skladeb",
+    "Playlist must use UTF-8": "Seznam skladeb musí používat UTF-8",
     "and enter code": "a zadejte kód",
     Back: "Zpět",
     "Back / Forward for 1 minute": "Zpět / vpřed o 1 minutu",
@@ -371,6 +380,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Nastavení Dragon Media PRO",
     "Drop one video file at a time": "Přetáhněte vždy jen jeden videosoubor",
+    "Dropped files": "Přetažené soubory",
     Duration: "Délka",
     Edit: "Upravit",
     "Edit access key": "Upravit přístupový klíč",

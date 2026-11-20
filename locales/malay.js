@@ -377,6 +377,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Tetapan Dragon Media PRO",
     "Drop one video file at a time":
         "Seret dan lepaskan satu fail video pada satu masa",
+    "Dropped files": "Fail yang diseret dan dilepaskan",
     Duration: "Tempoh",
     Edit: "Sunting",
     "Edit access key": "Sunting kunci akses",
@@ -643,6 +644,8 @@ var keyStrings = {
     "Loading via proxy...": "Memuatkan melalui proksi…",
     "Loading. Please wait...": "Memuatkan… sila tunggu…",
     "Loading...": "Memuatkan…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Manifest HLS setempat tidak disokong; gunakan URL manifest HTTP(S)",
     "Local HTTP remote control": "Kawalan jauh HTTP setempat",
     "Local source did not respond": "Sumber setempat tidak memberi respons",
     "Local source unavailable": "Sumber setempat tidak tersedia",
@@ -776,9 +779,16 @@ var keyStrings = {
     "Player info:": "Maklumat pemain:",
     "Playing: %1": "Sedang dimainkan: %1",
     Playlist: "Senarai main",
+    "Playlist contains unsupported sources":
+        "Senarai main mengandungi sumber yang tidak disokong",
     "Playlist file": "Fail senarai main",
+    "Playlist is empty or invalid": "Senarai main kosong atau tidak sah",
     "Playlist is not loading directly...Loading via server...":
         "Senarai main tidak dapat dimuatkan terus. Memuatkan melalui pelayan…",
+    "Playlist is too large": "Senarai main terlalu besar",
+    "Playlist local files must be dropped together with the playlist":
+        "Fail setempat dalam senarai main mesti disertakan bersama senarai main",
+    "Playlist must use UTF-8": "Senarai main mesti menggunakan UTF-8",
     "Playlist Name": "Nama senarai main",
     "Playlist URL": "URL senarai main",
     Plex: "Plex",

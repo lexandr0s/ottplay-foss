@@ -1,7 +1,12 @@
 name: Windows runtime validation
 
 on:
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      multiview-unix:
+        description: Force Unix multiview qualification when explicitly requested by the caller
+        type: boolean
+        default: false
 
 env:
   NODE_VERSION: "22"
@@ -10,6 +15,8 @@ permissions:
   contents: read
 
 jobs:
+  dependency-media-sandbox:
+    uses: ./.github/workflows/dependency-media-sandbox.yml
   portable:
     uses: ./.github/workflows/beta-checks.yml
   native-windows:
@@ -22,7 +29,7 @@ jobs:
     runs-on: ${{ fromJSON((vars.CI_RUNNER_MODE == 'self-hosted' || vars.CI_RUNNER_MODE == 'k3s') && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && (vars.CI_RUNNER_LABELS || '[]') || '["ubuntu-latest"]') }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
 
@@ -32,6 +39,8 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci --ignore-scripts
+      - name: Audit committed media before test preparation
+        run: node scripts/check-committed-media.cjs
       - run: npm run check:test-inventory
       - run: npm test
       - run: node tests/test_release_envelope_size.cjs
@@ -58,7 +67,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
 
@@ -87,7 +96,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: "1.27.4"
           cache: false
@@ -184,12 +193,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -209,7 +218,7 @@ jobs:
         shell: bash
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -229,6 +238,7 @@ jobs:
       - name: Exercise direct and local media with the actual built UI
         timeout-minutes: 10
         run: |
+          npm run test:browser:external
           node tests/test_browser_direct_media.cjs
           node tests/test_browser_local_media.cjs --built-ui
           node tests/test_browser_local_media.cjs --built-ui --initial-retry
@@ -245,4 +255,98 @@ jobs:
             build/native-ui-report/
             build/native-ui-results/
           if-no-files-found: warn
+          retention-days: 14
+
+  multiview-unix-scope:
+    name: Select Unix multiview qualification
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
+      reason: ${{ steps.scope.outputs.reason }}
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Verify Unix multiview scope contracts
+        run: |
+          python3 -B tests/test_multiview_unix_scope.py
+          python3 -B tests/test_multiview_unix_ci.py
+      - name: Select changed Unix multiview inputs
+        id: scope
+        env:
+          FORCE_MULTIVIEW_UNIX: ${{ inputs.multiview-unix && 'true' || 'false' }}
+        run: |
+          args=()
+          if [[ "$FORCE_MULTIVIEW_UNIX" == true ]]; then args+=(--force); fi
+          python3 scripts/ci-multiview-unix-scope.py "${args[@]}"
+
+  multiview-unix-fixtures:
+    name: Unix multiview fixtures / ${{ matrix.os }}
+    needs: multiview-unix-scope
+    if: ${{ needs.multiview-unix-scope.outputs.run == 'true' }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-26.04, macos-15 ]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - name: Verify Alpine multiview tool compatibility
+        if: runner.os == 'Linux'
+        run: |
+          python3 scripts/check-multiview-alpine-tools.py \
+            --output "$RUNNER_TEMP/ottplay-multiview-alpine-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/alpine-tools.json"
+      - name: Run bounded isolated Unix multiview fixtures
+        run: |
+          python3 scripts/ci-multiview-unix.py \
+            --work-root "$RUNNER_TEMP/ottplay-multiview-unix-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --required-core-test multiview::encoder::runtime::transport_tests::failed_output_directory_cleanup_can_be_retried \
+            --required-server-test fixture_http_rejects_lease_shorter_than_startup_before_session_start \
+            --required-server-test worker_rejects_ungranted_files_modified_plans_and_pre_cancelled_work
+      - name: Preserve Alpine multiview tool evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: multiview-alpine-tools-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ottplay-multiview-alpine-${{ github.run_id }}-${{ github.run_attempt }}/alpine-tools.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve Unix multiview qualification evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: multiview-unix-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ottplay-multiview-unix-${{ github.run_id }}-${{ github.run_attempt }}/evidence
+          if-no-files-found: error
           retention-days: 14

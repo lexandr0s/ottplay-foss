@@ -649,6 +649,7 @@ function seekFixture(paused = false) {
     Object.assign(w, {
         _corePendingSeek: null,
         _corePendingSeekPosition: null,
+        coreStreamAttempt: null,
         _coreSeekRevision: 0,
         _playSession: 7,
         coreNativeAttached: true,

@@ -677,7 +677,7 @@ function toggleMainPlayback(): void {
         return;
     }
     if (typeof w.stbIsPlaying !== "function") return;
-    if (w.stbIsPlaying()) {
+    if (w.stbIsPlaying(true)) {
         w.forcePlay = false;
         if (typeof w.showShift === "function") w.showShift(_("Pause"));
         if (typeof w.showChannelInfo === "function") w.showChannelInfo(2);

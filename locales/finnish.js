@@ -102,6 +102,15 @@ var keyStrings = {
         "Automaattinen toistaa tuetut tiedostot suoraan ja käyttää tarvittaessa yhteensopivaa HLS.",
     alhabet: "abcdefghijklmnopqrsštuvwxyzžåäö",
     always: "aina",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Paikallisia HLS-manifesteja ei tueta; käytä HTTP(S)-manifestin URL-osoitetta",
+    "Playlist contains unsupported sources":
+        "Soittolista sisältää lähteitä, joita ei tueta",
+    "Playlist is empty or invalid": "Soittolista on tyhjä tai virheellinen",
+    "Playlist is too large": "Soittolista on liian suuri",
+    "Playlist local files must be dropped together with the playlist":
+        "Paikalliset tiedostot on pudotettava yhdessä soittolistan kanssa",
+    "Playlist must use UTF-8": "Soittolistan on käytettävä UTF-8-koodausta",
     "and enter code": "ja syötä koodi",
     Back: "Takaisin",
     "Back / Forward for 1 minute": "Hyppää taaksepäin/eteenpäin 1 minuutti",
@@ -378,6 +387,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO asetukset",
     "Drop one video file at a time":
         "Vedä ja pudota yksi videotiedosto kerrallaan",
+    "Dropped files": "Pudotetut tiedostot",
     Duration: "Kesto",
     Edit: "Muokkaa",
     "Edit access key": "Muokkaa pääsyavainta",

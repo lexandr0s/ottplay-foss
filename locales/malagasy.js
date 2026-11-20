@@ -393,6 +393,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Fikirakirana Dragon Media PRO",
     "Drop one video file at a time":
         "Tariho ary alatsaho tsirairay ny rakitra horonan-tsary",
+    "Dropped files": "Rakitra notarihina sy nalatsaka",
     Duration: "Faharetana",
     Edit: "Ovao",
     "Edit access key": "Ovao ny fanalahidy fidirana",
@@ -673,6 +674,8 @@ var keyStrings = {
     "Loading via proxy...": "Maka amin'ny alalan'ny lohamilina mpanelanelana…",
     "Loading. Please wait...": "Maka… andraso azafady…",
     "Loading...": "Maka…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Tsy tohanana ny manifest HLS eo an-toerana; ampiasao ny URL HTTP(S) an’ilay manifest",
     "Local HTTP remote control": "Fanaraha-maso HTTP lavitra eo an-toerana",
     "Local source did not respond": "Tsy namaly ny loharano eo an-toerana",
     "Local source unavailable": "Tsy misy ny loharano eo an-toerana",
@@ -809,9 +812,16 @@ var keyStrings = {
     "Player info:": "Mombamomba ny mpamaky:",
     "Playing: %1": "Alefa izao: %1",
     Playlist: "Lisitra fandefasana",
+    "Playlist contains unsupported sources":
+        "Misy loharano tsy tohanana ao amin’ny playlist",
     "Playlist file": "Rakitra lisitra fandefasana",
+    "Playlist is empty or invalid": "Foana na tsy manan-kery ny playlist",
     "Playlist is not loading directly...Loading via server...":
         "Tsy afaka naka mivantana ny lisitra fandefasana. Maka amin'ny alalan'ny lohamilina…",
+    "Playlist is too large": "Lehibe loatra ny playlist",
+    "Playlist local files must be dropped together with the playlist":
+        "Tsy maintsy aroso miaraka amin’ny playlist ireo rakitra eo an-toerana ao anatiny",
+    "Playlist must use UTF-8": "Tsy maintsy mampiasa UTF-8 ny playlist",
     "Playlist Name": "Anaran'ny lisitra fandefasana",
     "Playlist URL": "URL lisitra fandefasana",
     Plex: "Plex",

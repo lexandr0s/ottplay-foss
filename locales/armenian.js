@@ -102,6 +102,15 @@ var keyStrings = {
         "Ավտոմատ կերպով նվագարկում է աջակցվող ֆայլերը և անհրաժեշտության դեպքում օգտագործում է համատեղելի HLS:",
     alhabet: "աբգդեզէըթժիլխծկհձղճմյնշոչպջռսվտրցւփքօֆև",
     always: "միշտ",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Տեղային HLS մանիֆեստները չեն աջակցվում․ օգտագործեք HTTP(S) մանիֆեստի URL",
+    "Playlist contains unsupported sources":
+        "Երգացանկը պարունակում է չաջակցվող աղբյուրներ",
+    "Playlist is empty or invalid": "Երգացանկը դատարկ է կամ անվավեր",
+    "Playlist is too large": "Երգացանկը չափազանց մեծ է",
+    "Playlist local files must be dropped together with the playlist":
+        "Տեղային ֆայլերը պետք է քաշել և թողնել երգացանկի հետ միասին",
+    "Playlist must use UTF-8": "Երգացանկը պետք է օգտագործի UTF-8",
     "and enter code": "և մուտքագրեք կոդը",
     Back: "Հետ",
     "Back / Forward for 1 minute": "1 րոպե հետ / առաջ",
@@ -377,6 +386,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO կարգավորումներ",
     "Drop one video file at a time":
         "Միաժամանակ քաշեք և գցեք միայն մեկ տեսանյութի ֆայլ",
+    "Dropped files": "Քաշված և թողնված ֆայլեր",
     Duration: "Տևողություն",
     Edit: "Խմբագրել",
     "Edit access key": "Խմբագրել մուտքի բանալին",

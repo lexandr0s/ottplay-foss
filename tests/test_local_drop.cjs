@@ -18,6 +18,8 @@ function load(path, imports = {}) {
     acorn.parse(code, { ecmaVersion: 5 });
     vm.runInNewContext(code, {
         exports,
+        URL,
+        TextDecoder,
         require(name) {
             assert.ok(name in imports, name);
             return imports[name];
@@ -26,8 +28,12 @@ function load(path, imports = {}) {
     return exports;
 }
 const media = load("src/offline/dropped-video.ts");
+const playlists = load("src/offline/dropped-playlist.ts", {
+    "./dropped-video": media,
+});
 const plugin = load("src/plugins/local-drop.ts", {
     "../offline/dropped-video": media,
+    "../offline/dropped-playlist": playlists,
 });
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -171,6 +177,97 @@ test("file gesture plays the exact File via Local and prevents browser navigatio
     assert.equal(f.revoked.length, 0);
     assert.equal(f.event("drop", [], ["text/plain"]).prevented, false);
 });
+test("M3U drop opens ordered HTTP streams as a temporary queue without object URLs", async () => {
+    const f = fixture();
+    const playlist = new File(
+        [
+            "#EXTM3U\n#EXTINF:-1,News\nhttps://example.test/live.m3u8?token=one\n#EXTINF:90,Film\nhttp://example.test/movie.mp4\n",
+        ],
+        "channels.m3u8"
+    );
+    f.event("drop", [playlist]);
+    await flush();
+    assert.equal(f.played.length, 1);
+    assert.deepEqual(
+        Array.from(f.played[0].catalog.items, (item) => item.name),
+        ["News", "Film"]
+    );
+    assert.deepEqual(
+        Array.from(f.played[0].catalog.items, (item) => item.url),
+        [
+            "https://example.test/live.m3u8?token=one",
+            "http://example.test/movie.mp4",
+        ]
+    );
+    assert.deepEqual(f.revoked, []);
+    assert.equal(f.timers.size, 0);
+});
+test("late playlist reads cannot replace a newer video drop or a new provider generation", async () => {
+    for (const invalidate of [
+        (f) => f.event("drop", [file("newer.mp4")]),
+        (f) => {
+            f.w.__ottCommandChannelLoad = {};
+        },
+        (f) => {
+            f.w.__ottKiosk = { enabled: () => true };
+        },
+        (f) => f.api.dispose(),
+        (f) => {
+            for (const callback of [...f.timers.values()]) callback();
+        },
+    ]) {
+        const f = fixture();
+        let complete;
+        const playlist = new File(
+            ["#EXTM3U\nhttps://example.test/late.mp4"],
+            "late.m3u"
+        );
+        Object.defineProperty(playlist, "arrayBuffer", {
+            value: () =>
+                new Promise((resolve) => {
+                    complete = resolve;
+                }),
+        });
+        Object.defineProperty(playlist, "text", {
+            value: () =>
+                new Promise((resolve) => {
+                    complete = (value) =>
+                        resolve(new TextDecoder().decode(value));
+                }),
+        });
+        f.event("drop", [playlist]);
+        await flush();
+        assert.equal(typeof complete, "function");
+        invalidate(f);
+        complete(
+            new TextEncoder().encode("#EXTM3U\nhttps://example.test/late.mp4")
+                .buffer
+        );
+        await flush();
+        assert.equal(
+            f.played.some((p) =>
+                p.catalog.items.some(
+                    (item) => item.url === "https://example.test/late.mp4"
+                )
+            ),
+            false
+        );
+        assert.equal(f.timers.size, 0);
+    }
+});
+test("invalid playlist does not stop the current queue and errors never expose private data", async () => {
+    const f = fixture();
+    f.event("drop", [file("old.mp4")]);
+    f.event("drop", [
+        new File(["#EXTM3U\nfile:///private/passwords.mp4"], "invalid.m3u"),
+    ]);
+    await flush();
+    assert.equal(f.played.length, 1);
+    assert.equal(f.played[0].admitted(), true);
+    assert.deepEqual(f.revoked, []);
+    assert.ok(f.messages.length);
+    assert.equal(f.messages.join(" ").includes("/private/"), false);
+});
 test("ordered batch drops replace the prior queue while invalid batches preserve it", () => {
     const f = fixture();
     f.event("drop", [file("z-first.mp4"), file("a-second.mp4")]);
@@ -276,6 +373,82 @@ test("drop errors use audited translated keys for failure, unsupported type and 
         translated.map((key) => context.keyStrings[key])
     );
     assert.ok(f.messages.every((text, i) => text !== translated[i]));
+});
+test("playlist failures translate every safe diagnostic and redact unknown native errors", async () => {
+    const context = {};
+    vm.runInNewContext(fs.readFileSync("locales/russian.js", "utf8"), context);
+    const cases = [
+        [
+            { droppedPlaylistCode: "playlist_hls_local_unsupported" },
+            "Local HLS manifests are not supported; use an HTTP(S) manifest URL",
+        ],
+        [
+            { droppedPlaylistCode: "playlist_local_unavailable" },
+            "Playlist local files must be dropped together with the playlist",
+        ],
+        [
+            { droppedPlaylistCode: "playlist_unsupported" },
+            "Playlist contains unsupported sources",
+        ],
+        [
+            { droppedPlaylistCode: "playlist_invalid" },
+            "Playlist is empty or invalid",
+        ],
+        [{ droppedPlaylistCode: "playlist_limit" }, "Playlist is too large"],
+        ["Dropped playlist must be UTF-8", "Playlist must use UTF-8"],
+        [
+            "Local HLS manifests are not supported; add the HTTP(S) manifest URL as a playlist entry",
+            "Local HLS manifests are not supported; use an HTTP(S) manifest URL",
+        ],
+        [
+            "Dropped playlist exceeds the 8 MiB file or 16 MiB batch limit",
+            "Playlist is too large",
+        ],
+        [
+            "Dropped playlists exceed 20000 entries or 128 local files",
+            "Playlist is too large",
+        ],
+        [
+            "Dropped playlist contains no playable entries",
+            "Playlist is empty or invalid",
+        ],
+        [
+            "Dropped playlist contains an invalid entry",
+            "Playlist is empty or invalid",
+        ],
+        [
+            new Error("https://private.test/token /private/secret.m3u"),
+            "Unsupported source",
+        ],
+        [
+            { droppedPlaylistCode: "toString", message: "/private/secret.m3u" },
+            "Unsupported source",
+        ],
+    ];
+    for (const [error, expected] of cases) {
+        const f = fixture(true);
+        const keys = [];
+        f.w._ = (key) => {
+            assert.ok(Object.hasOwn(context.keyStrings, key));
+            keys.push(key);
+            return context.keyStrings[key];
+        };
+        f.grant("grant-errors-1234567890");
+        f.requests[0].reject(error);
+        await flush();
+        assert.deepEqual(keys, [expected]);
+        assert.deepEqual(f.messages, [context.keyStrings[expected]]);
+        assert.notEqual(f.messages[0], expected);
+        assert.equal(f.messages[0].includes("/private/"), false);
+        assert.equal(f.messages[0].includes("private.test"), false);
+        assert.equal(f.played.length, 0);
+    }
+    const fallback = fixture(true);
+    fallback.w._ = undefined;
+    fallback.grant("grant-errors-1234567890");
+    fallback.requests[0].reject("Dropped playlist must be UTF-8");
+    await flush();
+    assert.deepEqual(fallback.messages, ["Playlist must use UTF-8"]);
 });
 test("native consumes only opaque OS grants and ignores duplicate DOM file delivery", async () => {
     const f = fixture(true);

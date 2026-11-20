@@ -4293,6 +4293,7 @@ dependencies = [
  "hmac",
  "hyper",
  "hyper-util",
+ "libc",
  "md-5",
  "once_cell",
  "ottplay-core",
@@ -4306,6 +4307,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tracing",
@@ -4317,7 +4319,7 @@ dependencies = [
 
 [[package]]
 name = "ottplay-tauri"
-version = "1.1.71"
+version = "1.1.72"
 dependencies = [
  "anyhow",
  "axum 0.7.9",

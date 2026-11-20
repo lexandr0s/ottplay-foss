@@ -8,6 +8,8 @@ const {
     importDocument,
     scenarioTargets,
     openFavorites,
+    currentMixedPlaybackReady,
+    selectUnresolvedFavorite,
 } = require("../helpers/global-mixed-browser.cjs");
 test("M3U Local remembers a browsed Favorites category after quit and relaunch", async ({
     page,
@@ -424,6 +426,7 @@ test("receiver with reordered profiles plays imported mixed Favorites through th
             const state = await second.evaluate(
                 (observationStart) => ({
                     observed: window.__mixedObserved.slice(observationStart),
+                    diagnostics: window.__mixedObservedDiagnostics.slice(-64),
                     provider: window.__ottActiveProviderDriver.id,
                     src: window.video.currentSrc,
                 }),
@@ -438,6 +441,31 @@ test("receiver with reordered profiles plays imported mixed Favorites through th
                     (row) =>
                         row.provider === state.provider &&
                         row.url.includes(suffix)
+                ),
+                JSON.stringify(
+                    {
+                        expected: { provider: state.provider, suffix },
+                        observed: state.observed.slice(-64).map((row) => {
+                            try {
+                                const url = new URL(row.url, baseURL);
+                                return {
+                                    provider: row.provider,
+                                    source:
+                                        url.origin === new URL(baseURL).origin
+                                            ? url.pathname
+                                            : `[non-fixture:${url.protocol}]`,
+                                };
+                            } catch {
+                                return {
+                                    provider: row.provider,
+                                    source: "[non-url]",
+                                };
+                            }
+                        }),
+                        diagnostics: state.diagnostics,
+                    },
+                    null,
+                    2
                 )
             ).toBe(true);
             const current = await second.evaluate(
@@ -727,19 +755,16 @@ for (const scenario of fixture.receiver_scenarios.filter(
                     rows.map((row) => row.id),
                     rows[0].id
                 );
+                // Pairing finishes before its final stream necessarily starts decoding.
+                // Drain that exact owner/generation's real playing event before observing rejection.
+                await page.waitForFunction(currentMixedPlaybackReady);
                 // biome-ignore assist/source/useSortedKeys: Observe provider before the playback snapshot call.
                 const before = await page.evaluate(() => ({
                     provider: window.__ottActiveProviderDriver.id,
                     generation:
                         window.__ottClassicPlayback.snapshot().generation,
                 }));
-                await page.evaluate((id) => {
-                    window.__mixedObserved = [];
-                    const at = window.listArray.indexOf(id);
-                    if (at < 0) throw Error("unresolved row dropped");
-                    window.selIndex = at;
-                    window.listKeyHandlerFn(window.keys.ENTER);
-                }, rows[index].id);
+                await page.evaluate(selectUnresolvedFavorite, rows[index].id);
                 await expect
                     .poll(() =>
                         page.evaluate(() => window.__mixedResults.length)
@@ -751,6 +776,9 @@ for (const scenario of fixture.receiver_scenarios.filter(
                 expect(
                     await page.evaluate(() => window.__mixedObserved)
                 ).toEqual([]);
+                expect(await page.evaluate(() => window.__mixedPlayCalls)).toBe(
+                    0
+                );
                 expect(
                     // biome-ignore assist/source/useSortedKeys: Observe provider before the playback snapshot call.
                     await page.evaluate(() => ({

@@ -22,11 +22,14 @@ COPY images ./images
 COPY locales ./locales
 COPY providers ./providers
 COPY src-tauri/pip ./src-tauri/pip
+# Copy the fixed public dashboard inventory, never integration configuration.
+COPY integrations/home/index.html integrations/home/style.css integrations/home/core.js \
+     integrations/home/webos-host.js integrations/home/app.js ./integrations/home/
 RUN npm run typecheck && npm run build:server
 
 # Resolve the server workspace before the target compilation cache boundary.
 # Desktop release version changes must not invalidate unchanged server inputs.
-FROM --platform=$BUILDPLATFORM rust:1.99-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS server-inputs
+FROM --platform=$BUILDPLATFORM rust:1.100-alpine@sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33 AS server-inputs
 RUN apk add --no-cache python3
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -39,7 +42,7 @@ RUN python3 scripts/prepare-container-workspace.py --workspace /app --output /pr
 # Build Rust server against musl so the published image does not need
 # GLIBC_2.38+ (Hub :latest built on a newer glibc toolchain failed on
 # Synology DSM Docker / x86_64). Alpine = musl host target by default.
-FROM rust:1.99-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS rust-build
+FROM rust:1.100-alpine@sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33 AS rust-build
 RUN apk add --no-cache musl-dev build-base
 WORKDIR /app
 COPY --from=server-inputs /prepared/Cargo.toml /prepared/Cargo.lock ./
@@ -65,6 +68,11 @@ ENV EPG_ONLY=true
 
 # Keep the default image as the complete player server, without EPG_ONLY set.
 FROM server-runtime AS player
+# The opt-in private compositor invokes trusted local tools; the guide-only
+# image above keeps its smaller runtime. No media is admitted by default.
+USER root
+RUN apk add --no-cache ffmpeg
+USER nonroot
 # Use the validated web root, including the runtime-only player image allowlist.
 # Copying source trees here would reintroduce retired and private assets.
 COPY --from=build /app/dist/index.html ./index.html

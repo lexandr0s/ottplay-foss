@@ -14,7 +14,11 @@ let {
     CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE,
     INTERFACE_NOTIFICATION_SETTINGS_ALLOWANCE,
     DESKTOP_DROP_ALLOWANCE,
+    DESKTOP_DROP_PREFERENCES_ALLOWANCE,
+    DESKTOP_DROP_RECOVERY_ALLOWANCE,
     DESKTOP_VIDEO_QUEUE_ALLOWANCE,
+    DESKTOP_PLAYLIST_DROP_ALLOWANCE,
+    DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE,
     AUTO_RELAY_STALL_RECOVERY_ENTRY_ALLOWANCE,
     NATIVE_WINDOW_CONTROLS_ENTRY_ALLOWANCE,
     FAVORITES_CATEGORY_PERSISTENCE_ALLOWANCE,
@@ -110,7 +114,13 @@ const latestCaps = Object.freeze({
     TOTAL_BUDGET,
 });
 const latestOptionalBundles = CLASSIC_OPTIONAL_BUNDLES;
-function projectCapsWithoutAllowances(names) {
+function projectCapsWithoutAllowances(names, preserveDropPreferences = false) {
+    if (!preserveDropPreferences)
+        names = [
+            "DESKTOP_DROP_PREFERENCES_ALLOWANCE",
+            "DESKTOP_DROP_RECOVERY_ALLOWANCE",
+            ...names,
+        ];
     assert.equal(new Set(names).size, names.length);
     const filename = require.resolve("../scripts/classic-size.cjs");
     let source = fs.readFileSync(filename, "utf8");
@@ -143,6 +153,7 @@ function projectCapsWithoutAllowances(names) {
               ? "Object.freeze({entry:Object.freeze({bytes:0,gzipBytes:0}),providerEdem:Object.freeze({bytes:0,gzipBytes:0}),appearance:Object.freeze({bytes:0,gzipBytes:0}),remoteSettingsLifecycle:Object.freeze({bytes:0,gzipBytes:0}),optional:Object.freeze({bytes:0,gzipBytes:0})})"
               : [
                       "TIMEZONE_LOCAL_STARTUP_ALLOWANCE",
+                      "DESKTOP_DROP_PREFERENCES_ALLOWANCE",
                       "CLASSIC_PRESENTATION_SETTINGS_ALLOWANCE",
                       "INTERFACE_NOTIFICATION_SETTINGS_ALLOWANCE",
                   ].includes(name)
@@ -180,13 +191,130 @@ function projectCapsWithoutAllowances(names) {
 }
 function capsWithoutAllowances(names) {
     return projectCapsWithoutAllowances([
+        "DESKTOP_PLAYLIST_DROP_ALLOWANCE",
+        "DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE",
         "VIDEO_FIT_LIFECYCLE_ENTRY_ALLOWANCE",
         ...names,
     ]);
 }
 {
+    const before = projectCapsWithoutAllowances(
+        ["DESKTOP_DROP_PREFERENCES_ALLOWANCE"],
+        true
+    );
+    const { entry, appearance } = DESKTOP_DROP_PREFERENCES_ALLOWANCE;
+    const evidence = require("../docs/evidence/desktop-drop-preferences-size.json");
+    for (const metric of ["bytes", "gzipBytes"]) {
+        const measuredDelta = (isEntry) =>
+            Math.max(
+                ...evidence.measurements.flatMap(({ measurements }) =>
+                    measurements
+                        .filter(
+                            ({ path }) => ARTIFACTS.includes(path) === isEntry
+                        )
+                        .map(
+                            ({ baseline, candidate }) =>
+                                candidate[metric] - baseline[metric]
+                        )
+                )
+            );
+        assert.equal(entry[metric], measuredDelta(true));
+        assert.equal(appearance[metric], measuredDelta(false));
+        for (const name of ["BUDGET", "LEGACY_TOTAL_BUDGET"])
+            assert.equal(
+                latestCaps[name][metric] - before[name][metric],
+                entry[metric]
+            );
+        for (const name of ["BASE_TOTAL_BUDGET", "TOTAL_BUDGET"])
+            assert.equal(
+                latestCaps[name][metric] - before[name][metric],
+                entry[metric] + appearance[metric]
+            );
+        assert.equal(
+            latestCaps.OPTIONAL_BUDGETS["subtitle-appearance"][metric] -
+                before.OPTIONAL_BUDGETS["subtitle-appearance"][metric],
+            appearance[metric]
+        );
+    }
+    for (const name of Object.keys(before.OPTIONAL_BUDGETS))
+        if (name !== "subtitle-appearance")
+            assert.deepEqual(
+                latestCaps.OPTIONAL_BUDGETS[name],
+                before.OPTIONAL_BUDGETS[name]
+            );
+}
+{
+    const before = projectCapsWithoutAllowances(
+        ["DESKTOP_DROP_RECOVERY_ALLOWANCE"],
+        true
+    );
+    const evidence = require("../docs/evidence/desktop-drop-recovery-size.json");
+    for (const metric of ["bytes", "gzipBytes"]) {
+        const actual = Math.max(
+            ...evidence.measurements.flatMap(({ measurements }) =>
+                measurements.map(
+                    ({ baseline, candidate }) =>
+                        candidate[metric] - baseline[metric]
+                )
+            )
+        );
+        assert.equal(DESKTOP_DROP_RECOVERY_ALLOWANCE[metric], actual);
+        for (const key of [
+            "BUDGET",
+            "LEGACY_TOTAL_BUDGET",
+            "BASE_TOTAL_BUDGET",
+            "TOTAL_BUDGET",
+        ])
+            assert.equal(latestCaps[key][metric] - before[key][metric], actual);
+    }
+    assert.deepEqual(latestCaps.OPTIONAL_BUDGETS, before.OPTIONAL_BUDGETS);
+}
+{
+    const before = projectCapsWithoutAllowances([
+        "DESKTOP_PLAYLIST_DROP_ALLOWANCE",
+    ]);
+    const actual = projectCapsWithoutAllowances([]);
+    const evidence = require("../docs/evidence/desktop-playlist-drop-size.json");
+    assert(Object.isFrozen(DESKTOP_PLAYLIST_DROP_ALLOWANCE));
+    assert.deepEqual(DESKTOP_PLAYLIST_DROP_ALLOWANCE, evidence.addedAllowance);
+    for (const metric of ["bytes", "gzipBytes"]) {
+        assert.equal(
+            actual.OPTIONAL_BUDGETS["local-drop"][metric] -
+                before.OPTIONAL_BUDGETS["local-drop"][metric],
+            DESKTOP_PLAYLIST_DROP_ALLOWANCE[metric]
+        );
+        assert(
+            evidence.measured[metric] <=
+                actual.OPTIONAL_BUDGETS["local-drop"][metric]
+        );
+        for (const name of ["BASE_TOTAL_BUDGET", "TOTAL_BUDGET"])
+            assert.equal(
+                actual[name][metric] - before[name][metric],
+                DESKTOP_PLAYLIST_DROP_ALLOWANCE[metric],
+                name + " counts the lazy playlist feature once"
+            );
+    }
+    for (const name of [
+        "BUDGET",
+        "LEGACY_TOTAL_BUDGET",
+        "PROVIDER_BUDGET",
+        "OPTIONAL_BUDGET",
+    ])
+        assert.deepEqual(
+            actual[name],
+            before[name],
+            name + " unchanged by optional playlist parsing"
+        );
+    for (const [name, cap] of Object.entries(before.OPTIONAL_BUDGETS))
+        if (name !== "local-drop")
+            assert.deepEqual(actual.OPTIONAL_BUDGETS[name], cap);
+}
+{
     const evidence = require("../docs/evidence/video-fit-lifecycle-size-20261111.json");
-    const actual = require("../scripts/classic-size.cjs");
+    const actual = projectCapsWithoutAllowances([
+        "DESKTOP_PLAYLIST_DROP_ALLOWANCE",
+        "DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE",
+    ]);
     const before = capsWithoutAllowances([]);
     const allowance = VIDEO_FIT_LIFECYCLE_ENTRY_ALLOWANCE;
     assert(Object.isFrozen(allowance));
@@ -305,6 +433,51 @@ function capsWithoutAllowances(names) {
             }
         }
     }
+}
+{
+    const before = projectCapsWithoutAllowances([
+        "DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE",
+    ]);
+    const actual = projectCapsWithoutAllowances([]);
+    const evidence = require("../docs/evidence/desktop-playlist-drop-size.json");
+    assert(Object.isFrozen(DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE));
+    assert.deepEqual(
+        DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE,
+        evidence.transportEntryAllowance
+    );
+    for (const metric of ["bytes", "gzipBytes"]) {
+        const measured = evidence.transportEntryMeasurement;
+        assert.equal(
+            measured.candidateWeb[metric] - measured.baselineWeb[metric],
+            measured.maximumDelta[metric]
+        );
+        assert(
+            measured.maximumDelta[metric] <=
+                DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE[metric]
+        );
+    }
+    for (const name of [
+        "BUDGET",
+        "LEGACY_TOTAL_BUDGET",
+        "BASE_TOTAL_BUDGET",
+        "TOTAL_BUDGET",
+    ])
+        for (const metric of ["bytes", "gzipBytes"])
+            assert.equal(
+                actual[name][metric] - before[name][metric],
+                DESKTOP_PLAYLIST_TRANSPORT_ENTRY_ALLOWANCE[metric],
+                name + " counts transport routing once"
+            );
+    for (const name of [
+        "PROVIDER_BUDGET",
+        "OPTIONAL_BUDGET",
+        "OPTIONAL_BUDGETS",
+    ])
+        assert.deepEqual(
+            actual[name],
+            before[name],
+            name + " remains unchanged by transport routing"
+        );
 }
 // Keep immutable earlier receipts on their original caps. Live inspectors below
 // still restore latestCaps, including this independently measured feature cost.
@@ -1723,6 +1896,7 @@ assert.deepEqual(
 );
 assert.deepEqual(latestOptionalBundles["local-drop"], [
     "build/offline/dropped-video.js",
+    "build/offline/dropped-playlist.js",
     "build/plugins/local-drop.js",
 ]);
 for (const metric of ["bytes", "gzipBytes"]) {
@@ -6249,9 +6423,10 @@ try {
                 LOCAL_COMPATIBILITY_ALLOWANCE[key] +
                 LOCAL_SOURCE_DIAGNOSTICS_ALLOWANCE[key]
         );
-    const localDiagnosticsBaseline = projectCapsWithoutAllowances([
-        "LOCAL_SOURCE_DIAGNOSTICS_ALLOWANCE",
-    ]);
+    const localDiagnosticsBaseline = projectCapsWithoutAllowances(
+        ["LOCAL_SOURCE_DIAGNOSTICS_ALLOWANCE"],
+        true
+    );
     for (const name of [
         "BUDGET",
         "BASE_TOTAL_BUDGET",
@@ -7208,6 +7383,7 @@ try {
         )
         .map((node) => node.getText(config))
         .join("\n");
+    const homeStageCalls = [];
     const packaging = {
         ...fs,
         autoPlaybackScript: () => "fixture",
@@ -7216,6 +7392,9 @@ try {
         console: { log() {} },
         copyRuntimeAssets() {},
         join: path.join,
+        stageHomeIntegration(srcRoot, stageDir) {
+            homeStageCalls.push([srcRoot, stageDir]);
+        },
         stageNativeRuntime() {},
         stagePlayerAssets() {},
     };
@@ -7231,6 +7410,7 @@ try {
     );
     const nativeStage = path.join(root, "native-stage");
     packaging.stageTauriFrontend(root, path.join(root, "dist"), nativeStage);
+    assert.deepEqual(homeStageCalls, [[root, nativeStage]]);
     assert.equal(
         fs.readFileSync(
             path.join(nativeStage, "dist/subtitle-appearance.js"),

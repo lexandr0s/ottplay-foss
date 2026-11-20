@@ -382,6 +382,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Configurações de Dragon Media PRO",
     "Drop one video file at a time":
         "Arraste e solte um ficheiro de vídeo de cada vez",
+    "Dropped files": "Ficheiros arrastados e largados",
     Duration: "Duração",
     Edit: "Editar",
     "Edit access key": "Editar chave de acesso",
@@ -655,6 +656,8 @@ var keyStrings = {
     "Loading via proxy...": "A carregar através do proxy…",
     "Loading. Please wait...": "A carregar… aguarde…",
     "Loading...": "A carregar…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Manifestos HLS locais não são suportados; use um URL HTTP(S) do manifesto",
     "Local HTTP remote control": "Controlo remoto HTTP local",
     "Local source did not respond": "A fonte local não respondeu",
     "Local source unavailable": "Fonte local indisponível",
@@ -790,9 +793,16 @@ var keyStrings = {
     "Player info:": "Informações do leitor:",
     "Playing: %1": "A reproduzir: %1",
     Playlist: "Lista de reprodução",
+    "Playlist contains unsupported sources":
+        "A lista contém fontes não suportadas",
     "Playlist file": "Ficheiro da lista",
+    "Playlist is empty or invalid": "A lista está vazia ou é inválida",
     "Playlist is not loading directly...Loading via server...":
         "A lista não está a carregar diretamente...A carregar através do servidor...",
+    "Playlist is too large": "A lista é demasiado grande",
+    "Playlist local files must be dropped together with the playlist":
+        "Os ficheiros locais da lista têm de ser largados juntamente com a lista",
+    "Playlist must use UTF-8": "A lista tem de usar UTF-8",
     "Playlist Name": "Nome da lista",
     "Playlist URL": "URL da lista",
     Plex: "Plex",

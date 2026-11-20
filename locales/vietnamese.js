@@ -374,6 +374,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Cài đặt Dragon Media PRO",
     "Drop one video file at a time": "Mỗi lần chỉ kéo và thả một tệp video",
+    "Dropped files": "Tệp đã kéo và thả",
     Duration: "Thời lượng",
     Edit: "Chỉnh sửa",
     "Edit access key": "Chỉnh sửa khóa truy cập",
@@ -637,6 +638,8 @@ var keyStrings = {
     "Loading via proxy...": "Đang tải qua proxy…",
     "Loading. Please wait...": "Đang tải… vui lòng đợi…",
     "Loading...": "Đang tải…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Không hỗ trợ tệp kê khai HLS cục bộ; hãy dùng URL HTTP(S) của tệp kê khai",
     "Local HTTP remote control": "Điều khiển từ xa HTTP cục bộ",
     "Local source did not respond": "Nguồn cục bộ không phản hồi",
     "Local source unavailable": "Nguồn cục bộ không khả dụng",
@@ -772,9 +775,16 @@ var keyStrings = {
     "Player info:": "Thông tin trình phát:",
     "Playing: %1": "Đang phát: %1",
     Playlist: "Danh sách phát",
+    "Playlist contains unsupported sources":
+        "Danh sách phát chứa nguồn không được hỗ trợ",
     "Playlist file": "Tệp danh sách phát",
+    "Playlist is empty or invalid": "Danh sách phát trống hoặc không hợp lệ",
     "Playlist is not loading directly...Loading via server...":
         "Không thể tải trực tiếp danh sách phát. Đang tải qua máy chủ…",
+    "Playlist is too large": "Danh sách phát quá lớn",
+    "Playlist local files must be dropped together with the playlist":
+        "Cần thả các tệp cục bộ của danh sách phát cùng với danh sách phát",
+    "Playlist must use UTF-8": "Danh sách phát phải dùng UTF-8",
     "Playlist Name": "Tên danh sách phát",
     "Playlist URL": "URL danh sách phát",
     Plex: "Plex",

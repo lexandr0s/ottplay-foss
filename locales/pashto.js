@@ -373,6 +373,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO ترتیبات",
     "Drop one video file at a time":
         "په یو وخت کې یوازې یو ویډیو فایل راکش او خوشې کړئ",
+    "Dropped files": "راکش او خوشې شوي فایلونه",
     Duration: "موده",
     Edit: "تدوین",
     "Edit access key": "د لاسرسي کیلي سمول",
@@ -641,6 +642,8 @@ var keyStrings = {
     "Loading via proxy...": "د پراکسي له لارې بارول…",
     "Loading. Please wait...": "پورته کیږي... مهرباني وکړئ انتظار وکړئ...",
     "Loading...": "بارول…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "ځايي HLS مانیفېسټونه نه ملاتړ کېږي؛ د مانیفېسټ HTTP(S) URL وکاروئ",
     "Local HTTP remote control": "ځایی HTTP ریموټ کنټرول",
     "Local source did not respond": "ځايي سرچینې ځواب ورنه کړ",
     "Local source unavailable": "ځايي سرچینه د لاسرسي وړ نه ده",
@@ -775,9 +778,16 @@ var keyStrings = {
     "Player info:": "د رسنیو پلیر معلومات:",
     "Playing: %1": "خپرېږي: %1",
     Playlist: "پلې‌لېست",
+    "Playlist contains unsupported sources":
+        "پلې‌لېسټ د نه‌ملاتړ کېدونکو سرچینو لرونکی دی",
     "Playlist file": "د پلې‌لېست فایل",
+    "Playlist is empty or invalid": "پلې‌لېسټ تش یا ناسم دی",
     "Playlist is not loading directly...Loading via server...":
         "پلې‌لېست په مستقیم ډول نشي پورته کیدی. د سرور له لارې بار کول…",
+    "Playlist is too large": "پلې‌لېسټ ډېر لوی دی",
+    "Playlist local files must be dropped together with the playlist":
+        "د پلې‌لېسټ ځايي فایلونه باید له پلې‌لېسټ سره یوځای وغورځول شي",
+    "Playlist must use UTF-8": "پلې‌لېسټ باید UTF-8 وکاروي",
     "Playlist Name": "د پلې‌لېست نوم",
     "Playlist URL": "د پلې‌لېست URL",
     Plex: "Plex",

@@ -366,6 +366,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Dragon Media PRO ਸੈਟਿੰਗਾਂ",
     "Drop one video file at a time": "ਇੱਕ ਵਾਰ ਵਿੱਚ ਇੱਕ ਵੀਡੀਓ ਫ਼ਾਈਲ ਖਿੱਚ ਕੇ ਛੱਡੋ",
+    "Dropped files": "ਖਿੱਚ ਕੇ ਛੱਡੀਆਂ ਫ਼ਾਈਲਾਂ",
     Duration: "ਮਿਆਦ",
     Edit: "ਸੰਪਾਦਿਤ ਕਰੋ",
     "Edit access key": "ਪਹੁੰਚ ਕੁੰਜੀ ਦਾ ਸੰਪਾਦਨ ਕਰੋ",
@@ -626,6 +627,8 @@ var keyStrings = {
     "Loading via proxy...": "ਪ੍ਰੌਕਸੀ ਰਾਹੀਂ ਲੋਡ ਹੋ ਰਿਹਾ ਹੈ...",
     "Loading. Please wait...": "ਲੋਡ ਹੋ ਰਿਹਾ ਹੈ... ਕਿਰਪਾ ਕਰਕੇ ਉਡੀਕ ਕਰੋ...",
     "Loading...": "ਲੋਡ ਹੋ ਰਿਹਾ ਹੈ...",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "ਸਥਾਨਕ HLS ਮੈਨੀਫੈਸਟ ਸਮਰਥਿਤ ਨਹੀਂ ਹਨ; ਮੈਨੀਫੈਸਟ ਦਾ HTTP(S) URL ਵਰਤੋ",
     "Local HTTP remote control": "ਸਥਾਨਕ HTTP ਰਿਮੋਟ ਕੰਟਰੋਲ",
     "Local source did not respond": "ਸਥਾਨਕ ਸਰੋਤ ਨੇ ਜਵਾਬ ਨਹੀਂ ਦਿੱਤਾ",
     "Local source unavailable": "ਸਥਾਨਕ ਸਰੋਤ ਉਪਲਬਧ ਨਹੀਂ ਹੈ",
@@ -760,9 +763,15 @@ var keyStrings = {
     "Player info:": "ਪਲੇਅਰ ਜਾਣਕਾਰੀ:",
     "Playing: %1": "ਚੱਲ ਰਿਹਾ ਹੈ: %1",
     Playlist: "ਪਲੇਲਿਸਟ",
+    "Playlist contains unsupported sources": "ਪਲੇਲਿਸਟ ਵਿੱਚ ਅਸਮਰਥਿਤ ਸਰੋਤ ਹਨ",
     "Playlist file": "ਪਲੇਲਿਸਟ ਫ਼ਾਈਲ",
+    "Playlist is empty or invalid": "ਪਲੇਲਿਸਟ ਖਾਲੀ ਜਾਂ ਅਵੈਧ ਹੈ",
     "Playlist is not loading directly...Loading via server...":
         "ਪਲੇਲਿਸਟ ਨੂੰ ਸਿੱਧਾ ਲੋਡ ਨਹੀਂ ਕੀਤਾ ਜਾ ਸਕਿਆ। ਸਰਵਰ ਰਾਹੀਂ ਲੋਡ ਕੀਤਾ ਜਾ ਰਿਹਾ ਹੈ...",
+    "Playlist is too large": "ਪਲੇਲਿਸਟ ਬਹੁਤ ਵੱਡੀ ਹੈ",
+    "Playlist local files must be dropped together with the playlist":
+        "ਪਲੇਲਿਸਟ ਦੀਆਂ ਸਥਾਨਕ ਫਾਈਲਾਂ ਪਲੇਲਿਸਟ ਨਾਲ ਹੀ ਡਰੌਪ ਕਰੋ",
+    "Playlist must use UTF-8": "ਪਲੇਲਿਸਟ ਲਈ UTF-8 ਲਾਜ਼ਮੀ ਹੈ",
     "Playlist Name": "ਪਲੇਲਿਸਟ ਦਾ ਨਾਮ",
     "Playlist URL": "ਪਲੇਲਿਸਟ URL",
     Plex: "Plex",

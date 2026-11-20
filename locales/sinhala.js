@@ -367,6 +367,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Dragon Media PRO සැකසුම්",
     "Drop one video file at a time": "වරකට එක් වීඩියෝ ගොනුවක් ඇද දමන්න",
+    "Dropped files": "ඇද දැමූ ගොනු",
     Duration: "කාලසීමාව",
     Edit: "සංස්කරණය කරන්න",
     "Edit access key": "සංස්කරණ ප්‍රවේශ යතුර",
@@ -629,6 +630,8 @@ var keyStrings = {
     "Loading via proxy...": "ප්‍රොක්සි හරහා පූරණය වෙමින්...",
     "Loading. Please wait...": "පූරණය වෙමින්... කරුණාකර රැඳී සිටින්න...",
     "Loading...": "පූරණය වෙමින්...",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "දේශීය HLS මැනිෆෙස්ට් සඳහා සහාය නැත; මැනිෆෙස්ට්හි HTTP(S) URL භාවිත කරන්න",
     "Local HTTP remote control": "දේශීය HTTP දුරස්ථ පාලකය",
     "Local source did not respond": "දේශීය මූලාශ්‍රය ප්‍රතිචාර දැක්වූයේ නැත",
     "Local source unavailable": "දේශීය මූලාශ්‍රය ලබා ගත නොහැක",
@@ -761,9 +764,15 @@ var keyStrings = {
     "Player info:": "වාදකයේ තොරතුරු:",
     "Playing: %1": "වාදනය වෙමින්: %1",
     Playlist: "ධාවන ලැයිස්තුව",
+    "Playlist contains unsupported sources": "ධාවන ලැයිස්තුවේ සහාය නොදක්වන මූලාශ්‍ර ඇත",
     "Playlist file": "ධාවන ලැයිස්තු ගොනුව",
+    "Playlist is empty or invalid": "ධාවන ලැයිස්තුව හිස් හෝ වලංගු නොවේ",
     "Playlist is not loading directly...Loading via server...":
         "ධාවන ලැයිස්තුව කෙලින්ම පූරණය කළ නොහැක. සේවාදායකය හරහා පූරණය වෙමින්...",
+    "Playlist is too large": "ධාවන ලැයිස්තුව විශාල වැඩියි",
+    "Playlist local files must be dropped together with the playlist":
+        "ධාවන ලැයිස්තුවේ දේශීය ගොනු එම ලැයිස්තුව සමඟම ඇද දමන්න",
+    "Playlist must use UTF-8": "ධාවන ලැයිස්තුව UTF-8 භාවිත කළ යුතුය",
     "Playlist Name": "ධාවන ලැයිස්තුවේ නම",
     "Playlist URL": "ධාවන ලැයිස්තුව URL",
     Plex: "Plex",

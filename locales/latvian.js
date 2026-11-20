@@ -377,6 +377,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO iestatījumi",
     "Drop one video file at a time":
         "Velciet un nometiet pa vienam video failam",
+    "Dropped files": "Nomestie faili",
     Duration: "Ilgums",
     Edit: "Rediģēt",
     "Edit access key": "Rediģēt piekļuves atslēgu",
@@ -648,6 +649,8 @@ var keyStrings = {
     "Loading via proxy...": "Ielādē caur starpniekserveri…",
     "Loading. Please wait...": "Ielādē… lūdzu, uzgaidiet…",
     "Loading...": "Ielādē…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Vietējie HLS manifesti netiek atbalstīti; izmantojiet HTTP(S) manifesta URL",
     "Local HTTP remote control": "Vietējā HTTP tālvadība",
     "Local source did not respond": "Vietējais avots neatbildēja",
     "Local source unavailable": "Vietējais avots nav pieejams",
@@ -783,9 +786,15 @@ var keyStrings = {
     "Player info:": "Atskaņotāja informācija:",
     "Playing: %1": "Tiek atskaņots: %1",
     Playlist: "Atskaņošanas saraksts",
+    "Playlist contains unsupported sources": "Sarakstā ir neatbalstīti avoti",
     "Playlist file": "Atskaņošanas saraksta fails",
+    "Playlist is empty or invalid": "Saraksts ir tukšs vai nederīgs",
     "Playlist is not loading directly...Loading via server...":
         "Atskaņošanas saraksts netiek ielādēts tieši...Ielāde caur serveri...",
+    "Playlist is too large": "Saraksts ir pārāk liels",
+    "Playlist local files must be dropped together with the playlist":
+        "Atskaņošanas saraksta lokālie faili jāievelk kopā ar sarakstu",
+    "Playlist must use UTF-8": "Sarakstam jāizmanto UTF-8",
     "Playlist Name": "Atskaņošanas saraksta nosaukums",
     "Playlist URL": "Atskaņošanas saraksta URL",
     Plex: "Plex",

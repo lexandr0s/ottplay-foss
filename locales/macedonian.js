@@ -384,6 +384,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Поставки за Dragon Media PRO",
     "Drop one video file at a time":
         "Повлечете и пуштете по една видеодатотека",
+    "Dropped files": "Повлечени датотеки",
     Duration: "Времетраење",
     Edit: "Уреди",
     "Edit access key": "Уреди клуч за пристап",
@@ -656,6 +657,8 @@ var keyStrings = {
     "Loading via proxy...": "Се вчитува преку прокси…",
     "Loading. Please wait...": "Се вчитува… ве молиме почекајте…",
     "Loading...": "Се вчитува…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Локалните HLS манифести не се поддржани; користете HTTP(S) URL за манифестот",
     "Local HTTP remote control": "Локална HTTP далечинска контрола",
     "Local source did not respond": "Локалниот извор не одговори",
     "Local source unavailable": "Локалниот извор е недостапен",
@@ -791,9 +794,16 @@ var keyStrings = {
     "Player info:": "Информации за плеерот:",
     "Playing: %1": "Се репродуцира: %1",
     Playlist: "Плејлиста",
+    "Playlist contains unsupported sources":
+        "Плејлистата содржи неподдржани извори",
     "Playlist file": "Датотека со плејлиста",
+    "Playlist is empty or invalid": "Плејлистата е празна или невалидна",
     "Playlist is not loading directly...Loading via server...":
         "Плејлистата не може да се вчита директно. Се вчитува преку сервер…",
+    "Playlist is too large": "Плејлистата е преголема",
+    "Playlist local files must be dropped together with the playlist":
+        "Локалните датотеки на плејлистата мора да се повлечат заедно со плејлистата",
+    "Playlist must use UTF-8": "Плејлистата мора да користи UTF-8",
     "Playlist Name": "Име на плејлистата",
     "Playlist URL": "URL на плејлистата",
     Plex: "Plex",

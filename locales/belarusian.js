@@ -101,6 +101,15 @@ var keyStrings = {
         "Аўтаматычны рэжым прайграе падтрыманыя файлы непасрэдна і пры неабходнасці выкарыстоўвае сумяшчальны HLS.",
     alhabet: "абвгдеёжзійклмнопрстуўфхцчшыьэюяʼ",
     always: "заўсёды",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Лакальныя маніфесты HLS не падтрымліваюцца; выкарыстоўвайце URL маніфеста HTTP(S)",
+    "Playlist contains unsupported sources":
+        "Спіс прайгравання змяшчае крыніцы, якія не падтрымліваюцца",
+    "Playlist is empty or invalid": "Спіс прайгравання пусты або няправільны",
+    "Playlist is too large": "Спіс прайгравання занадта вялікі",
+    "Playlist local files must be dropped together with the playlist":
+        "Лакальныя файлы трэба перацягнуць разам са спісам прайгравання",
+    "Playlist must use UTF-8": "Спіс прайгравання павінен выкарыстоўваць UTF-8",
     "and enter code": "і ўвядзіце код",
     Back: "Назад",
     "Back / Forward for 1 minute": "Назад / наперад на 1 хвіліну",
@@ -373,6 +382,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Налады Dragon Media PRO",
     "Drop one video file at a time": "Перацягвайце па адным відэафайле",
+    "Dropped files": "Перацягнутыя файлы",
     Duration: "Працягласць",
     Edit: "Рэдагаваць",
     "Edit access key": "Змяніць ключ доступу",

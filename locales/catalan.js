@@ -104,6 +104,15 @@ var keyStrings = {
         "El mode automàtic reprodueix directament els fitxers compatibles i utilitza HLS compatible quan cal.",
     alhabet: "·aàbcçdeéèfghiíïjklmnoóòpqrstuúüvwxyz",
     always: "sempre",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Els manifests HLS locals no són compatibles; feu servir l’URL d’un manifest HTTP(S)",
+    "Playlist contains unsupported sources":
+        "La llista conté fonts no compatibles",
+    "Playlist is empty or invalid": "La llista és buida o no és vàlida",
+    "Playlist is too large": "La llista és massa gran",
+    "Playlist local files must be dropped together with the playlist":
+        "Cal arrossegar els fitxers locals juntament amb la llista de reproducció",
+    "Playlist must use UTF-8": "La llista ha d’utilitzar UTF-8",
     "and enter code": "i introdueix el codi",
     Back: "Enrere",
     "Back / Forward for 1 minute": "Retrocedeix / avança 1 minut",
@@ -387,6 +396,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Configuració de Dragon Media PRO",
     "Drop one video file at a time":
         "Arrossegueu i deixeu anar un sol fitxer de vídeo cada vegada",
+    "Dropped files": "Fitxers arrossegats i deixats anar",
     Duration: "Durada",
     Edit: "Edita",
     "Edit access key": "Edita la clau d’accés",

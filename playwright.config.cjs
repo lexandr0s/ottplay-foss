@@ -34,6 +34,7 @@ module.exports = defineConfig({
         "remote-screenshot.spec.cjs",
         "remote-notifications.spec.cjs",
         "notification-persistence.spec.cjs",
+        "home-focus.spec.cjs",
         "remote-plex.spec.cjs",
         "remote-favorites.spec.cjs",
         "global-favorites-mixed.spec.cjs",

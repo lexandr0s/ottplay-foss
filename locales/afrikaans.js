@@ -102,6 +102,15 @@ var keyStrings = {
         "Outomaties speel ondersteunde lêers direk af en gebruik versoenbare HLS wanneer nodig.",
     alhabet: "aáâbcdeéèêëfghiîïjklmnoôöpqrstuûvwxyź̂̀̈",
     always: "altyd",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Plaaslike HLS-manifeste word nie ondersteun nie; gebruik ’n HTTP(S)-manifes-URL",
+    "Playlist contains unsupported sources":
+        "Die snitlys bevat onondersteunde bronne",
+    "Playlist is empty or invalid": "Die snitlys is leeg of ongeldig",
+    "Playlist is too large": "Die snitlys is te groot",
+    "Playlist local files must be dropped together with the playlist":
+        "Sleep plaaslike lêers saam met die snitlys hierheen",
+    "Playlist must use UTF-8": "Die snitlys moet UTF-8 gebruik",
     "and enter code": "en voer die kode in",
     Back: "Terug",
     "Back / Forward for 1 minute": "Spring 1 minuut terug / vorentoe",
@@ -378,6 +387,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Dragon Media PRO-instellings",
     "Drop one video file at a time": "Sleep en los een videolêer op 'n slag",
+    "Dropped files": "Ingesleepte lêers",
     Duration: "Duur",
     Edit: "Wysig",
     "Edit access key": "Wysig toegangsleutel",

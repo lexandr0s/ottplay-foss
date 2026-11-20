@@ -379,6 +379,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Dragon Media PRO nastavenia",
     "Drop one video file at a time": "Presuňte vždy iba jeden videosúbor",
+    "Dropped files": "Presunuté súbory",
     Duration: "Trvanie",
     Edit: "Upraviť",
     "Edit access key": "Upraviť prístupový kľúč",
@@ -651,6 +652,8 @@ var keyStrings = {
     "Loading via proxy...": "Načítava sa cez proxy…",
     "Loading. Please wait...": "Načítava sa... čakajte prosím...",
     "Loading...": "Načítava sa...",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Miestne manifesty HLS nie sú podporované; použite URL manifestu HTTP(S)",
     "Local HTTP remote control": "Miestne diaľkové ovládanie HTTP",
     "Local source did not respond": "Lokálny zdroj neodpovedal",
     "Local source unavailable": "Lokálny zdroj nie je dostupný",
@@ -786,9 +789,16 @@ var keyStrings = {
     "Player info:": "informácie o prehrávači médií:",
     "Playing: %1": "Prehráva sa: %1",
     Playlist: "Zoznam skladieb",
+    "Playlist contains unsupported sources":
+        "Zoznam skladieb obsahuje nepodporované zdroje",
     "Playlist file": "Súbor zoznamu skladieb",
+    "Playlist is empty or invalid": "Zoznam skladieb je prázdny alebo neplatný",
     "Playlist is not loading directly...Loading via server...":
         "Zoznam skladieb sa nepodarilo načítať priamo. Načítava sa cez server…",
+    "Playlist is too large": "Zoznam skladieb je príliš veľký",
+    "Playlist local files must be dropped together with the playlist":
+        "Miestne súbory zoznamu skladieb treba pridať spolu so zoznamom",
+    "Playlist must use UTF-8": "Zoznam skladieb musí používať UTF-8",
     "Playlist Name": "Názov zoznamu skladieb",
     "Playlist URL": "Zoznam videí URL",
     Plex: "Plex",

@@ -377,6 +377,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO sazlamalary",
     "Drop one video file at a time":
         "Her gezek diňe bir wideo faýlyny süýräp taşlaň",
+    "Dropped files": "Süýräp taşlanan faýllar",
     Duration: "Dowamlylygy",
     Edit: "Redaktirle",
     "Edit access key": "Giriş açaryny redaktirle",
@@ -642,6 +643,8 @@ var keyStrings = {
     "Loading via proxy...": "Proksi arkaly ýüklenýär…",
     "Loading. Please wait...": "Ýüklenýär… garaşyň…",
     "Loading...": "Ýüklenýär…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Ýerli HLS manifestleri goldanylmaýar; manifestiň HTTP(S) URL salgysyny ulanyň",
     "Local HTTP remote control": "Ýerli HTTP uzakdan dolandyryş",
     "Local source did not respond": "Ýerli çeşme jogap bermedi",
     "Local source unavailable": "Ýerli çeşme elýeterli däl",
@@ -776,9 +779,16 @@ var keyStrings = {
     "Player info:": "Pleýer barada maglumat:",
     "Playing: %1": "Oýnadylýar: %1",
     Playlist: "Oýnatma sanawy",
+    "Playlist contains unsupported sources":
+        "Pleýlistde goldanylmaýan çeşmeler bar",
     "Playlist file": "Oýnatma sanawynyň faýly",
+    "Playlist is empty or invalid": "Pleýlist boş ýa-da nädogry",
     "Playlist is not loading directly...Loading via server...":
         "Oýnatma sanawy göni ýüklenmedi. Serwer arkaly ýüklenýär…",
+    "Playlist is too large": "Pleýlist juda uly",
+    "Playlist local files must be dropped together with the playlist":
+        "Pleýlistiň ýerli faýllaryny pleýlist bilen bilelikde taşlaň",
+    "Playlist must use UTF-8": "Pleýlist UTF-8 ulanmalydyr",
     "Playlist Name": "Oýnatma sanawynyň ady",
     "Playlist URL": "Oýnatma sanawynyň URL salgysy",
     Plex: "Plex",

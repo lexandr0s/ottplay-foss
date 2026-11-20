@@ -37,6 +37,10 @@ try {
         path.join(__dirname, "../scripts/offline-shell.cjs"),
         path.join(root, "scripts/offline-shell.cjs")
     );
+    fs.copyFileSync(
+        path.join(__dirname, "../scripts/home-integration-assets.cjs"),
+        path.join(root, "scripts/home-integration-assets.cjs")
+    );
     fs.writeFileSync(
         path.join(root, "scripts/classic-bundle.cjs"),
         "module.exports = " +
@@ -63,6 +67,32 @@ try {
         "diagnostics",
     ])
         fs.mkdirSync(path.join(root, "dist", directory), { recursive: true });
+    const homeFiles = [
+        "index.html",
+        "style.css",
+        "core.js",
+        "webos-host.js",
+        "app.js",
+        "host.js",
+    ];
+    const home = path.join(root, "dist/home");
+    fs.mkdirSync(home);
+    const homeManifest = {
+        version: 1,
+        files: homeFiles.map((name) => {
+            const body = Buffer.from("public:" + name);
+            fs.writeFileSync(path.join(home, name), body);
+            return {
+                name,
+                bytes: body.length,
+                sha256: createHash("sha256").update(body).digest("hex"),
+            };
+        }),
+    };
+    fs.writeFileSync(
+        path.join(home, "assets.json"),
+        JSON.stringify(homeManifest)
+    );
     const bundle = "var fixture = true;\n";
     const hostedFiles = [
         "hosted/epg-worker.js",
@@ -186,6 +216,11 @@ try {
             sha256: createHash("sha256").update(bytes).digest("hex"),
         });
     }
+    for (const name of [...homeFiles, "assets.json"])
+        assert.deepEqual(
+            execFileSync("tar", ["-xOf", archive, "./dist/home/" + name]),
+            fs.readFileSync(path.join(home, name))
+        );
     assert.equal(entries.includes("./dist/provider-obsolete.js"), false);
     assert.deepEqual(
         Object.keys(metadata.optionalBundles).sort(),
@@ -338,6 +373,48 @@ try {
         );
         fs.copyFileSync(path.join(browserAssets, file), staged);
     }
+    const core = path.join(home, "core.js"),
+        originalCore = fs.readFileSync(core);
+    for (const kind of ["missing", "stale", "symlink", "hardlink", "private"]) {
+        fs.unlinkSync(core);
+        if (kind === "stale") fs.writeFileSync(core, "changed");
+        if (kind === "symlink") fs.symlinkSync(path.join(home, "app.js"), core);
+        if (kind === "hardlink") fs.linkSync(path.join(home, "app.js"), core);
+        if (kind === "private") {
+            fs.writeFileSync(core, originalCore);
+            fs.writeFileSync(path.join(home, "secret.json"), "private");
+        }
+        assert.throws(
+            packageAndRead,
+            "Unsafe or stale Home payload must fail: " + kind
+        );
+        fs.rmSync(core, { force: true });
+        fs.rmSync(path.join(home, "secret.json"), { force: true });
+        fs.writeFileSync(core, originalCore);
+    }
+    for (const kind of [
+        "missing-entry",
+        "duplicate-entry",
+        "wrong-bytes",
+        "wrong-digest",
+        "private-entry",
+    ]) {
+        const value = JSON.parse(JSON.stringify(homeManifest));
+        if (kind === "missing-entry") value.files.pop();
+        if (kind === "duplicate-entry") value.files[1] = value.files[0];
+        if (kind === "wrong-bytes") value.files[0].bytes++;
+        if (kind === "wrong-digest") value.files[0].sha256 = "0".repeat(64);
+        if (kind === "private-entry") value.files[0].name = "../secret.json";
+        fs.writeFileSync(path.join(home, "assets.json"), JSON.stringify(value));
+        assert.throws(
+            packageAndRead,
+            "Invalid Home manifest must fail: " + kind
+        );
+    }
+    fs.writeFileSync(
+        path.join(home, "assets.json"),
+        JSON.stringify(homeManifest)
+    );
     // The browser server must retain the independent source inventory even if
     // a malformed package omits both a provider file and its metadata entry.
     const candidate = path.join(root, "incomplete-browser-candidate");

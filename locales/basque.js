@@ -104,6 +104,16 @@ var keyStrings = {
         "Modu automatikoak bateragarriak diren fitxategiak zuzenean erreproduzitzen ditu, eta HLS bateragarria erabiltzen du behar denean.",
     alhabet: "abcçdefghijklmnñopqrstuvwxyz",
     always: "beti",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Tokiko HLS manifestuak ez dira onartzen; erabili HTTP(S) manifestu baten URLa",
+    "Playlist contains unsupported sources":
+        "Erreprodukzio-zerrendak onartu gabeko iturriak ditu",
+    "Playlist is empty or invalid":
+        "Erreprodukzio-zerrenda hutsik dago edo baliogabea da",
+    "Playlist is too large": "Erreprodukzio-zerrenda handiegia da",
+    "Playlist local files must be dropped together with the playlist":
+        "Erreprodukzio-zerrendako tokiko fitxategiak zerrendarekin batera arrastatu eta jaregin behar dira",
+    "Playlist must use UTF-8": "Erreprodukzio-zerrendak UTF-8 erabili behar du",
     "and enter code": "eta sartu kodea",
     Back: "Atzera",
     "Back / Forward for 1 minute": "Egin minutu 1 atzera / aurrera",
@@ -384,6 +394,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO ezarpenak",
     "Drop one video file at a time":
         "Arrastatu eta jaregin bideo-fitxategi bakarra aldi bakoitzean",
+    "Dropped files": "Arrastatu eta jaregindako fitxategiak",
     Duration: "Iraupena",
     Edit: "Editatu",
     "Edit access key": "Editatu sarbide-gakoa",

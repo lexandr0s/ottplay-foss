@@ -41,7 +41,12 @@ class DownloadTests(unittest.TestCase):
         with patch.object(BUILDER.urllib.request, "urlopen", return_value=response) as request, \
                 patch.object(BUILDER.time, "sleep") as sleep:
             BUILDER.fetch(self.item, self.destination)
-        request.assert_called_once_with(self.item["url"], timeout=60)
+        request.assert_called_once()
+        outgoing = request.call_args.args[0]
+        self.assertEqual(outgoing.full_url, self.item["url"])
+        self.assertEqual(outgoing.get_header("User-agent"),
+                         "OTTPlay-FOSS/1 (+https://github.com/open-ott-play/ottplay-foss)")
+        self.assertEqual(request.call_args.kwargs, {"timeout": 60})
         response.read.assert_called_once_with(5)
         self.assertTrue(response.closed)
         sleep.assert_not_called()
@@ -58,7 +63,7 @@ class DownloadTests(unittest.TestCase):
                     patch.object(BUILDER.urllib.request, "urlopen", side_effect=[failure, self.response()]) as request, \
                     patch.object(BUILDER.time, "sleep") as sleep:
                 BUILDER.fetch(self.item, self.destination)
-                self.assertEqual(request.call_args_list, [call(self.item["url"], timeout=60)] * 2)
+                self.assertEqual(request.call_args_list, [call(request.call_args.args[0], timeout=60)] * 2)
                 sleep.assert_called_once_with(1)
                 self.assertEqual(self.destination.read_bytes(), b"good")
 
@@ -89,7 +94,7 @@ class DownloadTests(unittest.TestCase):
                     urllib.error.URLError("DNS failure"),
                     urllib.error.HTTPError("https://example.invalid/redirect", 503, "temporary", {}, io.BytesIO())]
         failures.extend(urllib.error.HTTPError(self.item["url"], code, "terminal", {}, io.BytesIO())
-                        for code in (401, 404, 429, 501))
+                        for code in (401, 403, 404, 429, 501))
         for failure in failures:
             with self.subTest(failure=failure), \
                     patch.object(BUILDER.urllib.request, "urlopen", side_effect=failure) as request, \
@@ -131,6 +136,26 @@ class DownloadTests(unittest.TestCase):
 
 
 class BuilderTests(unittest.TestCase):
+    def test_reviewed_security_revision_accepts_only_authenticated_host_plugins(self):
+        # These identities are bound to Ubuntu's signed 0.7 package indexes.
+        expected = {
+            "aarch64": "cf9793404b3ead8ab7ac85730a02faed4b971719cf8901bfbe925081b2ead485",
+            "x86_64": "5459418a1ff25e78089377bf2f826fca731f2c254be83d9118fcf68b04c814fa",
+        }
+        previous = {
+            "aarch64": "f9c490eac865f4294b4f59f5b819f527e927439ca3e7ebfb2ad82b4f7fdde4a5",
+            "x86_64": "ba79059775cedb90a13084086d1d4fd9440b2a0b832ad41a0c9108c8df2c35ec",
+        }
+        for machine, digest in expected.items():
+            with self.subTest(machine=machine):
+                host = ({"ID": "ubuntu", "VERSION_ID": "24.04"}, machine)
+                BUILDER.validate_host(CONFIG, *host, "1.24.2-1ubuntu0.7", digest)
+                for version in ("1.24.2-1ubuntu0.6", "1.24.2-1ubuntu0.8"):
+                    with self.assertRaises(ValueError):
+                        BUILDER.validate_host(CONFIG, *host, version, digest)
+                with self.assertRaises(ValueError):
+                    BUILDER.validate_host(CONFIG, *host, "1.24.2-1ubuntu0.7", previous[machine])
+
     def test_known_architectures_require_exact_host_bytes(self):
         for machine, entry in CONFIG["architectures"].items():
             with self.subTest(machine=machine):

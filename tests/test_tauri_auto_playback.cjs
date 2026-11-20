@@ -373,6 +373,139 @@ function localStallFixture() {
     f.w.startCoreEngine("local.mp4", 195);
     return f;
 }
+function droppedHttpFixture() {
+    const f = fixture();
+    const url = "https://media.example.test/clip.mp4";
+    const events = [];
+    let owned = true;
+    f.w.__ottLocalMedia = {
+        captureDroppedHttpFile: (source) =>
+            source === url ? () => owned : undefined,
+        isPlaybackUrl: (source) => source === url,
+        playbackTransport: (source) => (source === url ? "file" : undefined),
+    };
+    const lease = f.w.openCoreEngineLease({ url }, (event) =>
+        events.push(event)
+    );
+    f.w.video.duration = 900;
+    return {
+        ...f,
+        url,
+        events,
+        lease,
+        replace: () => {
+            owned = false;
+        },
+    };
+}
+
+test("dropped HTTP resume retries a failed reattachment at the retained cursor", () => {
+    const f = droppedHttpFixture();
+    ready(f.w.video, true);
+    f.w.video.currentTime = 240;
+    f.w.video.error = { code: 2 };
+    f.w.video.emit("error");
+    f.advance(500);
+    for (const delay of [1000, 2000, 4000, 8000, 16000, 30000]) {
+        assert.equal(f.w.video.readyState, 0);
+        f.w.video.error = { code: 4 };
+        f.w.video.emit("error");
+        f.advance(delay - 1);
+        assert.ok(f.w.coreStreamAttempt.state().pending);
+        f.advance(1);
+    }
+    ready(f.w.video, true);
+    assert.equal(f.w.video.currentTime, 240);
+    assert.equal(f.w.video.sourceHistory.filter(Boolean).length, 8);
+    assert.ok(
+        f.w.video.sourceHistory.filter(Boolean).every((url) => url === f.url)
+    );
+    assert.equal(f.w.coreStreamAttempt.state().terminal, false);
+});
+
+test("dropped HTTP hold and seek retain the latest cursor while Stop or replacement fences retries", () => {
+    for (const action of ["stop", "replace"]) {
+        const f = droppedHttpFixture();
+        ready(f.w.video, true);
+        f.w.video.currentTime = 240;
+        f.w.video.error = { code: 2 };
+        f.w.video.emit("error");
+        f.advance(0);
+        f.lease.pause();
+        f.advance(31000);
+        assert.equal(f.w.video.sourceHistory.filter(Boolean).length, 1);
+        f.lease.seek(50);
+        f.lease.resume();
+        f.advance(500);
+        ready(f.w.video, true);
+        assert.equal(f.w.video.currentTime, 50);
+        f.w.video.error = { code: 2 };
+        f.w.video.emit("error");
+        f.advance(0);
+        if (action === "stop") f.lease.dispose();
+        else f.replace();
+        f.advance(31000);
+        assert.equal(f.w.video.sourceHistory.filter(Boolean).length, 2);
+    }
+});
+
+test("dropped HTTP short reads do not become EOF and real EOF still reaches the queue", () => {
+    const f = droppedHttpFixture();
+    ready(f.w.video, true);
+    f.w.video.currentTime = 240;
+    f.w.video.ended = true;
+    f.w.video.emit("ended");
+    assert.equal(f.events.includes("ended"), false);
+    assert.equal(f.w.coreStreamAttempt.state().pending, true);
+    f.advance(500);
+    f.w.video.ended = false;
+    ready(f.w.video, true);
+    assert.equal(f.w.video.currentTime, 240);
+    f.w.video.currentTime = f.w.video.duration;
+    f.w.video.ended = true;
+    f.w.video.emit("ended");
+    assert.equal(f.events.includes("ended"), true);
+});
+
+test("dropped HTTP does not reload playable media held by autoplay policy", () => {
+    const f = droppedHttpFixture();
+    f.w.video.readyState = 4;
+    f.w.video.paused = true;
+    f.advance(61000);
+    assert.equal(f.w.video.sourceHistory.filter(Boolean).length, 1);
+    assert.equal(f.w.coreStreamAttempt.state().pending, false);
+});
+
+test("dropped HTTP playback controls can pause recovery and explicitly resume it", () => {
+    const f = droppedHttpFixture();
+    f.w.coreMediaBackend = {
+        current: () => ({
+            pause: f.lease.pause,
+            resume: f.lease.resume,
+            snapshot: () => ({ phase: "loading" }),
+        }),
+    };
+    ready(f.w.video, true);
+    f.w.video.currentTime = 240;
+    f.w.video.paused = true;
+    f.w.video.error = { code: 2 };
+    f.w.video.emit("error");
+    f.advance(0);
+    assert.equal(f.w.stbIsPlaying(), false, "decoder is not playing");
+    assert.equal(f.w.stbIsPlaying(true), true, "toggle can pause the retry");
+    f.w.stbPause();
+    assert.equal(f.w.stbIsPlaying(true), false);
+    f.advance(500);
+    assert.equal(f.w.video.sourceHistory.filter(Boolean).length, 1);
+    // Classic and Modern set playback intent before invoking Continue.
+    f.w.forcePlay = true;
+    f.w.stbContinue();
+    f.advance(500);
+    ready(f.w.video, true);
+    assert.equal(f.w.video.currentTime, 240);
+    assert.equal(f.w.video.sourceHistory.filter(Boolean).length, 2);
+});
+
 test("Local native startup stall retries twice at its retained position then stops", () => {
     const f = localStallFixture();
     for (let retry = 0; retry < 2; retry++) {
@@ -3445,7 +3578,11 @@ async function run() {
     }
     if (failures) process.exitCode = 1;
 }
-run().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-});
+// Reuse the actual core engine fixture in Local admission integration tests.
+// Direct execution (including CI's node invocation) still runs every case.
+module.exports = { fixture };
+if (require.main === module)
+    run().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+    });

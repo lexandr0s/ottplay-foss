@@ -102,6 +102,15 @@ var keyStrings = {
         "Қолдау көрсетілетін файлдарды автоматты түрде ойнатады және қажет болғанда үйлесімді HLS пайдаланады.",
     alhabet: "аәбвгғдеёжзийкқлмнңоөпрстуұүфхһцчшщъыіьэюя",
     always: "әрқашан",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Жергілікті HLS манифесттеріне қолдау көрсетілмейді; HTTP(S) манифестінің URL мекенжайын пайдаланыңыз",
+    "Playlist contains unsupported sources":
+        "Ойнату тізімінде қолдау көрсетілмейтін көздер бар",
+    "Playlist is empty or invalid": "Ойнату тізімі бос немесе жарамсыз",
+    "Playlist is too large": "Ойнату тізімі тым үлкен",
+    "Playlist local files must be dropped together with the playlist":
+        "Жергілікті файлдарды ойнату тізімімен бірге сүйреп апару керек",
+    "Playlist must use UTF-8": "Ойнату тізімі UTF-8 қолдануы керек",
     "and enter code": "және кодты енгізіңіз",
     Back: "Артқа",
     "Back / Forward for 1 minute": "1 минут артқа / алға",
@@ -376,6 +385,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO баптаулары",
     "Drop one video file at a time":
         "Бір уақытта бір бейнефайлды сүйреп апарып тастаңыз",
+    "Dropped files": "Сүйреп әкелінген файлдар",
     Duration: "Ұзақтығы",
     Edit: "Өңдеу",
     "Edit access key": "Кіру кілтін өңдеу",

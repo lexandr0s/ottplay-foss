@@ -2920,6 +2920,33 @@ console.log(
     "OK: live recovery defaults and semantic values persist through the settings editor"
 );
 
+{
+    const { w, typed, stored } = fixture("tauri");
+    const rows = () => {
+        w.settingsInterface();
+        return [
+            w.listArray.find((row) => row.settingId === "droppedFileShuffle"),
+            w.listArray.find((row) => row.settingId === "droppedFileRepeat"),
+        ];
+    };
+    let [shuffle, repeat] = rows();
+    assert.equal(typed().droppedFileShuffle, 0);
+    assert.equal(typed().droppedFileRepeat, 0);
+    shuffle.val = 1;
+    repeat.val = 2;
+    w.listKeyHandlerFn(w.keys.RETURN);
+    assert.equal(stored.has("sDroppedFileShuffle"), false);
+    assert.equal(stored.has("sDroppedFileRepeat"), false);
+    [shuffle, repeat] = rows();
+    shuffle.val = 1;
+    repeat.val = 1;
+    assert.equal(w.__ottSettingsEditor.save(), true);
+    const reopened = fixture("tauri", false, "full", undefined, stored);
+    vm.runInContext("loadSettings();", reopened.w);
+    assert.equal(reopened.typed().droppedFileShuffle, 1);
+    assert.equal(reopened.typed().droppedFileRepeat, 1);
+}
+
 for (const profile of ["server", "tauri", "capacitor-android"]) {
     const { w, typed, stored } = fixture(profile);
     assert.equal(typed().showAllCategory, 1);

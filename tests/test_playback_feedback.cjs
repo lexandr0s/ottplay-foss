@@ -512,6 +512,7 @@ function companionCoreFixture() {
     let playCalls = 0;
     Object.assign(w, {
         _coreAutoHlsUsed: false,
+        _coreNativeAttempt: 0,
         _corePauseRevision: 0,
         _corePendingSeekPosition: null,
         _coreSeekRevision: 0,
@@ -583,6 +584,7 @@ function companionCoreFixture() {
         true
     );
     const names = [
+        "coreCall",
         "cancelCoreSourcePreparation",
         "cancelCoreStreamAttempt",
         "coreNormalizedMse",

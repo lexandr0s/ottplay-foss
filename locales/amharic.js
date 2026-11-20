@@ -99,6 +99,14 @@ var keyStrings = {
     alhabet:
         "ሀሁሂሃሄህሆለሉሊላሌልሎሏሐሑሒሓሔሕሖሗመሙሚማሜምሞሟሠሡሢሣሤሥሦሧረሩሪራሬርሮሯሰሱሲሳሴስሶሷሸሹሺሻሼሽሾሿቀቁቂቃቄቅቆቈቊቋቌቍበቡቢባቤብቦቧቨቩቪቫቬቭቮቯተቱቲታቴትቶቷቸቹቺቻቼችቾቿኀኁኂኃኄኅኆኈኊኋኌኍነኑኒናኔንኖኗኘኙኚኛኜኝኞኟአኡኢኣኤእኦኧከኩኪካኬክኮኰኲኳኴኵኸኹኺኻኼኽኾወዉዊዋዌውዎዐዑዒዓዔዕዖዘዙዚዛዜዝዞዟዠዡዢዣዤዥዦዧየዩዪያዬይዮደዱዲዳዴድዶዷጀጁጂጃጄጅጆጇገጉጊጋጌግጎጐጒጓጔጕጠጡጢጣጤጥጦጧጨጩጪጫጬጭጮጯጰጱጲጳጴጵጶጷጸጹጺጻጼጽጾጿፀፁፂፃፄፅፆፈፉፊፋፌፍፎፏፐፑፒፓፔፕፖፗ፡።፣፤፥፦፧፨፩፪፫፬፭፮፯፰፱፲፳፴፵፶፷፸፹፺፻፼",
     always: "ሁልጊዜ",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "አካባቢያዊ HLS ማኒፌስቶች አይደገፉም፤ HTTP(S) ማኒፌስት URL ይጠቀሙ",
+    "Playlist contains unsupported sources": "የማጫወቻ ዝርዝሩ ያልተደገፉ ምንጮችን ይዟል",
+    "Playlist is empty or invalid": "የማጫወቻ ዝርዝሩ ባዶ ወይም ልክ ያልሆነ ነው",
+    "Playlist is too large": "የማጫወቻ ዝርዝሩ በጣም ትልቅ ነው",
+    "Playlist local files must be dropped together with the playlist":
+        "የማጫወቻ ዝርዝሩ አካባቢያዊ ፋይሎች ከዝርዝሩ ጋር አብረው መጎተት አለባቸው",
+    "Playlist must use UTF-8": "የማጫወቻ ዝርዝሩ UTF-8 መጠቀም አለበት",
     "and enter code": "እና ኮዱን ያስገቡ",
     Back: "ተመለስ",
     "Back / Forward for 1 minute": "1 ደቂቃ ወደ ኋላ / ወደ ፊት ዝለል",
@@ -360,6 +368,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "የDragon Media PRO ቅንብሮች",
     "Drop one video file at a time": "በአንድ ጊዜ አንድ የቪዲዮ ፋይል ይጎትቱና ይጣሉ",
+    "Dropped files": "ተጎትተው የተጣሉ ፋይሎች",
     Duration: "ቆይታ",
     Edit: "አርትዕ",
     "Edit access key": "የመዳረሻ ቁልፍ አርትዕ",

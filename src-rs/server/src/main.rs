@@ -3,7 +3,11 @@ mod debug_api;
 mod companion;
 mod control_discovery;
 mod hosted_epg;
+mod media_connection;
 mod msx;
+mod multiview_broker;
+mod multiview_operator;
+mod multiview_service;
 mod normalization;
 mod stalker_api;
 mod swop;
@@ -127,6 +131,12 @@ struct Cli {
     /// Private JSON configuration for --stalker-relay-only.
     #[arg(long, requires = "stalker_relay_only")]
     stalker_relay_config: Option<std::path::PathBuf>,
+    /// Protected operator configuration for private multiview and optional media.
+    #[arg(long)]
+    multiview_config: Option<std::path::PathBuf>,
+    /// Serve only the private compositor API and health; no assets or EPG fetches.
+    #[arg(long, requires = "multiview_config")]
+    multiview_only: bool,
     /// HTTP listen ports. Repeat --port; defaults to 8080 only when omitted.
     #[arg(long, action = clap::ArgAction::Append, default_value = "8080")]
     port: Vec<u16>,
@@ -141,6 +151,46 @@ struct Cli {
 }
 
 impl Cli {
+    fn private_multiview(&self) -> anyhow::Result<Option<Arc<multiview_service::Service>>> {
+        let Some(path) = &self.multiview_config else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            !self.stalker_relay_only
+                && std::env::var_os("OTT_OFFLINE_MEDIA_READONLY_PATHS").is_none()
+                && std::env::var("OTT_NORMALIZATION_ONLY").as_deref() != Ok("1")
+                && !hosted_epg::enabled()?,
+            "Private multiview cannot be combined with a dedicated service mode"
+        );
+        anyhow::ensure!(
+            !self.multiview_only
+                || (!companion::configured()
+                    && std::env::var_os("OTT_NORMALIZATION_CONFIG").is_none()
+                    && !self.allow_lan_local_media),
+            "Private-only multiview cannot be combined with another media service"
+        );
+        let bind_ip = self
+            .host
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| anyhow::anyhow!("Private multiview requires an explicit listener IP"))?;
+        let (http, https) = self.listen_ports()?;
+        let planned = [(false, http), (true, https)]
+            .into_iter()
+            .flat_map(|(tls, ports)| {
+                ports
+                    .into_iter()
+                    .map(move |port| multiview_service::ListenerEndpoint {
+                        local_addr: std::net::SocketAddr::new(bind_ip, port),
+                        tls,
+                    })
+            })
+            .collect::<Vec<_>>();
+        let config = multiview_operator::load_configuration(path)?;
+        Ok(Some(Arc::new(multiview_service::Service::configured(
+            config, &planned,
+        )?)))
+    }
+
     fn listen_ports(&self) -> anyhow::Result<(Vec<u16>, Vec<u16>)> {
         let https = if self.cert.is_some() && self.https_port.is_empty() {
             vec![8443]
@@ -198,17 +248,212 @@ async fn supervise_listeners(mut tasks: JoinSet<anyhow::Result<()>>) -> anyhow::
     Err(failure)
 }
 
+fn media_transport_unavailable() -> axum::response::Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            ("cache-control", "no-store"),
+            ("referrer-policy", "no-referrer"),
+            ("x-content-type-options", "nosniff"),
+        ],
+        Json(serde_json::json!({"version":1,"error":"backend_unavailable"})),
+    )
+        .into_response()
+}
+
+async fn dispatch_media_request(
+    mut app: Router,
+    control: media_connection::ConnectionControl,
+    mut request: axum::extract::Request,
+) -> Result<axum::response::Response, std::convert::Infallible> {
+    let version = request.version();
+    // This control belongs to the accepted socket, never the listener/router.
+    request.extensions_mut().insert(control.clone());
+    let response = match app.call(request).await {
+        Ok(response) => response,
+        Err(never) => match never {},
+    };
+    // Only the broker's admitted-media extension can arm supervision. Public
+    // and unsuccessful private replies pass through unchanged, including H2.
+    Ok(control
+        .prepare_response(response, version)
+        .unwrap_or_else(|_| media_transport_unavailable()))
+}
+
+async fn serve_private_http(listener: TcpListener, app: Router) -> anyhow::Result<()> {
+    let mut connections = JoinSet::new();
+    loop {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+        };
+        let (stream, peer) = match accepted {
+            Ok(connection) => connection,
+            Err(error) => {
+                // Match axum 0.7's accept retry policy; no public request timer.
+                if !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::ConnectionReset
+                ) {
+                    tracing::error!("HTTP accept error");
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                continue;
+            }
+        };
+        let app = app
+            .clone()
+            .layer(axum::Extension(axum::extract::ConnectInfo(peer)));
+        connections.spawn(async move {
+            let control = media_connection::ConnectionControl::default();
+            let io = hyper_util::rt::TokioIo::new(control.watch_io(stream));
+            let request_control = control.clone();
+            let service = hyper::service::service_fn(
+                move |request: hyper::Request<hyper::body::Incoming>| {
+                    dispatch_media_request(
+                        app.clone(),
+                        request_control.clone(),
+                        request.map(axum::body::Body::new),
+                    )
+                },
+            );
+            // Preserve axum::serve's auto HTTP selection and WebSocket upgrades.
+            let builder =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+            match control
+                .supervise(builder.serve_connection_with_upgrades(io, service))
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    let failure = control.failure_recorder();
+                    let hyper_error = error.downcast_ref::<hyper::Error>();
+                    eprintln!(
+                        "private_media_connection id={} result=hyper_error typed={} parse={} user={} canceled={} closed={} incomplete={} body_write_aborted={} shutdown={} timeout={} authority_failure={:?}",
+                        failure.id(),
+                        hyper_error.is_some(),
+                        hyper_error.is_some_and(hyper::Error::is_parse),
+                        hyper_error.is_some_and(hyper::Error::is_user),
+                        hyper_error.is_some_and(hyper::Error::is_canceled),
+                        hyper_error.is_some_and(hyper::Error::is_closed),
+                        hyper_error.is_some_and(hyper::Error::is_incomplete_message),
+                        hyper_error.is_some_and(hyper::Error::is_body_write_aborted),
+                        hyper_error.is_some_and(hyper::Error::is_shutdown),
+                        hyper_error.is_some_and(hyper::Error::is_timeout),
+                        failure.first(),
+                    );
+                    if let Some(event) = failure.terminal(media_connection::attempt::Transport::Http) {
+                        eprintln!("{event}");
+                    }
+                }
+                Err(stop) => {
+                    let failure = control.failure_recorder();
+                    eprintln!(
+                        "private_media_connection id={} result=supervisor_stop stop={stop:?} authority_failure={:?}",
+                        failure.id(),
+                        failure.first(),
+                    );
+                    if let Some(event) = failure.terminal(media_connection::attempt::Transport::Http) {
+                        eprintln!("{event}");
+                    }
+                }
+            }
+        });
+    }
+}
+
+async fn serve_private_tls_connection(
+    stream: tokio::net::TcpStream,
+    acceptor: TlsAcceptor,
+    app: Router,
+) {
+    let control = media_connection::ConnectionControl::default();
+    // Observe actual TCP writes below TLS buffering. No lease/timer exists
+    // during this handshake, and ordinary responses never arm one.
+    let tls = match acceptor.accept(control.watch_io(stream)).await {
+        Ok(stream) => stream,
+        Err(_) => {
+            tracing::warn!("TLS handshake failed");
+            return;
+        }
+    };
+    let io = hyper_util::rt::TokioIo::new(tls);
+    let request_control = control.clone();
+    let service =
+        hyper::service::service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+            dispatch_media_request(
+                app.clone(),
+                request_control.clone(),
+                request.map(axum::body::Body::new),
+            )
+        });
+    // TLS ALPN remains HTTP/1.1. Keep admitted lease ownership through final
+    // flush/shutdown; the helper closes only admitted private-media responses.
+    match control
+        .supervise(
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(io, service)
+                .with_upgrades(),
+        )
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            let failure = control.failure_recorder();
+            eprintln!(
+                "private_media_tls_connection id={} result=hyper_error parse={} user={} canceled={} closed={} incomplete={} body_write_aborted={} shutdown={} timeout={} authority_failure={:?}",
+                failure.id(),
+                error.is_parse(),
+                error.is_user(),
+                error.is_canceled(),
+                error.is_closed(),
+                error.is_incomplete_message(),
+                error.is_body_write_aborted(),
+                error.is_shutdown(),
+                error.is_timeout(),
+                failure.first(),
+            );
+            if let Some(event) = failure.terminal(media_connection::attempt::Transport::Tls) {
+                eprintln!("{event}");
+            }
+        }
+        Err(stop) => {
+            let failure = control.failure_recorder();
+            eprintln!(
+                "private_media_tls_connection id={} result=supervisor_stop stop={stop:?} authority_failure={:?}",
+                failure.id(),
+                failure.first(),
+            );
+            if let Some(event) = failure.terminal(media_connection::attempt::Transport::Tls) {
+                eprintln!("{event}");
+            }
+        }
+    }
+}
+
 async fn serve_tls(
     listener: TcpListener,
     app: Router,
     config: Arc<ServerConfig>,
+    private_media: bool,
 ) -> anyhow::Result<()> {
     let acceptor = TlsAcceptor::from(config);
+    let mut private_connections = JoinSet::new();
     loop {
-        let (stream, peer) = match listener.accept().await {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            Some(_) = private_connections.join_next(), if !private_connections.is_empty() => continue,
+        };
+        let (stream, peer) = match accepted {
             Ok(connection) => connection,
             Err(error) => {
-                tracing::warn!("TLS accept error: {error}");
+                if private_media {
+                    tracing::warn!("TLS accept error");
+                } else {
+                    tracing::warn!("TLS accept error: {error}");
+                }
                 continue;
             }
         };
@@ -216,6 +461,12 @@ async fn serve_tls(
         let app = app
             .clone()
             .layer(axum::Extension(axum::extract::ConnectInfo(peer)));
+        if private_media {
+            // Dropping the listener must also drop its supervisors and I/O.
+            private_connections.spawn(serve_private_tls_connection(stream, acceptor, app));
+            continue;
+        }
+        // Preserve the existing unselected TLS connection path.
         tokio::spawn(async move {
             let tls = match acceptor.accept(stream).await {
                 Ok(stream) => stream,
@@ -247,35 +498,80 @@ async fn serve_listeners(
     app: Router,
     tls_config: Option<Arc<ServerConfig>>,
 ) -> anyhow::Result<()> {
+    serve_listeners_with_private(listeners, app, tls_config, None).await
+}
+
+async fn serve_listeners_with_private(
+    listeners: BoundListeners,
+    app: Router,
+    tls_config: Option<Arc<ServerConfig>>,
+    private: Option<Arc<multiview_service::Service>>,
+) -> anyhow::Result<()> {
     if !listeners.https.is_empty() && tls_config.is_none() {
         bail!("HTTPS listeners require a certificate and key");
+    }
+    if let Some(service) = &private {
+        let mut bound = Vec::new();
+        for (tls, sockets) in [(false, &listeners.http), (true, &listeners.https)] {
+            for socket in sockets {
+                bound.push(multiview_service::ListenerEndpoint {
+                    local_addr: socket.local_addr()?,
+                    tls,
+                });
+            }
+        }
+        service.validate_bound(&bound)?;
     }
     let mut tasks = JoinSet::new();
     for listener in listeners.http {
         let address = listener.local_addr()?;
         println!("ottplay-server: http://{address}");
-        let app = app.clone().layer(axum::Extension(msx::Scheme("http")));
+        let endpoint = multiview_service::ListenerEndpoint {
+            local_addr: address,
+            tls: false,
+        };
+        let private_media = private
+            .as_deref()
+            .is_some_and(|service| service.router_for(endpoint).is_some());
+        let app =
+            multiview_service::route_for_listener(app.clone(), private.as_deref(), endpoint)
+                .layer(axum::Extension(msx::Scheme("http")));
         tasks.spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .await
-            .with_context(|| format!("HTTP listener {address} failed"))
+            if private_media {
+                serve_private_http(listener, app)
+                    .await
+                    .with_context(|| format!("HTTP listener {address} failed"))
+            } else {
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await
+                .with_context(|| format!("HTTP listener {address} failed"))
+            }
         });
     }
     for listener in listeners.https {
         let address = listener.local_addr()?;
         println!("ottplay-server: https://{address}");
-        let app = app.clone().layer(axum::Extension(msx::Scheme("https")));
+        let endpoint = multiview_service::ListenerEndpoint {
+            local_addr: address,
+            tls: true,
+        };
+        let private_media = private
+            .as_deref()
+            .is_some_and(|service| service.router_for(endpoint).is_some());
+        let app =
+            multiview_service::route_for_listener(app.clone(), private.as_deref(), endpoint)
+                .layer(axum::Extension(msx::Scheme("https")));
         let config = tls_config.clone().context("missing TLS configuration")?;
         tasks.spawn(async move {
-            serve_tls(listener, app, config)
+            serve_tls(listener, app, config, private_media)
                 .await
                 .with_context(|| format!("HTTPS listener {address} failed"))
         });
     }
-    if normalization::configured() {
+    if normalization::configured() || private.is_some() {
         let result = tokio::select! {
             result = supervise_listeners(tasks) => result,
             _ = normalization::stop_signal() => Ok(())
@@ -290,6 +586,8 @@ async fn serve_listeners(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // Validate all private configuration before binding or starting services.
+    let private_multiview = cli.private_multiview()?;
     anyhow::ensure!(
         !companion::configured()
             || (!cli.stalker_relay_only
@@ -336,6 +634,14 @@ async fn main() -> anyhow::Result<()> {
         _ => None,
     };
     let listeners = bind_listeners(&cli.host, &http_ports, &https_ports).await?;
+    if cli.multiview_only {
+        let owner = private_multiview.context("Private multiview configuration is required")?;
+        let app = Router::new().route("/health", get(health));
+        let result =
+            serve_listeners_with_private(listeners, app, tls_config, Some(owner.clone())).await;
+        owner.shutdown().await?;
+        return result;
+    }
     if let Some(app) = stalker_relay {
         return serve_listeners(listeners, app, tls_config).await;
     }
@@ -408,10 +714,15 @@ async fn main() -> anyhow::Result<()> {
         .merge(control_discovery::routes())
         .merge(offline_media_routes(None).await?);
 
-    if let Some(companion) = companion {
+    // Keep the private backend owner outside every serving future: an early
+    // companion/listener return or a dropped serving future must still drain it.
+    let private_owner = private_multiview.clone();
+    let result = if let Some(companion) = companion {
         let service = companion.service();
         let result = tokio::select! {
-            result = serve_listeners(listeners, app, tls_config) => result,
+            result = serve_listeners_with_private(
+                listeners, app, tls_config, private_multiview,
+            ) => result,
             result = companion.serve() => result,
             _ = normalization::stop_signal() => Ok(()),
         };
@@ -419,8 +730,12 @@ async fn main() -> anyhow::Result<()> {
         normalization::shutdown().await;
         result
     } else {
-        serve_listeners(listeners, app, tls_config).await
+        serve_listeners_with_private(listeners, app, tls_config, private_multiview).await
+    };
+    if let Some(private) = private_owner {
+        private.shutdown().await?;
     }
+    result
 }
 
 /// Media import is disabled unless an operator configures both storage and a secret.
@@ -569,6 +884,77 @@ fn device_entry_routes(directory: &std::path::Path) -> Router {
         .route("/f/*device", get(entry))
 }
 
+// Home is a same-origin owned panel, not a public embeddable player. A meta
+// CSP cannot enforce frame-ancestors: emit it on the actual HTTP responses.
+async fn home_frame_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let uri = request
+        .extensions()
+        .get::<axum::extract::OriginalUri>()
+        .map(|original| &original.0)
+        .unwrap_or_else(|| request.uri());
+    let protect = urlencoding::decode(uri.path()).is_ok_and(|decoded| {
+        // Match the static service's decoded directory/index aliases. Backslash
+        // separators matter on Windows. ASCII case aliases may resolve on any
+        // case-insensitive filesystem (including macOS), so fold on every host.
+        // ServeDir rejects '..' instead of serving a Home document through it.
+        let mut parts = decoded
+            .split(['/', '\\'])
+            .filter(|part| !part.is_empty() && *part != ".");
+        let same = |actual: Option<&str>, expected: &str| {
+            actual.is_some_and(|part| part.eq_ignore_ascii_case(expected))
+        };
+        same(parts.next(), "dist") && same(parts.next(), "home")
+    });
+    let mut response = next.run(request).await;
+    if protect {
+        // frame-ancestors overrides XFO in modern browsers: carry a prior DENY
+        // into CSP rather than relaxing it to self. Preserve every original
+        // CSP/XFO field; multiple CSP policies are enforced as an intersection.
+        let deny = response
+            .headers()
+            .get_all(axum::http::header::X_FRAME_OPTIONS)
+            .iter()
+            .any(|value| {
+                // HeaderValue permits obs-text, so Unicode conversion cannot
+                // be a prerequisite for recognizing an ASCII DENY token.
+                value
+                    .as_bytes()
+                    .split(|byte| *byte == b',')
+                    .any(|mut token| {
+                        while token
+                            .first()
+                            .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
+                        {
+                            token = &token[1..];
+                        }
+                        while token
+                            .last()
+                            .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
+                        {
+                            token = &token[..token.len() - 1];
+                        }
+                        token.eq_ignore_ascii_case(b"DENY")
+                    })
+            });
+        response.headers_mut().append(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(if deny {
+                "frame-ancestors 'none'"
+            } else {
+                "frame-ancestors 'self'"
+            }),
+        );
+        response
+            .headers_mut()
+            .entry(axum::http::header::X_FRAME_OPTIONS)
+            .or_insert(HeaderValue::from_static("SAMEORIGIN"));
+    }
+    response
+}
+
 fn player_asset_routes(directory: &std::path::Path) -> Router {
     // These generated files live at the web root; expose only the explicit
     // public files rather than mounting the source/configuration directory.
@@ -595,12 +981,82 @@ fn player_asset_routes(directory: &std::path::Path) -> Router {
     ] {
         routes = routes.nest_service(&format!("/{name}"), ServeDir::new(directory.join(name)));
     }
-    routes
+    routes.layer(axum::middleware::from_fn(home_frame_headers))
 }
 
 #[cfg(test)]
 mod listener_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn selected_media_dispatch_preserves_public_request_context_and_response() {
+        use axum::{
+            body::{to_bytes, Body},
+            extract::ConnectInfo,
+            http::Version,
+            Extension,
+        };
+        let peer: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        for version in [Version::HTTP_11, Version::HTTP_2] {
+            let app =
+                Router::new()
+                    .route(
+                        "/public",
+                        get(
+                            |ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+                             Extension(scheme): Extension<msx::Scheme>,
+                             Extension(_control): Extension<
+                                media_connection::ConnectionControl,
+                            >| async move {
+                                (
+                                    StatusCode::ACCEPTED,
+                                    [
+                                        ("cache-control", "public, max-age=60"),
+                                        ("x-public", "preserved"),
+                                    ],
+                                    format!("{} {}", peer, scheme.0),
+                                )
+                            },
+                        ),
+                    )
+                    .layer(Extension(ConnectInfo(peer)))
+                    .layer(Extension(msx::Scheme("http")));
+            let control = media_connection::ConnectionControl::default();
+            let request = axum::http::Request::builder()
+                .uri("/public")
+                .version(version)
+                .body(Body::empty())
+                .unwrap();
+            let response = dispatch_media_request(app, control.clone(), request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            assert_eq!(response.headers()["cache-control"], "public, max-age=60");
+            assert_eq!(response.headers()["x-public"], "preserved");
+            assert!(!response.headers().contains_key("connection"));
+            assert!(!control.is_armed_for_test());
+            let body = to_bytes(response.into_body(), 1024).await.unwrap();
+            assert_eq!(&body[..], b"127.0.0.1:12345 http");
+        }
+    }
+
+    #[tokio::test]
+    async fn media_transport_failure_response_is_fixed_and_private() {
+        let response = media_transport_unavailable();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(response.headers()["content-type"], "application/json");
+        assert!(!response.headers().contains_key("connection"));
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"version":1,"error":"backend_unavailable"})
+        );
+    }
 
     #[test]
     fn stalker_relay_requires_config_and_defaults_to_loopback() {
@@ -1798,6 +2254,309 @@ mod device_entry_tests {
                 "{path}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn home_http_responses_enforce_same_origin_framing_without_changing_player_embeds() {
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("ottplay-home-frame-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(directory.join("dist/home")).unwrap();
+        std::fs::create_dir_all(directory.join("devices/lg/webos")).unwrap();
+        let _fixture = WebRootFixture {
+            directory: directory.clone(),
+        };
+        let home = "<!doctype html><title>Home</title>";
+        std::fs::write(directory.join("dist/home/index.html"), home).unwrap();
+        std::fs::write(directory.join("dist/home/app.js"), "/* public Home */").unwrap();
+        std::fs::write(
+            directory.join("dist/index.html"),
+            "<!doctype html><title>Player</title>",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("devices/lg/webos/device.js"),
+            "/* adapter */",
+        )
+        .unwrap();
+        let mut app = player_asset_routes(&directory).merge(device_entry_routes(&directory));
+        for method in ["GET", "HEAD"] {
+            for path in [
+                "/dist/home/index.html",
+                "/dist/home/",
+                "/dist/%68ome/index.html",
+                "/dist/home/%69ndex.html",
+                "/dist/home%2Findex.html",
+                "/dist/home/./index.html?cache=1",
+            ] {
+                let response = app
+                    .call(
+                        Request::builder()
+                            .method(method)
+                            .uri(path)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
+                assert_eq!(
+                    response.headers()["content-security-policy"],
+                    "frame-ancestors 'self'",
+                    "{path}"
+                );
+                assert_eq!(
+                    response.headers()["x-frame-options"],
+                    "SAMEORIGIN",
+                    "{path}"
+                );
+                let bytes = to_bytes(response.into_body(), 1024).await.unwrap();
+                assert_eq!(
+                    bytes.as_ref(),
+                    if method == "GET" {
+                        home.as_bytes()
+                    } else {
+                        b""
+                    },
+                    "{path}"
+                );
+            }
+        }
+        // Probe the fixture filesystem, not the host OS name: macOS volumes
+        // may be either case-sensitive or case-insensitive. Every alias response
+        // must carry the policy, including harmless 404s on sensitive volumes.
+        for (path, relative) in [
+            ("/dist/HOME/index.html", "dist/HOME/index.html"),
+            ("/dist/HOME/INDEX.HTML", "dist/HOME/INDEX.HTML"),
+            ("/dist/%48OME/index.html", "dist/HOME/index.html"),
+        ] {
+            let expected = if directory.join(relative).is_file() {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            let response = app
+                .call(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{path}");
+            assert_eq!(
+                response.headers()["content-security-policy"],
+                "frame-ancestors 'self'",
+                "{path}"
+            );
+            assert_eq!(
+                response.headers()["x-frame-options"],
+                "SAMEORIGIN",
+                "{path}"
+            );
+            if expected == StatusCode::OK {
+                assert_eq!(
+                    to_bytes(response.into_body(), 1024).await.unwrap().as_ref(),
+                    home.as_bytes(),
+                    "{path}"
+                );
+            }
+        }
+        #[cfg(windows)]
+        {
+            let path = "/dist/home%5Cindex.html";
+            let response = app
+                .call(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response.headers()["content-security-policy"],
+                "frame-ancestors 'self'"
+            );
+            assert_eq!(response.headers()["x-frame-options"], "SAMEORIGIN");
+        }
+        let redirect = app
+            .call(
+                Request::builder()
+                    .uri("/dist/home")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(redirect.status().is_redirection());
+        assert_eq!(
+            redirect.headers()["content-security-policy"],
+            "frame-ancestors 'self'"
+        );
+        assert_eq!(redirect.headers()["x-frame-options"], "SAMEORIGIN");
+        for path in [
+            "/dist/index.html",
+            "/f/lg/webos/",
+            "/devices/lg/webos/device.js",
+        ] {
+            let response = app
+                .call(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert!(
+                !response.headers().contains_key("content-security-policy"),
+                "{path}"
+            );
+            assert!(
+                !response.headers().contains_key("x-frame-options"),
+                "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn home_framing_case_aliases_do_not_depend_on_platform_or_match_other_segments() {
+        let mut app = Router::new()
+            .route("/dist/HOME/index.html", get(|| async { "Home" }))
+            .route("/dist/home-other/index.html", get(|| async { "Other" }))
+            .route("/dist/home2/index.html", get(|| async { "Other" }))
+            .layer(axum::middleware::from_fn(home_frame_headers));
+        let response = app
+            .call(
+                Request::builder()
+                    .uri("/dist/HOME/index.html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            "frame-ancestors 'self'"
+        );
+        assert_eq!(response.headers()["x-frame-options"], "SAMEORIGIN");
+        for path in ["/dist/home-other/index.html", "/dist/home2/index.html"] {
+            let response = app
+                .call(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(
+                !response.headers().contains_key("content-security-policy"),
+                "{path}"
+            );
+            assert!(
+                !response.headers().contains_key("x-frame-options"),
+                "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn home_framing_intersects_existing_csp_and_carries_all_xfo_deny_values_into_csp() {
+        for deny in [
+            b"DENY".as_slice(),
+            b"dEnY".as_slice(),
+            b"SAMEORIGIN, dEnY".as_slice(),
+            b"DENY, \x80".as_slice(),
+            b" \tDeNy\t , \x80".as_slice(),
+            b"\x80,\t dEnY \t".as_slice(),
+        ] {
+            let mut app = Router::new()
+                .route(
+                    "/dist/home/index.html",
+                    get(move || async move {
+                        let mut headers = HeaderMap::new();
+                        headers.append(
+                            axum::http::header::CONTENT_SECURITY_POLICY,
+                            HeaderValue::from_static("default-src 'none'"),
+                        );
+                        headers.append(
+                            axum::http::header::CONTENT_SECURITY_POLICY,
+                            HeaderValue::from_static("script-src 'self'"),
+                        );
+                        headers.append(
+                            axum::http::header::X_FRAME_OPTIONS,
+                            HeaderValue::from_static("SAMEORIGIN"),
+                        );
+                        headers.append(
+                            axum::http::header::X_FRAME_OPTIONS,
+                            HeaderValue::from_bytes(deny).unwrap(),
+                        );
+                        (headers, "Home")
+                    }),
+                )
+                .layer(axum::middleware::from_fn(home_frame_headers));
+            let response = app
+                .call(
+                    Request::builder()
+                        .uri("/dist/home/index.html")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let policies: Vec<_> = response
+                .headers()
+                .get_all("content-security-policy")
+                .iter()
+                .map(|value| value.to_str().unwrap())
+                .collect();
+            assert_eq!(
+                policies,
+                [
+                    "default-src 'none'",
+                    "script-src 'self'",
+                    "frame-ancestors 'none'"
+                ],
+                "{deny:?}"
+            );
+            let xfo: Vec<_> = response
+                .headers()
+                .get_all("x-frame-options")
+                .iter()
+                .map(|value| value.as_bytes())
+                .collect();
+            assert_eq!(
+                xfo,
+                [b"SAMEORIGIN".as_slice(), deny],
+                "original XFO values must survive"
+            );
+        }
+        // Independent existing CSP is never replaced, including an existing
+        // ancestors-none policy. The additional self policy cannot relax it.
+        let mut app = Router::new()
+            .route(
+                "/dist/home/index.html",
+                get(|| async {
+                    (
+                        [(
+                            axum::http::header::CONTENT_SECURITY_POLICY,
+                            "frame-ancestors 'none'",
+                        )],
+                        "Home",
+                    )
+                }),
+            )
+            .layer(axum::middleware::from_fn(home_frame_headers));
+        let response = app
+            .call(
+                Request::builder()
+                    .uri("/dist/home/index.html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let policies: Vec<_> = response
+            .headers()
+            .get_all("content-security-policy")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            policies,
+            ["frame-ancestors 'none'", "frame-ancestors 'self'"]
+        );
+        assert_eq!(response.headers()["x-frame-options"], "SAMEORIGIN");
     }
 
     #[tokio::test]

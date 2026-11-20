@@ -122,8 +122,8 @@ function createModernPlayer(w: any) {
         if (!Number(w.playType)) return "live";
         return Number(w.playType) < 0 ? "vod" : "archive";
     }
-    function playing(): boolean {
-        return !!(w.stbIsPlaying && w.stbIsPlaying());
+    function playing(forToggle?: boolean): boolean {
+        return !!(w.stbIsPlaying && w.stbIsPlaying(forToggle));
     }
     function desktop(): boolean {
         return (
@@ -955,7 +955,7 @@ function createModernPlayer(w: any) {
             keepAlive();
             return;
         }
-        if (playing()) {
+        if (playing(true)) {
             w.forcePlay = false;
             if (typeof w.showShift === "function")
                 w.showShift(translate("Pause"));

@@ -102,6 +102,15 @@ var keyStrings = {
         "Automaatne esitab toetatud faile otse ja kasutab vajadusel ühilduvat HLS.",
     alhabet: "abcdefghijklmnopqrsšzžtuvwõäöüxy",
     always: "alati",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Kohalikke HLS-manifeste ei toetata; kasutage HTTP(S)-manifesti URL-i",
+    "Playlist contains unsupported sources":
+        "Esitusloend sisaldab toetamata allikaid",
+    "Playlist is empty or invalid": "Esitusloend on tühi või vigane",
+    "Playlist is too large": "Esitusloend on liiga suur",
+    "Playlist local files must be dropped together with the playlist":
+        "Kohalikud failid tuleb lohistada koos esitusloendiga",
+    "Playlist must use UTF-8": "Esitusloend peab kasutama UTF-8",
     "and enter code": "ja sisestage kood",
     Back: "Tagasi",
     "Back / Forward for 1 minute": "Hüppa tagasi/edasi 1 minut",
@@ -374,6 +383,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Dragon Media PRO seaded",
     "Drop one video file at a time": "Lohistage korraga üks videofail",
+    "Dropped files": "Lohistatud failid",
     Duration: "Kestus",
     Edit: "Muuda",
     "Edit access key": "Muutke juurdepääsuvõtit",

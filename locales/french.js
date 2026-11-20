@@ -105,6 +105,15 @@ var keyStrings = {
         "Le mode automatique lit directement les fichiers pris en charge et utilise le HLS compatible si nécessaire.",
     alhabet: "aàâæbcçdeéèêëfghiîïjklmnoôœpqrstuùûüvwxyÿz",
     always: "toujours",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Les manifestes HLS locaux ne sont pas pris en charge ; utilisez une URL de manifeste HTTP(S)",
+    "Playlist contains unsupported sources":
+        "La liste de lecture contient des sources non prises en charge",
+    "Playlist is empty or invalid": "La liste de lecture est vide ou invalide",
+    "Playlist is too large": "La liste de lecture est trop volumineuse",
+    "Playlist local files must be dropped together with the playlist":
+        "Déposez les fichiers locaux avec la liste de lecture",
+    "Playlist must use UTF-8": "La liste de lecture doit utiliser UTF-8",
     "and enter code": "et saisissez le code",
     Back: "Retour",
     "Back / Forward for 1 minute": "Reculer / avancer d'une minute",
@@ -391,6 +400,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Paramètres de Dragon Media PRO",
     "Drop one video file at a time":
         "Glissez-déposez un seul fichier vidéo à la fois",
+    "Dropped files": "Fichiers déposés",
     Duration: "Durée",
     Edit: "Modifier",
     "Edit access key": "Modifier la clé d'accès",

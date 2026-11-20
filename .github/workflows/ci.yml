@@ -2,7 +2,13 @@ name: CI
 
 on:
   workflow_call: {}
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      firefox-videojs-phase:
+        description: "Run both bounded Firefox 153 append-phase diagnostics after ordinary acceptance"
+        type: choice
+        options: [ "off", "both" ]
+        default: "off"
 
 env:
   NODE_VERSION: "22"
@@ -21,7 +27,7 @@ jobs:
         platform: [ ubuntu-24.04, ubuntu-24.04-arm ]
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -54,7 +60,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
 
@@ -83,7 +89,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: "1.27.4"
           cache: false
@@ -180,7 +186,7 @@ jobs:
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
 
@@ -203,7 +209,7 @@ jobs:
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
 
@@ -233,7 +239,7 @@ jobs:
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
 
@@ -322,7 +328,7 @@ jobs:
           sudo env CI="$CI" python3 scripts/ci-apt-mirror.py
           npx playwright install --with-deps chromium webkit
 
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -348,6 +354,7 @@ jobs:
         # unexpected browser promise stops settling; normal runs take <2 min.
         timeout-minutes: 10
         run: |
+          npm run test:browser:external
           node tests/test_browser_direct_media.cjs
           node tests/test_browser_local_media.cjs --built-ui
           node tests/test_browser_local_media.cjs --built-ui --initial-retry
@@ -399,7 +406,7 @@ jobs:
           path: .control-ha-smoke
           persist-credentials: false
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: "1.27.4"
           cache: false
@@ -480,7 +487,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -529,7 +536,7 @@ jobs:
     runs-on: ${{ fromJSON((vars.CI_RUNNER_MODE == 'self-hosted' || vars.CI_RUNNER_MODE == 'k3s') && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && (vars.CI_RUNNER_LABELS || '[]') || '["ubuntu-latest"]') }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
 
@@ -539,6 +546,8 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci --ignore-scripts
+      - name: Audit committed media before test preparation
+        run: node scripts/check-committed-media.cjs
       - run: npm run check:test-inventory
       - run: npm test
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -562,12 +571,12 @@ jobs:
     runs-on: ${{ fromJSON((vars.CI_RUNNER_MODE == 'self-hosted' || vars.CI_RUNNER_MODE == 'k3s') && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) && (vars.CI_RUNNER_LABELS || '[]') || '["ubuntu-latest"]') }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -651,6 +660,39 @@ jobs:
       run-node-ci: false
       browser-matrix-file: .github/browser-compatibility.json
       browser-test-command: CI_FIREFOX_CRASH_DIAGNOSTICS=1 node scripts/browser-acceptance.cjs
+      browser-evidence-upload-retry: true
+      browser-artifact-id: ${{ needs.build.outputs.browser-artifact-id }}
+      browser-artifact-path: browser-candidate
+      browser-prepare-command: |
+        if [ "${RUNNER_OS:-}" = "Linux" ] && [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ]; then
+          sudo env CI="$CI" python3 scripts/ci-apt-mirror.py
+        fi
+        # Synthetic HLS media requires the locked mux.js dev dependency.
+        npm ci --include=dev --ignore-scripts
+        PYTHON=python3
+        if ! "$PYTHON" -c 'import sys; assert sys.version_info >= (3, 8)' 2>/dev/null; then PYTHON=python; fi
+        "$PYTHON" scripts/prepare_browser_candidate.py browser-candidate browser-candidate-web
+
+  firefox-phase-diagnostic:
+    name: Firefox phase diagnostic (${{ matrix.phase }})
+    # Diagnostic results never replace the ordinary browser acceptance verdict.
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.firefox-videojs-phase == 'both' && needs.build.result == 'success' }}
+    needs: [ build, browser-compatibility ]
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        phase: [ append-active, append-completed ]
+    uses: victron-venus/venus-os-ci-toolkit/.github/workflows/typescript-ci.yml@dd968524d193a8e719166ce10ec1fee76db3d403
+    permissions:
+      contents: read
+      actions: read
+    with:
+      node-version: "22"
+      run-node-ci: false
+      browser-matrix: '[{"id":"ubuntu-latest-firefox-1-62-1","os":"ubuntu-latest","engine":"firefox","playwright":"1.62.1","browser_version":"153.0","toolchain":"tools/browser-compatibility/playwright-1-62-1","tier":"required"}]'
+      browser-evidence-prefix: firefox-phase-${{ matrix.phase }}
+      browser-test-command: CI_FIREFOX_CRASH_DIAGNOSTICS=1 CI_FIREFOX_VIDEOJS_PHASE=${{ matrix.phase }} node scripts/browser-acceptance.cjs
       browser-evidence-upload-retry: true
       browser-artifact-id: ${{ needs.build.outputs.browser-artifact-id }}
       browser-artifact-path: browser-candidate

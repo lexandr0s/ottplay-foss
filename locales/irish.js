@@ -105,6 +105,15 @@ var keyStrings = {
         "Seinneann an mód uathoibríoch comhaid a dtacaítear leo go díreach agus úsáideann sé HLS comhoiriúnach nuair is gá.",
     alhabet: "aábcdeéfghiílmnoóprstuú",
     always: "i gcónaí",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Ní thacaítear le forléirithe HLS áitiúla; úsáid URL forléirithe HTTP(S)",
+    "Playlist contains unsupported sources":
+        "Tá foinsí nach dtacaítear leo sa seinmliosta",
+    "Playlist is empty or invalid": "Tá an seinmliosta folamh nó neamhbhailí",
+    "Playlist is too large": "Tá an seinmliosta rómhór",
+    "Playlist local files must be dropped together with the playlist":
+        "Caithfear comhaid áitiúla a tharraingt agus a scaoileadh leis an seinmliosta",
+    "Playlist must use UTF-8": "Caithfidh an seinmliosta UTF-8 a úsáid",
     "and enter code": "agus cuir isteach an cód",
     Back: "Siar",
     "Back / Forward for 1 minute": "Téigh siar / ar aghaidh 1 nóiméad",
@@ -384,6 +393,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Socruithe Dragon Media PRO",
     "Drop one video file at a time":
         "Tarraing agus scaoil comhad físe amháin ag an am",
+    "Dropped files": "Comhaid a tarraingíodh agus a scaoileadh",
     Duration: "Fad",
     Edit: "Cuir in eagar",
     "Edit access key": "Cuir an eochair rochtana in eagar",

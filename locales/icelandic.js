@@ -100,6 +100,15 @@ var keyStrings = {
         "Sjálfvirk stilling spilar studdar skrár beint og notar samhæft HLS þegar þess þarf.",
     alhabet: "aábdðeéfghiíjklmnoóprstuúvxyýþæö",
     always: "alltaf",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Staðbundnar HLS-skrár eru ekki studdar; notaðu HTTP(S)-vefslóð fyrir HLS-skrá",
+    "Playlist contains unsupported sources":
+        "Spilunarlistinn inniheldur óstuddar uppsprettur",
+    "Playlist is empty or invalid": "Spilunarlistinn er tómur eða ógildur",
+    "Playlist is too large": "Spilunarlistinn er of stór",
+    "Playlist local files must be dropped together with the playlist":
+        "Draga verður staðbundnar skrár inn ásamt spilunarlistanum",
+    "Playlist must use UTF-8": "Spilunarlistinn verður að nota UTF-8",
     "and enter code": "og sláðu inn kóðann",
     Back: "Til baka",
     "Back / Forward for 1 minute": "Fara til baka / áfram um 1 mínútu",
@@ -371,6 +380,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Stillingar fyrir Dragon Media PRO",
     "Drop one video file at a time":
         "Dragðu og slepptu einni myndskeiðsskrá í einu",
+    "Dropped files": "Skrár sem var sleppt",
     Duration: "Lengd",
     Edit: "Breyta",
     "Edit access key": "Breyta aðgangslykli",

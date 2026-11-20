@@ -3,6 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { FILES: HOME_FILES } = require("./home-integration-assets.cjs");
 
 const MIME = {
     ".css": "text/css; charset=utf-8",
@@ -32,6 +33,7 @@ const INPUT_DIRECTORIES = [
     "licenses/android",
 ];
 const INPUT_FILES = new Set([
+    ...HOME_FILES.map((file) => "integrations/home/" + file),
     "index.html",
     "vite.config.ts",
     "package.json",

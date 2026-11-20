@@ -375,6 +375,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "Dragon Media PRO-inställningar",
     "Drop one video file at a time": "Dra och släpp en videofil i taget",
+    "Dropped files": "Filer som dragits in",
     Duration: "Längd",
     Edit: "Redigera",
     "Edit access key": "Redigera åtkomstnyckel",
@@ -642,6 +643,8 @@ var keyStrings = {
     "Loading via proxy...": "Läser in via proxy…",
     "Loading. Please wait...": "Läser in. Vänta…",
     "Loading...": "Läser in…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Lokala HLS-manifest stöds inte; använd en HTTP(S)-adress till manifestet",
     "Local HTTP remote control": "Lokal HTTP-fjärrkontroll",
     "Local source did not respond": "Den lokala källan svarade inte",
     "Local source unavailable": "Den lokala källan är inte tillgänglig",
@@ -777,9 +780,16 @@ var keyStrings = {
     "Player info:": "Spelarinformation:",
     "Playing: %1": "Spelar upp: %1",
     Playlist: "Spellista",
+    "Playlist contains unsupported sources":
+        "Spellistan innehåller källor som inte stöds",
     "Playlist file": "Spellistefil",
+    "Playlist is empty or invalid": "Spellistan är tom eller ogiltig",
     "Playlist is not loading directly...Loading via server...":
         "Spellistan kunde inte läsas in direkt. Läser in via server…",
+    "Playlist is too large": "Spellistan är för stor",
+    "Playlist local files must be dropped together with the playlist":
+        "Lokala filer i spellistan måste släppas tillsammans med spellistan",
+    "Playlist must use UTF-8": "Spellistan måste använda UTF-8",
     "Playlist Name": "Spellistans namn",
     "Playlist URL": "Spellistans URL",
     Plex: "Plex",

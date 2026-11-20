@@ -104,6 +104,16 @@ var keyStrings = {
         "Akpaaka na-akpọ faịlụ a na-akwado ozugbo ma jiri HLS dabara adaba mgbe ọ dị mkpa.",
     alhabet: "abchdefgwiịjkplmnṅyoọrstuụvzáàāéèēíìīḿńǹóòōqúùūx̣́̀̇̄",
     always: "mgbe niile",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "A naghị akwado manifest HLS dị na ngwaọrụ; jiri URL manifest HTTP(S)",
+    "Playlist contains unsupported sources":
+        "Ndepụta egwu nwere isi mmalite anaghị akwado",
+    "Playlist is empty or invalid":
+        "Ndepụta egwu tọgbọrọ chakoo ma ọ bụ ezighi ezi",
+    "Playlist is too large": "Ndepụta egwu buru ibu karịa oke",
+    "Playlist local files must be dropped together with the playlist":
+        "Dọrọ faịlụ dị na ngwaọrụ ma tụnye ha na ndepụta egwu n’otu oge",
+    "Playlist must use UTF-8": "Ndepụta egwu ga-eji UTF-8",
     "and enter code": "ma tinye koodu",
     Back: "Laghachi",
     "Back / Forward for 1 minute": "Gaa nkeji 1 azụ / n'ihu",
@@ -372,6 +382,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Ntọala Dragon Media PRO",
     "Drop one video file at a time":
         "Dọrọ ma tụnye naanị otu faịlụ vidiyo n'otu oge",
+    "Dropped files": "Faịlụ ndị a dọtara ma tụnye",
     Duration: "Ogologo oge",
     Edit: "Dezie",
     "Edit access key": "Dezie igodo nnweta",

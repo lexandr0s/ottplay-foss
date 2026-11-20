@@ -383,6 +383,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dejinta Dragon Media PRO",
     "Drop one video file at a time":
         "Jiid oo dhig hal fayl oo fiidiyow ah markiiba",
+    "Dropped files": "Faylasha la jiiday ee la dhigay",
     Duration: "Muddada",
     Edit: "Wax ka beddel",
     "Edit access key": "Wax ka beddel furaha gelitaanka",
@@ -659,6 +660,8 @@ var keyStrings = {
     "Loading via proxy...": "Waxaa lagu soo rarayaa proksi…",
     "Loading. Please wait...": "Waxaa la soo rarayaa… fadlan sug…",
     "Loading...": "Waxaa la soo rarayaa…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Ma taageerno faylasha muuqaalka HLS ee maxalliga ah; isticmaal URL HTTP(S) ah",
     "Local HTTP remote control": "Kontoroolka fog ee HTTP ee maxalliga ah",
     "Local source did not respond": "Isha maxalliga ahi ma jawaabin",
     "Local source unavailable": "Isha maxalliga ah lama heli karo",
@@ -793,9 +796,16 @@ var keyStrings = {
     "Player info:": "Macluumaadka daaraha:",
     "Playing: %1": "Hadda la daarayo: %1",
     Playlist: "Liiska daarista",
+    "Playlist contains unsupported sources":
+        "Liisku wuxuu ka kooban yahay ilo aan la taageerin",
     "Playlist file": "Faylka liiska daarista",
+    "Playlist is empty or invalid": "Liisku waa madhan yahay ama ma saxna",
     "Playlist is not loading directly...Loading via server...":
         "Liiska daarista si toos ah ayaa loo soo rari waayey. Waxaa lagu soo rarayaa seerfarka…",
+    "Playlist is too large": "Liisku aad buu u weyn yahay",
+    "Playlist local files must be dropped together with the playlist":
+        "Faylasha maxalliga ah ee liiska waa in lala soo jiidaa liiska",
+    "Playlist must use UTF-8": "Liisku waa inuu adeegsadaa UTF-8",
     "Playlist Name": "Magaca liiska daarista",
     "Playlist URL": "URL-ka liiska daarista",
     Plex: "Plex",

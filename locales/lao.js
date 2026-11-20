@@ -358,6 +358,7 @@ var keyStrings = {
     "Dragon Media PRO": "Dragon Media PRO",
     "Dragon Media PRO settings": "ການຕັ້ງຄ່າ Dragon Media PRO",
     "Drop one video file at a time": "ລາກແລ້ວວາງໄຟລ໌ວິດີໂອເທື່ອລະໜຶ່ງໄຟລ໌",
+    "Dropped files": "ໄຟລ໌ທີ່ລາກມາວາງ",
     Duration: "ໄລຍະເວລາ",
     Edit: "ແກ້ໄຂ",
     "Edit access key": "ແກ້ໄຂກະແຈເຂົ້າໃຊ້",
@@ -613,6 +614,8 @@ var keyStrings = {
     "Loading via proxy...": "ກຳລັງໂຫຼດຜ່ານພຣັອກຊີ…",
     "Loading. Please wait...": "ກຳລັງໂຫຼດ… ກະລຸນາລໍຖ້າ…",
     "Loading...": "ກຳລັງໂຫຼດ…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "ບໍ່ຮອງຮັບໄຟລ໌ແມນິເຟສ HLS ໃນເຄື່ອງ; ໃຫ້ໃຊ້ URL ແມນິເຟສ HTTP(S)",
     "Local HTTP remote control": "ການຄວບຄຸມທາງໄກ HTTP ພາຍໃນ",
     "Local source did not respond": "ແຫຼ່ງຂໍ້ມູນໃນເຄື່ອງບໍ່ຕອບສະໜອງ",
     "Local source unavailable": "ແຫຼ່ງຂໍ້ມູນໃນເຄື່ອງບໍ່ພ້ອມໃຊ້ງານ",
@@ -743,9 +746,15 @@ var keyStrings = {
     "Player info:": "ຂໍ້ມູນເຄື່ອງຫຼິ້ນ:",
     "Playing: %1": "ກຳລັງຫຼິ້ນ: %1",
     Playlist: "ລາຍການຫຼິ້ນ",
+    "Playlist contains unsupported sources": "ລາຍການຫຼິ້ນມີແຫຼ່ງທີ່ບໍ່ຮອງຮັບ",
     "Playlist file": "ໄຟລ໌ລາຍການຫຼິ້ນ",
+    "Playlist is empty or invalid": "ລາຍການຫຼິ້ນວ່າງເປົ່າ ຫຼື ບໍ່ຖືກຕ້ອງ",
     "Playlist is not loading directly...Loading via server...":
         "ບໍ່ສາມາດໂຫຼດລາຍການຫຼິ້ນໂດຍກົງ. ກຳລັງໂຫຼດຜ່ານເຊີບເວີ…",
+    "Playlist is too large": "ລາຍການຫຼິ້ນໃຫຍ່ເກີນໄປ",
+    "Playlist local files must be dropped together with the playlist":
+        "ຕ້ອງລາກໄຟລ໌ໃນເຄື່ອງຂອງລາຍການຫຼິ້ນມາພ້ອມກັບລາຍການຫຼິ້ນ",
+    "Playlist must use UTF-8": "ລາຍການຫຼິ້ນຕ້ອງໃຊ້ UTF-8",
     "Playlist Name": "ຊື່ລາຍການຫຼິ້ນ",
     "Playlist URL": "URL ລາຍການຫຼິ້ນ",
     Plex: "Plex",

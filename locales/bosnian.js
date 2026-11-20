@@ -101,6 +101,16 @@ var keyStrings = {
         "Automatski reprodukuje podržane datoteke direktno i koristi kompatibilan HLS kada je to potrebno.",
     alhabet: "abcčćdžđefghijklmnoprsštuvz",
     always: "uvijek",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Lokalni HLS manifesti nisu podržani; koristite URL HTTP(S) manifesta",
+    "Playlist contains unsupported sources":
+        "Lista reprodukcije sadrži nepodržane izvore",
+    "Playlist is empty or invalid":
+        "Lista reprodukcije je prazna ili neispravna",
+    "Playlist is too large": "Lista reprodukcije je prevelika",
+    "Playlist local files must be dropped together with the playlist":
+        "Lokalne datoteke morate prevući zajedno s listom reprodukcije",
+    "Playlist must use UTF-8": "Lista reprodukcije mora koristiti UTF-8",
     "and enter code": "i unesite kod",
     Back: "Nazad",
     "Back / Forward for 1 minute": "Preskoči nazad/unaprijed 1 minutu",
@@ -379,6 +389,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO postavke",
     "Drop one video file at a time":
         "Prevucite i ispustite jednu videodatoteku odjednom",
+    "Dropped files": "Prevučene datoteke",
     Duration: "Trajanje",
     Edit: "Uredi",
     "Edit access key": "Uređivanje pristupnog ključa",

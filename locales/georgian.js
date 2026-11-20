@@ -103,6 +103,15 @@ var keyStrings = {
         "ავტომატურად უკრავს მხარდაჭერილ ფაილებს პირდაპირ და საჭიროების შემთხვევაში იყენებს თავსებადი HLS.",
     alhabet: "აბგდევზთიკლმნოპჟრსტუფქღყშჩცძწჭხჯჰ",
     always: "ყოველთვის",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "ლოკალური HLS მანიფესტები არ არის მხარდაჭერილი; გამოიყენეთ HTTP(S) მანიფესტის URL",
+    "Playlist contains unsupported sources":
+        "დასაკრავი სია შეიცავს მხარდაუჭერელ წყაროებს",
+    "Playlist is empty or invalid": "დასაკრავი სია ცარიელია ან არასწორია",
+    "Playlist is too large": "დასაკრავი სია ზედმეტად დიდია",
+    "Playlist local files must be dropped together with the playlist":
+        "ლოკალური ფაილები დასაკრავ სიასთან ერთად უნდა გადმოიტანოთ",
+    "Playlist must use UTF-8": "დასაკრავმა სიამ უნდა გამოიყენოს UTF-8",
     "and enter code": "და შეიყვანეთ კოდი",
     Back: "უკან",
     "Back / Forward for 1 minute": "1 წუთით უკან / წინ გადახტომა",
@@ -377,6 +386,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO პარამეტრები",
     "Drop one video file at a time":
         "გადმოათრიეთ და ჩააგდეთ თითო ვიდეოფაილი ერთ ჯერზე",
+    "Dropped files": "ჩაგდებული ფაილები",
     Duration: "ხანგრძლივობა",
     Edit: "რედაქტირება",
     "Edit access key": "წვდომის გასაღების რედაქტირება",

@@ -378,6 +378,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "Dragon Media PRO nustatymai",
     "Drop one video file at a time":
         "Vilkite ir numeskite po vieną vaizdo failą",
+    "Dropped files": "Nuvilkti failai",
     Duration: "Trukmė",
     Edit: "Redaguoti",
     "Edit access key": "Redaguoti prieigos raktą",
@@ -647,6 +648,8 @@ var keyStrings = {
     "Loading via proxy...": "Įkeliama per tarpinį serverį…",
     "Loading. Please wait...": "Įkeliama… palaukite…",
     "Loading...": "Įkeliama…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "Vietiniai HLS manifestai nepalaikomi; naudokite HTTP(S) manifesto URL",
     "Local HTTP remote control": "Vietinis HTTP valdymas",
     "Local source did not respond": "Vietinis šaltinis neatsakė",
     "Local source unavailable": "Vietinis šaltinis nepasiekiamas",
@@ -781,9 +784,16 @@ var keyStrings = {
     "Player info:": "Grotuvo informacija:",
     "Playing: %1": "Atkuriama: %1",
     Playlist: "Grojaraštis",
+    "Playlist contains unsupported sources":
+        "Grojaraštyje yra nepalaikomų šaltinių",
     "Playlist file": "Grojaraščio failas",
+    "Playlist is empty or invalid": "Grojaraštis tuščias arba netinkamas",
     "Playlist is not loading directly...Loading via server...":
         "Grojaraštis neįkeliamas tiesiogiai...Įkeliama per serverį...",
+    "Playlist is too large": "Grojaraštis per didelis",
+    "Playlist local files must be dropped together with the playlist":
+        "Vietinius grojaraščio failus reikia įkelti kartu su grojaraščiu",
+    "Playlist must use UTF-8": "Grojaraštyje turi būti naudojamas UTF-8",
     "Playlist Name": "Grojaraščio pavadinimas",
     "Playlist URL": "Grojačio sąrašo URL",
     Plex: "Plex",

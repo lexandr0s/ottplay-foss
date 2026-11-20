@@ -512,6 +512,16 @@
                     noyes
                 ),
                 choice(
+                    label("Dropped files") + " · " + label("Shuffle"),
+                    "droppedFileShuffle",
+                    [label("Off"), label("On")]
+                ),
+                choice(label("Dropped files"), "droppedFileRepeat", [
+                    label("Repeat: All"),
+                    label("Repeat: One"),
+                    label("Repeat: Off"),
+                ]),
+                choice(
                     label("Remember previous channels"),
                     "prevCount",
                     [1, 5, 10, 15, 20]
@@ -592,6 +602,15 @@
                         row.values = host.stbPlayers;
                     return showPlayerChoice;
                 }
+                if (
+                    row.settingId === "droppedFileShuffle" ||
+                    row.settingId === "droppedFileRepeat"
+                )
+                    return (
+                        host.ott_device === "pc" ||
+                        host.ott_device === "pc2" ||
+                        !!(host.__TAURI__ || host.__TAURI_INTERNALS__)
+                    );
                 if (row.settingId === "bufSize") {
                     if (host.stbBufferSizes) row.values = host.stbBufferSizes;
                     return typeof host.stbSetBuffer === "function";

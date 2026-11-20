@@ -374,6 +374,7 @@ var keyStrings = {
     "Dragon Media PRO settings": "تنظیمات Dragon Media PRO",
     "Drop one video file at a time":
         "هر بار یک فایل ویدئویی را بکشید و رها کنید",
+    "Dropped files": "فایل‌های کشیده و رهاشده",
     Duration: "مدت",
     Edit: "ویرایش",
     "Edit access key": "ویرایش کلید دسترسی",
@@ -637,6 +638,8 @@ var keyStrings = {
     "Loading via proxy...": "در حال بارگیری از طریق پروکسی…",
     "Loading. Please wait...": "در حال بارگیری… لطفاً صبر کنید…",
     "Loading...": "در حال بارگیری…",
+    "Local HLS manifests are not supported; use an HTTP(S) manifest URL":
+        "مانیفست‌های محلی HLS پشتیبانی نمی‌شوند؛ از نشانی HTTP(S) مانیفست استفاده کنید",
     "Local HTTP remote control": "کنترل از راه دور HTTP محلی",
     "Local source did not respond": "منبع محلی پاسخ نداد",
     "Local source unavailable": "منبع محلی در دسترس نیست",
@@ -771,9 +774,16 @@ var keyStrings = {
     "Player info:": "اطلاعات پخش‌کننده:",
     "Playing: %1": "در حال پخش: %1",
     Playlist: "لیست پخش",
+    "Playlist contains unsupported sources":
+        "فهرست پخش شامل منابع پشتیبانی‌نشده است",
     "Playlist file": "فایل لیست پخش",
+    "Playlist is empty or invalid": "فهرست پخش خالی یا نامعتبر است",
     "Playlist is not loading directly...Loading via server...":
         "لیست پخش مستقیماً بارگیری نشد. در حال بارگیری از طریق سرور…",
+    "Playlist is too large": "فهرست پخش بیش از حد بزرگ است",
+    "Playlist local files must be dropped together with the playlist":
+        "فایل‌های محلی فهرست پخش باید همراه خود فهرست پخش رها شوند",
+    "Playlist must use UTF-8": "فهرست پخش باید از UTF-8 استفاده کند",
     "Playlist Name": "نام لیست پخش",
     "Playlist URL": "لیست پخش URL",
     Plex: "Plex",
