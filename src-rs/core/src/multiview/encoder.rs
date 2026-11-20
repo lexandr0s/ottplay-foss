@@ -1498,6 +1498,7 @@ mod runtime {
         lane: usize,
         phase: CapturePhase,
         target: Instant,
+        started: Instant,
         index: u64,
         finished: bool,
     }
@@ -1747,6 +1748,7 @@ mod runtime {
                 lane,
                 phase: state.phase,
                 target,
+                started: Instant::now(),
                 index,
                 finished: false,
             })
@@ -1889,6 +1891,16 @@ mod runtime {
             / rate;
         Ok(Duration::from_nanos(nanos))
     }
+    fn pacer_debt(lane: usize) -> EncoderFailureDetail {
+        EncoderFailureDetail::stalled(
+            EncoderFailureSite::PacerDebt,
+            if lane == 0 {
+                EncoderFailureLane::Video
+            } else {
+                EncoderFailureLane::Audio
+            },
+        )
+    }
     fn capture_debt(canvas: CanvasSpec, stall: Duration) -> Duration {
         Duration::from_nanos(2_000_000_000 / u64::from(canvas.fps))
             .min(Duration::from_millis(200))
@@ -1899,6 +1911,7 @@ mod runtime {
         rate: u32,
         bucket: u64,
         starts: u8,
+        last_start: Instant,
     }
     impl CapturePacer {
         fn new(epoch: Instant, rate: u32) -> Self {
@@ -1907,7 +1920,11 @@ mod runtime {
                 rate,
                 bucket: 0,
                 starts: 0,
+                last_start: Instant::now(),
             }
+        }
+        fn target(&self, index: u64) -> Result<Instant, EncoderError> {
+            media_target(self.epoch, index, self.rate)
         }
         fn permit_at(&mut self, now: Instant) -> Result<bool, EncoderError> {
             let elapsed = now
@@ -1963,11 +1980,18 @@ mod runtime {
                 sleep_until(next, shared);
             }
         }
+        /// A host that decodes or writes slower than the canvas rate is
+        /// backpressure, not a dead pacer. A late unit still starts: the
+        /// schedule, the published index and `complete`'s expected target stay
+        /// exact, so the capture keeps producing every unit in order, only
+        /// behind wall-clock. The failure stays for a pacer that has not
+        /// started any unit for `liveness`, which is what still names a stuck
+        /// writer instead of a merely slow host.
         fn wait_capture_start<'a>(
             &mut self,
             index: u64,
             target: Instant,
-            debt: Duration,
+            liveness: Duration,
             age_limit: Duration,
             shared: &Shared,
             startup: &'a CaptureStartup,
@@ -1987,35 +2011,15 @@ mod runtime {
                     thread::sleep((target - now).min(Duration::from_millis(2)));
                     continue;
                 }
-                if phase == CapturePhase::Steady && now.duration_since(target) > debt {
-                    return Err(EncoderFailureDetail::stalled(
-                        EncoderFailureSite::PacerDebt,
-                        if lane == 0 {
-                            EncoderFailureLane::Video
-                        } else {
-                            EncoderFailureLane::Audio
-                        },
-                    ));
+                if phase == CapturePhase::Steady && self.last_start.elapsed() > liveness {
+                    return Err(pacer_debt(lane));
                 }
                 if !self.permit_at(now)? {
                     thread::sleep(Duration::from_millis(2));
                     continue;
                 }
                 let reservation = startup.reserve(lane, index, target)?;
-                if reservation.phase == CapturePhase::Steady
-                    && Instant::now().duration_since(target) > debt
-                {
-                    let detail = EncoderFailureDetail::stalled(
-                        EncoderFailureSite::PacerDebt,
-                        if lane == 0 {
-                            EncoderFailureLane::Video
-                        } else {
-                            EncoderFailureLane::Audio
-                        },
-                    );
-                    reservation.fail(detail);
-                    return Err(detail);
-                }
+                self.last_start = Instant::now();
                 return Ok(reservation);
             }
         }
@@ -2350,7 +2354,6 @@ mod runtime {
         mut wait: impl FnMut(&mut W),
     ) {
         let generation = lock(&shared.snapshot).generation;
-        let debt = capture_debt(canvas, stall);
         let mut committed = None;
         let mut repeats = 0;
         let result = (|| -> Result<(), EncoderFailureDetail> {
@@ -2375,11 +2378,11 @@ mod runtime {
             let epoch = startup.finish(true, &shared)?;
             let mut pacer = CapturePacer::new(epoch, canvas.fps);
             let mut index = startup.video_units;
-            startup.publish_next(0, index, media_target(epoch, index, canvas.fps)?)?;
+            startup.publish_next(0, index, pacer.target(index)?)?;
             while !shared.stop.load(Ordering::Acquire) {
-                let target = media_target(epoch, index, canvas.fps)?;
+                let target = pacer.target(index)?;
                 let reservation = pacer
-                    .wait_capture_start(index, target, debt, age_limit, &shared, startup, 0)?;
+                    .wait_capture_start(index, target, stall, age_limit, &shared, startup, 0)?;
                 let lease = if reservation.phase == CapturePhase::Steady {
                     match feed.reserve_current_detail(
                         generation, index, target, age_limit, &committed, repeats,
@@ -2404,8 +2407,9 @@ mod runtime {
                 let absolute = if reservation.phase == CapturePhase::Initializing {
                     startup.deadline
                 } else {
-                    target
-                        .checked_add(debt)
+                    reservation
+                        .started
+                        .checked_add(stall)
                         .ok_or(EncoderError::InvalidConfig)?
                 };
                 let written = match lease.as_ref().map(|lease| &lease.frame.pixels) {
@@ -2468,7 +2472,7 @@ mod runtime {
                 }
                 shared.video_frames_written.fetch_add(1, Ordering::Relaxed);
                 index = next;
-                reservation.complete(index, media_target(epoch, index, canvas.fps)?)?;
+                reservation.complete(index, pacer.target(index)?)?;
             }
             Ok(())
         })();
@@ -2498,7 +2502,6 @@ mod runtime {
         shared: Arc<Shared>,
         mut wait: impl FnMut(&mut W),
     ) {
-        let debt = capture_debt(canvas, stall);
         let result = (|| -> Result<(), EncoderFailureDetail> {
             let startup = shared
                 .capture_startup
@@ -2525,11 +2528,11 @@ mod runtime {
             let age_limit = capture_age_limit(canvas)?;
             let mut pacer = CapturePacer::new(epoch, 50);
             let mut index = startup.audio_units;
-            startup.publish_next(1, index, media_target(epoch, index, 50)?)?;
+            startup.publish_next(1, index, pacer.target(index)?)?;
             while !shared.stop.load(Ordering::Acquire) {
-                let target = media_target(epoch, index, 50)?;
+                let target = pacer.target(index)?;
                 let reservation = pacer
-                    .wait_capture_start(index, target, debt, age_limit, &shared, startup, 1)?;
+                    .wait_capture_start(index, target, stall, age_limit, &shared, startup, 1)?;
                 let mut bytes = [0u8; 3840];
                 if reservation.phase == CapturePhase::Steady {
                     let samples = feed.at(target);
@@ -2545,8 +2548,9 @@ mod runtime {
                 let absolute = if initializing {
                     startup.deadline
                 } else {
-                    target
-                        .checked_add(debt)
+                    reservation
+                        .started
+                        .checked_add(stall)
                         .ok_or(EncoderError::InvalidConfig)?
                 };
                 let written = write_capture_complete_detail_with_wait(
@@ -2576,7 +2580,7 @@ mod runtime {
                     .audio_samples_written
                     .fetch_add(1920, Ordering::Relaxed);
                 index = index.checked_add(1).ok_or(EncoderError::InvalidConfig)?;
-                reservation.complete(index, media_target(epoch, index, 50)?)?;
+                reservation.complete(index, pacer.target(index)?)?;
             }
             Ok(())
         })();
@@ -4731,6 +4735,38 @@ mod runtime {
         }
 
         #[test]
+        fn late_unit_keeps_capturing_without_breaking_the_schedule() {
+            let now = Instant::now();
+            let target = now - Duration::from_millis(201);
+            let feed = Arc::new(CaptureVideoFeed::new(
+                Arc::from(vec![0; 12]),
+                fence(0),
+                target,
+            ));
+            feed.bind(1).unwrap();
+            let warm = isolated_capture_shared(target, feed, true);
+            let startup = warm.capture_startup.as_ref().unwrap();
+            startup.publish_next(0, 1, target).unwrap();
+            let mut pacer = CapturePacer::new(target - startup.quantum, 10);
+            let reservation = pacer
+                .wait_capture_start(
+                    1,
+                    target,
+                    Duration::from_secs(2),
+                    Duration::from_millis(200),
+                    &warm,
+                    startup,
+                    0,
+                )
+                .expect("a late but progressing pacer keeps capturing");
+            assert_eq!(reservation.phase, CapturePhase::Steady);
+            assert!(lock(&warm.error).is_none());
+            reservation
+                .complete(2, pacer.target(2).unwrap())
+                .expect("the schedule stays exact for a late unit");
+        }
+
+        #[test]
         fn actual_capture_write_and_pacer_report_origin_without_changing_priority() {
             let now = Instant::now();
             let shared = shared_at(now);
@@ -4785,7 +4821,10 @@ mod runtime {
             let warm = isolated_capture_shared(target, feed, true);
             let startup = warm.capture_startup.as_ref().unwrap();
             startup.publish_next(0, 1, target).unwrap();
-            let mut pacer = CapturePacer::new(target - startup.quantum, 10);
+            let mut pacer = CapturePacer {
+                last_start: Instant::now() - Duration::from_millis(250),
+                ..CapturePacer::new(target - startup.quantum, 10)
+            };
             let debt = pacer
                 .wait_capture_start(
                     1,
@@ -5468,7 +5507,7 @@ mod runtime {
             assert!(bytes[24] != bytes[48]);
         }
         #[test]
-        fn production_capture_video_writer_terminates_pressure_beyond_debt_bound() {
+        fn production_capture_video_writer_terminates_pressure_beyond_stall_window() {
             let epoch = Instant::now();
             let feed = Arc::new(CaptureVideoFeed::new(
                 Arc::from(vec![0; 12]),
@@ -5480,7 +5519,7 @@ mod runtime {
             let accepted = Arc::new(Mutex::new(Vec::new()));
             let writer = PressureWriter {
                 blocked_until: epoch,
-                inject_after: Some((12, Duration::from_millis(350))),
+                inject_after: Some((12, Duration::from_millis(1_500))),
                 frame_bytes: 12,
                 accepted: accepted.clone(),
                 stop_after: 5,
