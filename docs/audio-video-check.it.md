@@ -49,7 +49,7 @@ Il lettore usa questo indirizzo HTTPS assoluto:
 
 Richiede il filmato solo quando si sceglie **Riproduci**, mai come precaricamento all'avvio. Il file è di **464 652 byte**, con video H.264 baseline a 640×360 / 25 fps e audio stereo AAC. È escluso dai pacchetti Web, OTTPlay Server, Tauri, Capacitor e container. Il [file sorgente](../diagnostics/av-v1.mp4), il generatore e il verificatore restano nel repository; non sono un'alternativa offline nel lettore installato.
 
-Servono accesso a Internet e una connessione HTTPS funzionante verso quell'host. Non esistono un'alternativa inclusa o un altro URL diagnostico. Aprire il collegamento nel browser aiuta a controllare la disponibilità del file, ma non esercita la proprietà del decoder del lettore o il ritorno al canale. Il servizio di hosting riceve le normali informazioni di connessione; vedere i [dettagli sulla privacy](privacy-policy.md#optional-hosted-audio-video-check).
+Servono accesso a Internet e una connessione HTTPS funzionante verso quell'host. Non esistono un'alternativa inclusa o un altro URL diagnostico. Aprire il collegamento nel browser aiuta a controllare la disponibilità del file, ma non esercita la proprietà del decoder del lettore o il ritorno al canale. Il servizio di hosting riceve le normali informazioni di connessione; vedere i [dettagli sulla privacy](privacy-policy.md#optional-hosted-audiovideo-check).
 
 <a id="how-playback-returns"></a>
 

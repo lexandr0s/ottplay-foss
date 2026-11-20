@@ -49,7 +49,7 @@ Přehrávač používá tuto absolutní adresu HTTPS:
 
 Klip požaduje pouze po volbě **Přehrát**, nikdy jako přednačítání při spuštění. Soubor má **464 652 bajtů**, video H.264 baseline 640×360 / 25 fps a stereofonní zvuk AAC. Je vyloučen z balíčků Web, OTTPlay Server, Tauri, Capacitor a kontejnerů. [Zdrojový soubor](../diagnostics/av-v1.mp4), generátor a ověřovač zůstávají v repozitáři; nejsou offline náhradou v nainstalovaném přehrávači.
 
-Je nutný internet a funkční spojení HTTPS s tímto hostitelem. Není přibalena záloha ani alternativní diagnostické URL. Otevření odkazu v prohlížeči může ověřit dostupnost souboru, ale netestuje vlastnictví dekodéru přehrávače ani návrat ke kanálu. Hostingová služba dostává běžné údaje o spojení; viz [podrobnosti o soukromí](privacy-policy.md#optional-hosted-audio-video-check).
+Je nutný internet a funkční spojení HTTPS s tímto hostitelem. Není přibalena záloha ani alternativní diagnostické URL. Otevření odkazu v prohlížeči může ověřit dostupnost souboru, ale netestuje vlastnictví dekodéru přehrávače ani návrat ke kanálu. Hostingová služba dostává běžné údaje o spojení; viz [podrobnosti o soukromí](privacy-policy.md#optional-hosted-audiovideo-check).
 
 <a id="how-playback-returns"></a>
 

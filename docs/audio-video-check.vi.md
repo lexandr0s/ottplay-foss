@@ -49,7 +49,7 @@ Trình phát dùng địa chỉ HTTPS tuyệt đối này:
 
 Nó chỉ yêu cầu đoạn phim khi chọn **Phát**, không bao giờ tải trước lúc khởi động. Tệp có **464 652 byte**, video H.264 baseline 640×360 / 25 fps và âm thanh AAC stereo. Tệp bị loại khỏi các gói Web, OTTPlay Server, Tauri, Capacitor và container. [Tệp nguồn](../diagnostics/av-v1.mp4), trình tạo và trình xác minh vẫn nằm trong kho; chúng không phải phương án dự phòng ngoại tuyến trong trình phát đã cài.
 
-Cần Internet và kết nối HTTPS hoạt động tới máy chủ đó. Không có bản dự phòng đi kèm hoặc URL chẩn đoán thay thế. Mở liên kết trên trong trình duyệt giúp kiểm tra tệp có sẵn, nhưng không kiểm tra quyền sở hữu bộ giải mã của trình phát hay hành vi trở lại kênh. Dịch vụ lưu trữ nhận thông tin kết nối thông thường; xem [chi tiết quyền riêng tư](privacy-policy.md#optional-hosted-audio-video-check).
+Cần Internet và kết nối HTTPS hoạt động tới máy chủ đó. Không có bản dự phòng đi kèm hoặc URL chẩn đoán thay thế. Mở liên kết trên trong trình duyệt giúp kiểm tra tệp có sẵn, nhưng không kiểm tra quyền sở hữu bộ giải mã của trình phát hay hành vi trở lại kênh. Dịch vụ lưu trữ nhận thông tin kết nối thông thường; xem [chi tiết quyền riêng tư](privacy-policy.md#optional-hosted-audiovideo-check).
 
 <a id="how-playback-returns"></a>
 

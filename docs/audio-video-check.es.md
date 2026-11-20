@@ -49,7 +49,7 @@ El reproductor utiliza esta dirección HTTPS absoluta:
 
 Solicita el clip solo cuando elige **Reproducir**, nunca como precarga al iniciar. El archivo tiene **464 652 bytes**, vídeo H.264 baseline a 640×360 / 25 fps y audio estéreo AAC. Se excluye de los paquetes Web, OTTPlay Server, Tauri, Capacitor y contenedores. El [archivo fuente](../diagnostics/av-v1.mp4), el generador y el verificador permanecen en el repositorio; no son una alternativa sin conexión en el reproductor instalado.
 
-Se necesita acceso a Internet y una conexión HTTPS funcional con ese host. No existe una alternativa incluida ni otra URL de diagnóstico. Abrir el enlace anterior en un navegador ayuda a comprobar la disponibilidad del archivo, pero no ejercita la propiedad del decodificador ni el retorno al canal del reproductor. El alojamiento recibe la información habitual de conexión; consulte los [detalles de privacidad](privacy-policy.md#optional-hosted-audio-video-check).
+Se necesita acceso a Internet y una conexión HTTPS funcional con ese host. No existe una alternativa incluida ni otra URL de diagnóstico. Abrir el enlace anterior en un navegador ayuda a comprobar la disponibilidad del archivo, pero no ejercita la propiedad del decodificador ni el retorno al canal del reproductor. El alojamiento recibe la información habitual de conexión; consulte los [detalles de privacidad](privacy-policy.md#optional-hosted-audiovideo-check).
 
 <a id="how-playback-returns"></a>
 

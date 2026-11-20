@@ -49,7 +49,7 @@ Le lecteur utilise cette adresse HTTPS absolue :
 
 Il demande le clip uniquement quand vous choisissez **Lecture**, jamais en préchargement au démarrage. Le fichier fait **464 652 octets**, avec une vidéo H.264 baseline à 640×360 / 25 fps et un son AAC stéréo. Il est exclu des paquets Web, OTTPlay Server, Tauri, Capacitor et des conteneurs. Le [fichier source](../diagnostics/av-v1.mp4), le générateur et le vérificateur restent dans le dépôt ; ils ne constituent pas un secours hors ligne dans le lecteur installé.
 
-Un accès Internet et une connexion HTTPS fonctionnelle à cet hôte sont nécessaires. Il n'existe ni secours intégré ni autre URL de diagnostic. Ouvrir le lien dans un navigateur peut vérifier la disponibilité du fichier, mais ne teste ni la possession du décodeur par le lecteur ni le retour à la chaîne. L'hébergeur reçoit les informations de connexion habituelles ; voir les [détails de confidentialité](privacy-policy.md#optional-hosted-audio-video-check).
+Un accès Internet et une connexion HTTPS fonctionnelle à cet hôte sont nécessaires. Il n'existe ni secours intégré ni autre URL de diagnostic. Ouvrir le lien dans un navigateur peut vérifier la disponibilité du fichier, mais ne teste ni la possession du décodeur par le lecteur ni le retour à la chaîne. L'hébergeur reçoit les informations de connexion habituelles ; voir les [détails de confidentialité](privacy-policy.md#optional-hosted-audiovideo-check).
 
 <a id="how-playback-returns"></a>
 

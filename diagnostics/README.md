@@ -31,7 +31,7 @@ Published v1 identity:
 
 This is original synthetic media under the repository's [MIT license](../LICENSE).
 Unlike the silent onboarding moving-pattern demo, it contains audible stereo.
-See the [hosting privacy details](../docs/privacy-policy.md#optional-hosted-audio-video-check).
+See the [hosting privacy details](../docs/privacy-policy.md#optional-hosted-audiovideo-check).
 
 ## Expected picture and sound
 

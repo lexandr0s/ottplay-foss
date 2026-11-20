@@ -49,7 +49,7 @@ De speler gebruikt dit absolute HTTPS-adres:
 
 Hij vraagt het fragment alleen op wanneer u **Afspelen** kiest, nooit als vooraf laden bij het starten. Het bestand is **464 652 bytes**, met H.264-baselinevideo van 640×360 / 25 fps en AAC-stereogeluid. Het is uitgesloten van de Web-, OTTPlay Server-, Tauri-, Capacitor- en containerpakketten. Het [bronbestand](../diagnostics/av-v1.mp4), de generator en de verificatie blijven in de repository; ze zijn geen offline terugval in de geïnstalleerde speler.
 
-Internettoegang en een werkende HTTPS-verbinding met die host zijn vereist. Er is geen meegeleverde terugval of alternatieve diagnose-URL. De link openen in een browser kan de beschikbaarheid controleren, maar test niet het decodereigenaarschap van de speler of de terugkeer naar een zender. De hostingdienst ontvangt normale verbindingsinformatie; zie de [privacydetails](privacy-policy.md#optional-hosted-audio-video-check).
+Internettoegang en een werkende HTTPS-verbinding met die host zijn vereist. Er is geen meegeleverde terugval of alternatieve diagnose-URL. De link openen in een browser kan de beschikbaarheid controleren, maar test niet het decodereigenaarschap van de speler of de terugkeer naar een zender. De hostingdienst ontvangt normale verbindingsinformatie; zie de [privacydetails](privacy-policy.md#optional-hosted-audiovideo-check).
 
 <a id="how-playback-returns"></a>
 

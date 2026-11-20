@@ -49,7 +49,7 @@
 
 只有选择**播放**才会请求短片，启动时绝不预加载。文件大小为 **464 652 字节**，视频为 H.264 baseline、640×360 / 25 fps，音频为 AAC 立体声。该文件不包含在 Web、OTTPlay Server、Tauri、Capacitor 或容器软件包中。[源文件](../diagnostics/av-v1.mp4)、生成器和验证器保留在仓库里，但不是已安装播放器的离线备用方案。
 
-需要互联网访问以及到该主机的正常 HTTPS 连接。没有内置备用文件或替代诊断 URL。在浏览器中打开上述链接可以帮助检查文件是否可用，但不会验证播放器的解码器所有权或返回频道行为。托管服务会接收普通连接信息；参见[隐私详情](privacy-policy.md#optional-hosted-audio-video-check)。
+需要互联网访问以及到该主机的正常 HTTPS 连接。没有内置备用文件或替代诊断 URL。在浏览器中打开上述链接可以帮助检查文件是否可用，但不会验证播放器的解码器所有权或返回频道行为。托管服务会接收普通连接信息；参见[隐私详情](privacy-policy.md#optional-hosted-audiovideo-check)。
 
 <a id="how-playback-returns"></a>
 
