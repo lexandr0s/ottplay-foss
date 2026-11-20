@@ -1906,6 +1906,20 @@ mod runtime {
             .min(Duration::from_millis(200))
             .min(stall)
     }
+    /// How long one unit may spend in the writer once the host has completed
+    /// one write. Two canvas periods stay the floor, which is the tolerance a
+    /// healthy host always had, and a host that writes below the canvas rate
+    /// gets twice its last completed write so a merely slow writer is not named
+    /// as stalled. The result never exceeds one stall window, and the caller
+    /// starts at that window only for the single write it has not measured yet,
+    /// so the allowance narrows to the host's real write cost instead of
+    /// hiding a hung writer behind a full stall window for every unit.
+    fn write_budget(canvas: CanvasSpec, stall: Duration, observed: Option<Duration>) -> Duration {
+        let floor = capture_debt(canvas, stall);
+        observed.map_or(stall, |elapsed| {
+            elapsed.saturating_mul(2).clamp(floor, stall)
+        })
+    }
     struct CapturePacer {
         epoch: Instant,
         rate: u32,
@@ -2378,6 +2392,7 @@ mod runtime {
             let epoch = startup.finish(true, &shared)?;
             let mut pacer = CapturePacer::new(epoch, canvas.fps);
             let mut index = startup.video_units;
+            let mut budget = stall;
             startup.publish_next(0, index, pacer.target(index)?)?;
             while !shared.stop.load(Ordering::Acquire) {
                 let target = pacer.target(index)?;
@@ -2409,7 +2424,7 @@ mod runtime {
                 } else {
                     reservation
                         .started
-                        .checked_add(stall)
+                        .checked_add(budget)
                         .ok_or(EncoderError::InvalidConfig)?
                 };
                 let written = match lease.as_ref().map(|lease| &lease.frame.pixels) {
@@ -2456,6 +2471,11 @@ mod runtime {
                     reservation.fail(error);
                     return Err(error);
                 }
+                budget = write_budget(
+                    canvas,
+                    stall,
+                    Some(Instant::now().saturating_duration_since(reservation.started)),
+                );
                 let next = index.checked_add(1).ok_or(EncoderError::InvalidConfig)?;
                 if let Some(lease) = lease {
                     match feed.commit_full(lease, &mut committed, &mut repeats) {
@@ -2528,6 +2548,7 @@ mod runtime {
             let age_limit = capture_age_limit(canvas)?;
             let mut pacer = CapturePacer::new(epoch, 50);
             let mut index = startup.audio_units;
+            let mut budget = stall;
             startup.publish_next(1, index, pacer.target(index)?)?;
             while !shared.stop.load(Ordering::Acquire) {
                 let target = pacer.target(index)?;
@@ -2550,7 +2571,7 @@ mod runtime {
                 } else {
                     reservation
                         .started
-                        .checked_add(stall)
+                        .checked_add(budget)
                         .ok_or(EncoderError::InvalidConfig)?
                 };
                 let written = write_capture_complete_detail_with_wait(
@@ -2576,6 +2597,11 @@ mod runtime {
                     reservation.fail(error);
                     return Err(error);
                 }
+                budget = write_budget(
+                    canvas,
+                    stall,
+                    Some(Instant::now().saturating_duration_since(reservation.started)),
+                );
                 shared
                     .audio_samples_written
                     .fetch_add(1920, Ordering::Relaxed);
@@ -5420,6 +5446,29 @@ mod runtime {
             );
             assert!(media_target(epoch, u64::MAX, 1).is_err());
         }
+        #[test]
+        fn write_budget_follows_the_measured_write_without_covering_the_stall_window() {
+            let stall = Duration::from_secs(1);
+            // Unmeasured: one stall window, never a guess smaller than the
+            // write that is already running.
+            assert_eq!(write_budget(tiny_canvas(), stall, None), stall);
+            // A healthy write keeps the two-period debt floor.
+            assert_eq!(
+                write_budget(tiny_canvas(), stall, Some(Duration::from_millis(1))),
+                Duration::from_millis(200)
+            );
+            // A slow writer earns twice what it actually took.
+            assert_eq!(
+                write_budget(tiny_canvas(), stall, Some(Duration::from_millis(120))),
+                Duration::from_millis(240)
+            );
+            // A writer that already needs most of the window never gets more
+            // than the window, so a hang cannot inherit an unbounded deadline.
+            assert_eq!(
+                write_budget(tiny_canvas(), stall, Some(Duration::from_millis(900))),
+                stall
+            );
+        }
         struct PressureWriter {
             blocked_until: Instant,
             inject_after: Option<(usize, Duration)>,
@@ -5441,6 +5490,42 @@ mod runtime {
                     return Err(io::ErrorKind::WouldBlock.into());
                 }
                 let count = bytes.len().min(7);
+                let mut accepted = lock(&self.accepted);
+                accepted.extend_from_slice(&bytes[..count]);
+                if self
+                    .frame_bytes
+                    .checked_mul(self.stop_after)
+                    .is_some_and(|limit| accepted.len() >= limit)
+                {
+                    self.stop.store(true, Ordering::Release);
+                }
+                Ok(count)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        // A host that cannot keep up with the writer: bytes leave at a fixed
+        // rate, so every unit costs more than its schedule slot and the loop
+        // falls further behind with each unit.
+        struct ThrottledWriter {
+            start: Instant,
+            bytes_per_second: u64,
+            written: usize,
+            frame_bytes: usize,
+            accepted: Arc<Mutex<Vec<u8>>>,
+            stop_after: usize,
+            stop: Arc<AtomicBool>,
+        }
+        impl Write for ThrottledWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                let elapsed = self.start.elapsed().as_millis() as u64;
+                let allowed = (elapsed.saturating_mul(self.bytes_per_second) / 1000) as usize;
+                if allowed <= self.written {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                let count = (allowed - self.written).min(bytes.len());
+                self.written += count;
                 let mut accepted = lock(&self.accepted);
                 accepted.extend_from_slice(&bytes[..count]);
                 if self
@@ -5590,6 +5675,57 @@ mod runtime {
                 assert!(block
                     .chunks_exact(2)
                     .all(|pair| i16::from_le_bytes([pair[0], pair[1]]) == index as i16 + 1));
+            }
+        }
+        #[test]
+        fn production_capture_audio_writer_keeps_capturing_on_a_throttled_host() {
+            let epoch = Instant::now();
+            let feed = Arc::new(CaptureVideoFeed::new(
+                Arc::from(vec![0; 12]),
+                fence(0),
+                epoch,
+            ));
+            feed.bind(1).unwrap();
+            let shared = isolated_capture_shared(epoch, feed, false);
+            let ticks = Arc::new(Mutex::new(Vec::new()));
+            let recorded = ticks.clone();
+            let audio = AudioInput::Timed(Arc::new(move |tick| {
+                lock(&recorded).push(tick);
+                vec![7; 1920]
+            }));
+            let accepted = Arc::new(Mutex::new(Vec::new()));
+            // 3840 bytes per 80 ms is four times slower than the 20 ms mixer
+            // tick, so the writer falls one full capture debt behind and keeps
+            // falling. The per-unit debt bound used to name this as PacerDebt
+            // after a few units even though every unit was still landing.
+            let writer = ThrottledWriter {
+                start: Instant::now(),
+                bytes_per_second: 48_000,
+                written: 0,
+                frame_bytes: 3840,
+                accepted: accepted.clone(),
+                stop_after: 13,
+                stop: shared.stop.clone(),
+            };
+            capture_audio_loop(
+                writer,
+                audio,
+                tiny_canvas(),
+                Duration::from_secs(1),
+                shared.clone(),
+            );
+            assert!(lock(&shared.error).is_none());
+            assert_eq!(
+                shared.audio_samples_written.load(Ordering::Relaxed),
+                13 * 1920
+            );
+            assert_eq!(lock(&accepted).len(), 13 * 3840);
+            let startup = shared.capture_startup.as_ref().unwrap();
+            let common = lock(&startup.state).epoch.unwrap();
+            let ticks = lock(&ticks);
+            // Sample continuity survives a host that runs the lane late.
+            for (index, tick) in ticks.iter().enumerate() {
+                assert_eq!(*tick, media_target(common, 5 + index as u64, 50).unwrap());
             }
         }
         #[test]
