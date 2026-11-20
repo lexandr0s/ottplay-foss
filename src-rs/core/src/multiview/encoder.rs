@@ -2909,6 +2909,40 @@ mod runtime {
         }
         Ok(Some(playlist))
     }
+    /// The monitor's own liveness. Either the encoder's consumed-frame count or
+    /// a completed writer unit is evidence that the chain still moves: a writer
+    /// only completes a unit once the pipe accepted the bytes, and a pipe only
+    /// drains while the encoder reads. A starved monitor thread or a descheduled
+    /// encoder must therefore not be reported as a stuck muxer, while a muxer
+    /// that stops reading blocks the writer and does stop this counter.
+    struct MonitorLiveness {
+        frames: u64,
+        completed: u64,
+        advanced: Instant,
+    }
+    impl MonitorLiveness {
+        fn new(at: Instant) -> Self {
+            Self {
+                frames: 0,
+                completed: 0,
+                advanced: at,
+            }
+        }
+        /// Video frames and audio samples share one completed count because
+        /// both pipes drain only through the same encoder process.
+        fn observe(&mut self, frames: u64, completed: u64, now: Instant) -> bool {
+            let moved = frames > self.frames || completed > self.completed;
+            self.frames = self.frames.max(frames);
+            self.completed = self.completed.max(completed);
+            if moved {
+                self.advanced = now;
+            }
+            moved
+        }
+        fn elapsed(&self, now: Instant) -> Duration {
+            now.saturating_duration_since(self.advanced)
+        }
+    }
     fn monitor(
         mut child: ChildGuard,
         _keeper: File,
@@ -2917,8 +2951,7 @@ mod runtime {
         config: EncoderConfig,
         shared: Arc<Shared>,
     ) {
-        let mut last = 0;
-        let mut advanced = shared.started;
+        let mut liveness = MonitorLiveness::new(shared.started);
         let mut pending = Vec::new();
         let mut hls_sequence = None;
         let mut hls_advanced = shared.started;
@@ -2945,10 +2978,9 @@ mod runtime {
             }
             match progress(&mut progress_reader, &mut pending) {
                 Ok(frames) => {
-                    if frames > last {
-                        last = frames;
-                        advanced = Instant::now();
-                    }
+                    let completed = shared.video_frames_written.load(Ordering::Relaxed)
+                        + shared.audio_samples_written.load(Ordering::Relaxed);
+                    liveness.observe(frames, completed, Instant::now());
                     let mut snapshot = lock(&shared.snapshot);
                     snapshot.frames = snapshot.frames.max(frames);
                     snapshot.monotonic_millis = elapsed_millis(shared.started);
@@ -3002,7 +3034,7 @@ mod runtime {
                 fail(&shared, EncoderError::StartupTimeout);
                 break;
             }
-            if !starting && advanced.elapsed() >= config.stall_timeout {
+            if !starting && liveness.elapsed(Instant::now()) >= config.stall_timeout {
                 fail(
                     &shared,
                     EncoderFailureDetail::stalled(
@@ -5380,6 +5412,28 @@ mod runtime {
                 Duration::from_nanos(66_666_666)
             );
             assert!(media_target(epoch, u64::MAX, 1).is_err());
+        }
+        #[test]
+        fn monitor_liveness_counts_completed_writes_not_only_encoder_progress() {
+            let start = Instant::now();
+            let mut liveness = MonitorLiveness::new(start);
+            // Only the writer moves: the encoder is behind, not stopped.
+            assert!(liveness.observe(0, 1, start + Duration::from_millis(300)));
+            assert_eq!(
+                liveness.elapsed(start + Duration::from_millis(300)),
+                Duration::ZERO
+            );
+            // Only the encoder moves: the writer is momentarily blocked.
+            assert!(liveness.observe(1, 1, start + Duration::from_millis(400)));
+            // Neither moves: the window keeps running from the last progress.
+            assert!(!liveness.observe(1, 1, start + Duration::from_millis(900)));
+            assert_eq!(
+                liveness.elapsed(start + Duration::from_secs(1)),
+                Duration::from_millis(600)
+            );
+            // Counters never go backwards, so a duplicate is not progress.
+            assert!(!liveness.observe(0, 0, start + Duration::from_secs(1)));
+            assert!(liveness.observe(2, 3, start + Duration::from_secs(1)));
         }
         struct PressureWriter {
             blocked_until: Instant,
