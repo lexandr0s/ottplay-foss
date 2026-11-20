@@ -24,7 +24,7 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-SUPPORTED_CLI = "2.12.4"
+SUPPORTED_CLI = "2.12.6"
 BUNDLE_MARKER = b"__TAURI_BUNDLE_TYPE_VAR_UNK"
 BUNDLE_MARKERS = {"nsis": b"__TAURI_BUNDLE_TYPE_VAR_NSS",
                   "msi": b"__TAURI_BUNDLE_TYPE_VAR_MSI"}
@@ -36,7 +36,7 @@ BUNDLER_SOURCE = ("https://github.com/tauri-apps/tauri/blob/"
 def payload_references(raw, cli_version):
     """Derive exact unsigned package bytes using the reviewed bundler transform.
 
-    CLI 2.12.4 patches the unique marker for each format, then restores the raw
+    CLI 2.12.6 patches the unique marker for each format, then restores the raw
     executable. Never normalize or mutate installed bytes for comparison.
     """
     require(cli_version == SUPPORTED_CLI, "Review bundle transformation for this CLI version")

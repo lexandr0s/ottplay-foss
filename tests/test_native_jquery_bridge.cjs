@@ -21,9 +21,10 @@ function compile(file) {
 }
 const helper = compile("src/plugins/jquery-bridge.ts");
 acorn.parse(helper, { ecmaVersion: 5 });
+const jqueryVersion = require("../package.json").dependencies.jquery;
 const variants = [
     ["js/jquery-1.11.1.min.js", "1.11.1"],
-    ["node_modules/jquery/dist/jquery.min.js", "4.0.0"],
+    ["node_modules/jquery/dist/jquery.min.js", jqueryVersion],
 ];
 
 function fixture(file, expectedVersion) {
